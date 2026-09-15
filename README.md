@@ -28,14 +28,14 @@ Loading stays paused. AirPlayer may briefly attempt muted playback to establish 
 Install the optional helpers for website playback:
 
 ```bash
-brew install yt-dlp deno
+brew install yt-dlp deno ffmpeg
 ```
 
-Paste a single public, on-demand YouTube watch, Shorts, or `youtu.be` link in the same field, or pass it to `airplayer open`. AirPlayer shows **Finding video…** while yt-dlp extracts metadata, then loads a combined H.264/AAC MP4 or HLS source paused when one is available. Direct video URLs work without these helpers.
+Paste a single public, on-demand YouTube watch, Shorts, or `youtu.be` link in the same field, or pass it to `airplayer open`. AirPlayer shows **Finding video…** while yt-dlp extracts metadata. It prefers a combined H.264/AAC MP4 or HLS source. If only suitable separate MP4/M4A tracks are available, it shows **Preparing video…**, copies them into a temporary MP4 without re-encoding, and serves the finished file to the receiver. Loading stays paused. Directly playable video URLs work without these helpers.
 
-Some videos only offer separate tracks, incompatible codecs, or request headers that require delivery through the Mac. These produce a preparation-required message; remuxing and transcoding are not implemented yet. Live streams, playlists, sign-in/cookies, and other websites are outside this first resolver slice. Video links with playlist context load only the named video. Local extraction does not establish receiver picture or sound.
+Some videos offer incompatible codecs, fragmented delivery, or custom request headers that this preparation path cannot handle. These produce a limitation message. Transcoding is not implemented. Live streams, playlists, sign-in/cookies, and other websites are outside this first resolver slice. Video links with playlist context load only the named video. Local extraction does not establish receiver picture or sound.
 
-The app finds helpers in standard Homebrew locations even when launched from Finder. For development, set `AIRPLAYER_YTDLP` and `AIRPLAYER_DENO` to absolute executable paths **in the app's launch environment**. Setting them only on a CLI command does not change an already-running app. Keep yt-dlp and its JavaScript support current; see [yt-dlp's runtime requirements](https://github.com/yt-dlp/yt-dlp/wiki/EJS). Helpers are not bundled yet.
+The app finds helpers in standard Homebrew locations even when launched from Finder. For development, set `AIRPLAYER_YTDLP`, `AIRPLAYER_DENO`, `AIRPLAYER_FFMPEG`, and `AIRPLAYER_FFPROBE` to absolute executable paths **in the app's launch environment**. Setting them only on a CLI command does not change an already-running app. Keep yt-dlp and its JavaScript support current; see [yt-dlp's runtime requirements](https://github.com/yt-dlp/yt-dlp/wiki/EJS). Helpers are not bundled yet.
 
 ## Command line
 
@@ -51,7 +51,7 @@ The app finds helpers in standard Homebrew locations even when launched from Fin
 
 `open` and `show` launch the app if necessary. Select the receiver through the UI; selection by name is not supported. `open` loads paused. `seek` takes absolute seconds within the available timeline. All commands accept `--json`; `pending: true` means an operation was accepted, so query `status` for its observed result. `hasAudio`, when present, describes the source's audio tracks, not audible output at the TV. Streaming track information can arrive after readiness; unknown audio status is omitted rather than reported as silence.
 
-`status --json` includes `errorReason` when a media failure is diagnosed: network, unavailable source, unreadable media, missing video, protected media, or unsupported external playback. Website failures additionally distinguish missing helpers, resolution failure/timeout, unsupported pages, and required media preparation. Unclassified player failures remain `load_failed` or `playback_interrupted`; messages omit underlying URLs and request details. During extraction, the existing `loading` state has an optional `loadingPhase: "resolving"` field.
+`status --json` includes `errorReason` when a media failure is diagnosed: network, unavailable source, unreadable media, missing video, protected media, or unsupported external playback. Website failures additionally distinguish missing helpers, resolution failure/timeout, unsupported pages, and required media preparation. Unclassified player failures remain `load_failed` or `playback_interrupted`; messages omit underlying URLs and request details. During extraction or preparation, the existing `loading` state has an optional `loadingPhase` field (`resolving` or `preparing`). Preparation failures distinguish missing helpers, limits, processing failure, and local delivery failure.
 
 The CLI is also bundled at `AirPlayer.app/Contents/MacOS/airplayer`. Set `AIRPLAYER_APP` to the app's path if needed. Commands operate in the logged-in desktop session.
 
@@ -67,12 +67,16 @@ The CLI is also bundled at `AirPlayer.app/Contents/MacOS/airplayer`. Set `AIRPLA
 ## Supported sources and limitations
 
 - Direct HTTP/HTTPS video supported by AVFoundation and the receiver; MP4 and HLS are the initial formats. Other extensions are accepted too; file extension alone does not establish compatibility. Native loading does not prove receiver playback.
-- Sources need their own audio track or HLS audio rendition. The app warns about detected video-only sources and does not combine separate audio/video URLs.
-- Website extraction is limited to the experimental YouTube path above. Remuxing, transcoding, custom headers/cookies, DRM integrations, and local-file input are not implemented.
+- Direct sources need their own audio track or HLS audio rendition. The app warns about detected video-only sources. Website extraction can combine compatible separate tracks; there is no manual two-URL input.
+- Website extraction is limited to the experimental YouTube path above. After a native format failure, the app can also remux suitable H.264/AAC in MKV into MP4. Transcoding, custom headers/cookies, DRM integrations, and local-file input are not implemented.
 - Audio-only AirPlay speakers cannot display video. Television/receiver controls own volume.
 - Apple TV Remote integration uses public Now Playing and remote-command APIs; actual receiver behavior remains subject to hardware testing.
 
-Stop and URL replacement cancel extraction, including its JavaScript process. A source reported unavailable during initial website loading gets one re-resolution attempt; established playback is never automatically restarted. Load the original link again if it later expires.
+Stop and URL replacement cancel extraction/preparation, stop the session’s media server, and remove its temporary file. A source reported unavailable during initial website loading gets one re-resolution attempt; established playback is never automatically restarted. Load the original link again if it later expires.
+
+Preparation currently accepts finite media up to four hours, with H.264 SDR video up to 1080p/60 and AAC-LC mono/stereo audio. It allows at most 2 GiB of prepared media and ten minutes of remux processing, requires disk headroom, and finishes the file before playback. These are conservative preparation limits, not receiver compatibility guarantees. Direct playback retains its existing native capabilities.
+
+Prepared media is served on the Mac’s active Wi-Fi/Ethernet IPv4 address and an ephemeral port, through a random session URL. The Mac and receiver need network connectivity to one another; allow AirPlayer through the macOS firewall/local-network prompt if shown. Network changes may require loading again. Multi-interface setups can set `AIRPLAYER_MEDIA_HOST` to the Mac’s receiver-reachable IPv4 address in the app’s environment. Do not use `127.0.0.1` for a receiver. Prepared files are removed on Stop, replacement, failure, and Quit; abandoned preparation files are cleaned on the next launch.
 
 The app stores no media history or pairing credentials of its own. Media URLs stay in memory and are omitted from status and errors; shell history is managed by your shell. macOS manages pairing and may save window geometry.
 

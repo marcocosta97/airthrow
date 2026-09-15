@@ -157,9 +157,7 @@ base = f'http://{args.bind}:{server.server_port}'
 try:
     binary = out / 'MediaChecks'
     run(['swiftc', '-swift-version', '6', '-parse-as-library',
-         ROOT / 'Sources/AirPlayerCore/Protocol.swift',
-         ROOT / 'Sources/AirPlayerCore/SourceResolver.swift',
-         ROOT / 'Sources/AirPlayerCore/HelperProcess.swift',
+         *sorted((ROOT / 'Sources/AirPlayerCore').glob('*.swift')),
          ROOT / 'Sources/AirPlayerApp/MediaDiagnostics.swift',
          ROOT / 'Sources/AirPlayerApp/PlaybackController.swift',
          ROOT / 'Tests/MediaChecks/main.swift', '-o', binary])

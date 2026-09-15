@@ -68,7 +68,7 @@ struct MediaChecks {
         let base = CommandLine.arguments[1]
         let cases = try JSONDecoder().decode([MediaCase].self,
             from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[2])))
-        let controller = PlaybackController()
+        let controller = PlaybackController(prepareSource: nil)
         defer { controller.shutdown() }
         func settled(states: [PlaybackState] = [.awaitingReceiver, .failed], audio: Bool? = nil) async throws -> PlaybackSnapshot {
             let deadline = Date().addingTimeInterval(35)

@@ -98,6 +98,7 @@ struct AirPlayerCLI {
         } else if let status = response.status {
             print("\(response.message)\nState: \(status.state.rawValue)\nExternal video: \(status.externalPlaybackActive ? "yes" : "no")")
             if status.loadingPhase == "resolving" { print("Finding video…") }
+            if status.loadingPhase == "preparing" { print("Preparing video…") }
             if let position = status.position { print("Position: \(String(format: "%.1f", position))s") }
             if let hasAudio = status.hasAudio {
                 print(hasAudio ? "Audio track: detected" : "Audio track: not detected; try a link that includes audio")

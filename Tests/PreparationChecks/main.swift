@@ -1,0 +1,161 @@
+import Foundation
+import AVFoundation
+
+@main
+@MainActor
+struct PreparationChecks {
+    static func check(_ condition: Bool, _ message: String) throws {
+        if !condition { throw NSError(domain: "PreparationChecks", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
+    }
+    static func expect(_ reason: MediaFailureReason, _ body: () async throws -> Void) async throws {
+        do { try await body(); try check(false, "Expected a preparation failure") }
+        catch let error as PreparationFailure { try check(error.reason == reason, "Wrong preparation failure") }
+    }
+    static func main() async throws {
+        if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--website" {
+            do {
+                let source = try await SourceResolver().resolve(MediaInput.url(CommandLine.arguments[2]))
+                guard source.needsPreparation else { print("Direct source selected; preparation not needed"); return }
+                let prepared = try await MediaPreparer().prepare(source)
+                defer { prepared.stop() }
+                let asset = AVURLAsset(url: prepared.url)
+                let video = try await asset.loadTracks(withMediaType: .video)
+                let audio = try await asset.loadTracks(withMediaType: .audio)
+                try check(!video.isEmpty && !audio.isEmpty, "Prepared website source missing tracks")
+                print("PASS live website preparation and native video/audio inspection; receiver untested")
+            } catch {
+                let reason = (error as? PreparationFailure)?.reason ?? (error as? ResolutionFailure)?.reason ?? .loadFailed
+                print("Live smoke result: \(reason.rawValue)")
+                exit(1)
+            }
+            return
+        }
+        let base = CommandLine.arguments[1]
+        let directory = URL(fileURLWithPath: CommandLine.arguments[2])
+        var environment = ProcessInfo.processInfo.environment
+        environment["AIRPLAYER_MEDIA_HOST"] = "127.0.0.1"
+        let preparer = MediaPreparer(environment: environment)
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        func fetch(_ url: URL, method: String = "GET", range: String? = nil) async throws -> (Data, HTTPURLResponse) {
+            var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 4)
+            request.httpMethod = method
+            request.setValue(range, forHTTPHeaderField: "Range")
+            let (data, response) = try await session.data(for: request)
+            return (data, response as! HTTPURLResponse)
+        }
+        let source = ResolvedSource(url: URL(string: base + "/combined.mkv")!)
+        var prepared: PreparedMedia? = try await preparer.prepare(source)
+        let endpoint = prepared!.url
+        let cache = FileManager.default.temporaryDirectory.appendingPathComponent("airplayer-prepared-v1")
+        let active = Set(try FileManager.default.contentsOfDirectory(atPath: cache.path))
+        let abandoned = cache.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: abandoned, withIntermediateDirectories: false)
+        try Data().write(to: abandoned.appendingPathComponent("lease"))
+        try Data("unfinished media".utf8).write(to: abandoned.appendingPathComponent("media.mp4"))
+        MediaPreparer.cleanAbandonedFiles()
+        try check(!FileManager.default.fileExists(atPath: abandoned.path), "Abandoned preparation was not removed")
+        try check(Set(try FileManager.default.contentsOfDirectory(atPath: cache.path)) == active, "Cleanup removed an active workspace")
+        let (whole, response) = try await fetch(endpoint)
+        try check(response.statusCode == 200 && whole.count > 1000, "Prepared file was not delivered")
+        try whole.write(to: directory.appendingPathComponent("remuxed.mp4"))
+        let (head, headResponse) = try await fetch(endpoint, method: "HEAD")
+        try check(head.isEmpty && headResponse.statusCode == 200
+                  && headResponse.value(forHTTPHeaderField: "Content-Length") == String(whole.count), "HEAD metadata wrong")
+        for (range, bytes) in [("bytes=0-99", whole.prefix(100)), ("bytes=100-", whole.dropFirst(100)),
+                               ("bytes=-64", whole.suffix(64))] {
+            let (data, ranged) = try await fetch(endpoint, range: range)
+            try check(ranged.statusCode == 206 && data == bytes, "Byte-range body was incorrect")
+        }
+        for range in ["bytes=999999999999-", "bytes=7-3", "bytes=-0", "bytes=0-1,4-5", "bytes=0-999999999999999999999999999999"] {
+            let (_, invalid) = try await fetch(endpoint, range: range)
+            try check(invalid.statusCode == 416 && invalid.value(forHTTPHeaderField: "Content-Range") == "bytes */\(whole.count)", "Invalid range accepted")
+        }
+        let (_, missing) = try await fetch(endpoint.deletingLastPathComponent().appendingPathComponent("other.mp4"))
+        let (_, wrongMethod) = try await fetch(endpoint, method: "POST")
+        try check(missing.statusCode == 404 && wrongMethod.statusCode == 405, "Server exposed an extra route or method")
+        prepared?.stop(); prepared = nil
+        do { _ = try await fetch(endpoint); try check(false, "Stopped server still accepted requests") }
+        catch is URLError {}
+        print("PASS remux, GET/HEAD, open/closed/suffix ranges, invalid ranges, token route and server shutdown")
+
+        let split = ResolvedSource(url: URL(string: base + "/video.mp4")!,
+            audio: MediaTrack(url: URL(string: base + "/audio.m4a")!))
+        let joined = try await preparer.prepare(split)
+        let (joinedData, _) = try await fetch(joined.url)
+        try joinedData.write(to: directory.appendingPathComponent("joined.mp4"))
+        joined.stop()
+        let shortLimit = MediaPreparer(environment: environment, maximumBytes: 1000)
+        try await expect(.preparationLimit) { _ = try await shortLimit.prepare(source) }
+        try await expect(.preparationRequired) {
+            _ = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/flac.mkv")!))
+        }
+        var missingEnvironment = environment
+        missingEnvironment["AIRPLAYER_FFMPEG"] = "/missing/ffmpeg"
+        let missingHelper = MediaPreparer(environment: missingEnvironment)
+        try await expect(.preparerUnavailable) { _ = try await missingHelper.prepare(source) }
+        print("PASS separate H.264/AAC tracks, unsupported audio, size limit and missing helpers")
+
+        // A slow helper verifies cancellation while a workspace is live, rather than during inspection.
+        let slow = directory.appendingPathComponent("slow-ffmpeg")
+        try "#!/bin/sh\nsleep 20 &\nwait\n".write(to: slow, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: slow.path)
+        var slowEnvironment = environment
+        slowEnvironment["AIRPLAYER_FFMPEG"] = slow.path
+        let slowPreparer = MediaPreparer(environment: slowEnvironment)
+        let cancelled = Task { try await slowPreparer.prepare(source) }
+        try await Task.sleep(for: .milliseconds(600))
+        cancelled.cancel()
+        do { _ = try await cancelled.value; try check(false, "Cancelled preparation succeeded") }
+        catch is CancellationError {}
+        let afterCancel = Set(try FileManager.default.contentsOfDirectory(atPath: cache.path))
+        try check(afterCancel.isEmpty, "Cancelled or stopped preparation retained media")
+        print("PASS cancellation and abandoned/active workspace cleanup")
+
+        let preparingController = PlaybackController(resolveSource: { _ in split }, prepareSource: { try await slowPreparer.prepare($0) })
+        try preparingController.load("https://youtu.be/BaW_jenozKc")
+        let preparingDeadline = Date().addingTimeInterval(3)
+        while preparingController.snapshot.loadingPhase != "preparing", Date() < preparingDeadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try check(preparingController.snapshot.state == .loading && preparingController.snapshot.loadingPhase == "preparing",
+                  "Preparing phase did not retain pending loading state")
+        preparingController.stop()
+        try await Task.sleep(for: .milliseconds(100))
+        try check(preparingController.snapshot.state == .idle && preparingController.player.currentItem == nil,
+                  "Stop allowed a prepared result to return")
+        // Quit also waits for jobs that Stop has already cancelled.
+        await preparingController.shutdownAndWait()
+        try check(Set(try FileManager.default.contentsOfDirectory(atPath: cache.path)).isEmpty,
+                  "Quit left a cancelled job's temporary media behind")
+
+        let controlledPreparer = MediaPreparer(environment: environment)
+        let controller = PlaybackController(prepareSource: { try await controlledPreparer.prepare($0) })
+        defer { controller.shutdown() }
+        func settled() async throws {
+            let deadline = Date().addingTimeInterval(15)
+            while Date() < deadline {
+                controller.refresh()
+                if [.awaitingReceiver, .failed].contains(controller.snapshot.state) { return }
+                try await Task.sleep(for: .milliseconds(30))
+            }
+            try check(false, "Controller did not finish preparing")
+        }
+        try controller.load(base + "/combined.mkv?signature=do-not-log")
+        try await settled()
+        try check(controller.snapshot.state == .awaitingReceiver && controller.snapshot.hasAudio == true,
+                  "Native failure did not recover through remuxing")
+        try check(controller.player.rate == 0 && controller.player.isMuted, "Preparation started local playback")
+        let served = (controller.player.currentItem!.asset as! AVURLAsset).url
+        let status = String(decoding: try JSONEncoder().encode(controller.snapshot), as: UTF8.self)
+        try check(!status.contains(served.path) && !status.contains("do-not-log"), "Status exposed private source or session URL")
+        try controller.load(base + "/combined.mp4")
+        try await settled()
+        try check(controller.snapshot.state == .awaitingReceiver, "Replacing prepared item failed")
+        do { _ = try await fetch(served); try check(false, "Replacement retained the old server") }
+        catch is URLError {}
+        controller.stop()
+        print("PASS controller native-first fallback, paused readiness, privacy and replacement cleanup")
+        print("Preparation checks passed; receiver playback remains untested")
+    }
+}

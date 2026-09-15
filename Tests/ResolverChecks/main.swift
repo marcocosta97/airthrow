@@ -23,7 +23,8 @@ struct ResolverChecks {
                 } else {
                     result = try await SourceResolver().resolve(MediaInput.url(CommandLine.arguments[2]))
                 }
-                print("Resolved a combined source (\(result.url.scheme ?? "unknown") transport); URLs and headers withheld.")
+                print(result.needsPreparation ? "Selected separate tracks for preparation; URLs and headers withheld."
+                    : "Resolved a combined source; URLs and headers withheld.")
             } catch let error as ResolutionFailure {
                 print("\(error.reason.rawValue): \(error.reason.message)")
                 exit(1)
@@ -64,6 +65,16 @@ struct ResolverChecks {
         }
         let hls = combined.merging(["protocol": "m3u8_native", "height": 1080, "url": "https://cdn.example/index.m3u8"]) { _, b in b }
         try check(try SourceResolver.select(metadata([combined, videoOnly, hls])).url.path == "/index.m3u8", "Wrong combined format selected")
+        let separateVideo = videoOnly.merging(["height": 720]) { _, rhs in rhs }
+        let separateAudio = combined.merging(["vcodec": "none", "ext": "m4a", "url": "https://media.example/audio"]) { _, rhs in rhs }
+        let split = try SourceResolver.select(metadata([separateVideo, separateAudio]))
+        try check(split.needsPreparation && split.audio?.url.path == "/audio", "Separate tracks were not preserved for preparation")
+        try check(try !SourceResolver.select(metadata([separateVideo, separateAudio, combined])).needsPreparation,
+                  "Combined source did not retain priority over preparation")
+        try await expect(.preparationRequired) { _ = try SourceResolver.select(metadata([videoOnly, separateAudio])) }
+        try await expect(.preparationRequired) {
+            _ = try SourceResolver.select(metadata([separateVideo, separateAudio], extra: ["http_headers": ["Cookie": "secret"]]))
+        }
         try await expect(.protectedMedia) { _ = try SourceResolver.select(metadata([combined], extra: ["has_drm": true])) }
         for extra: [String: Any] in [["_type": "playlist", "entries": []], ["is_live": true], ["availability": "needs_auth"]] {
             try await expect(.unsupportedPage) { _ = try SourceResolver.select(metadata([combined], extra: extra)) }

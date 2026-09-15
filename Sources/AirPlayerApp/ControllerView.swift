@@ -161,7 +161,12 @@ struct ControllerView: View {
     private var stateLabel: String {
         switch status.state {
         case .idle: "Ready for your next video"
-        case .loading: controller.snapshot.loadingPhase == "resolving" ? "Finding video…" : "Loading video…"
+        case .loading:
+            switch status.loadingPhase {
+            case "resolving": "Finding video…"
+            case "preparing": "Preparing video…"
+            default: "Loading video…"
+            }
         case .connecting: "Connecting to AirPlay…"
         case .awaitingReceiver: "Ready to connect"
         case .ready: "Ready to play"

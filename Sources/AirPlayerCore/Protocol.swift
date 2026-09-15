@@ -66,6 +66,8 @@ public enum MediaFailureReason: String, Codable, Sendable {
     case resolverUnavailable = "resolver_unavailable", resolutionFailed = "resolution_failed"
     case resolutionTimedOut = "resolution_timed_out", unsupportedWebsite = "unsupported_website"
     case preparationRequired = "preparation_required"
+    case preparerUnavailable = "preparer_unavailable", preparationFailed = "preparation_failed"
+    case preparationLimit = "preparation_limit", deliveryUnavailable = "delivery_unavailable"
 
     public var message: String {
         switch self {
@@ -73,7 +75,11 @@ public enum MediaFailureReason: String, Codable, Sendable {
         case .resolutionFailed: "Could not find a playable video. The page may require sign-in, be unavailable, or need an updated yt-dlp installation."
         case .resolutionTimedOut: "Finding the video timed out. Check the connection and try again."
         case .unsupportedWebsite: "Choose a single public, on-demand YouTube video. Playlists, live streams and sign-in are not supported."
-        case .preparationRequired: "No directly playable combined H.264/AAC stream was found. This source needs media preparation that is not available yet."
+        case .preparationRequired: "This source needs conversion or a delivery method that is not supported yet. Try an H.264/AAC video."
+        case .preparerUnavailable: "Preparing this video needs FFmpeg and ffprobe. Install FFmpeg with Homebrew, then load the link again."
+        case .preparationFailed: "Could not prepare the video. Check the source, connection and available disk space, then load it again."
+        case .preparationLimit: "Preparation exceeded a size, duration or time limit, or there is insufficient disk space. Try a shorter video."
+        case .deliveryUnavailable: "Could not serve the prepared video. Connect the Mac and receiver to the same local network, then load it again."
         case .network: "Could not reach the media. Check the connection and try loading it again."
         case .sourceUnavailable: "The media is unavailable or requires access. Try a fresh direct video URL."
         case .unreadableMedia: "The media could not be read or decoded. Its format may be unsupported or its data damaged. Try another source."

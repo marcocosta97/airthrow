@@ -15,11 +15,22 @@ public enum ResolutionFailure: Error, Sendable {
     }
 }
 
+public struct MediaTrack: Sendable {
+    public let url: URL
+    public let headers: [String: String]
+    public init(url: URL, headers: [String: String] = [:]) { self.url = url; self.headers = headers }
+}
+
 public struct ResolvedSource: Sendable {
     public let url: URL
     // Keep request metadata in memory. Never put URLs, headers, or helper output into status/logs.
     public let headers: [String: String]
-    public init(url: URL, headers: [String: String] = [:]) { self.url = url; self.headers = headers }
+    public let audio: MediaTrack?
+    public let needsPreparation: Bool
+    public init(url: URL, headers: [String: String] = [:], audio: MediaTrack? = nil, needsPreparation: Bool = false) {
+        self.url = url; self.headers = headers; self.audio = audio
+        self.needsPreparation = needsPreparation || audio != nil
+    }
 }
 
 public struct SourceResolver: Sendable {
@@ -109,8 +120,30 @@ public struct SourceResolver: Sendable {
             if (lhs.0.height ?? 0) != (rhs.0.height ?? 0) { return (lhs.0.height ?? 0) < (rhs.0.height ?? 0) }
             return (lhs.0.tbr ?? 0) < (rhs.0.tbr ?? 0)
         }
-        guard let selected else { throw ResolutionFailure.preparationRequired }
-        return selected.1
+        if let selected { return selected.1 }
+        // Fall back to separate progressive MP4/M4A tracks, never to a silent video.
+        // Actual codecs/profile, duration and stream indices are verified by ffprobe before copying.
+        let eligible = formats.filter {
+            $0.has_drm != true && $0.fragments == nil && ["https", "http"].contains($0.protocol ?? "")
+                && ["mp4", "m4a"].contains($0.ext ?? "")
+                && (try? MediaInput.url($0.url ?? "")) != nil
+                && ($0.http_headers ?? [:]).keys.allSatisfy({ defaultHeaders.contains($0.lowercased()) })
+        }
+        guard (info.http_headers ?? [:]).keys.allSatisfy({ defaultHeaders.contains($0.lowercased()) }),
+              let video = eligible.filter({
+                  ($0.vcodec == "h264" || $0.vcodec?.hasPrefix("avc1") == true) && $0.acodec == "none"
+                      && ($0.height ?? .infinity) <= 1080
+              }).max(by: { ($0.height ?? 0, $0.tbr ?? 0) < ($1.height ?? 0, $1.tbr ?? 0) }),
+              let audio = eligible.filter({
+                  $0.vcodec == "none" && ($0.acodec == "aac" || $0.acodec?.hasPrefix("mp4a") == true)
+              }).max(by: { ($0.tbr ?? 0) < ($1.tbr ?? 0) }),
+              let rawVideo = video.url, let videoURL = try? MediaInput.url(rawVideo),
+              let rawAudio = audio.url, let audioURL = try? MediaInput.url(rawAudio) else {
+            throw ResolutionFailure.preparationRequired
+        }
+        return ResolvedSource(url: videoURL,
+            headers: (info.http_headers ?? [:]).merging(video.http_headers ?? [:]) { _, rhs in rhs },
+            audio: MediaTrack(url: audioURL, headers: (info.http_headers ?? [:]).merging(audio.http_headers ?? [:]) { _, rhs in rhs }))
     }
 
     private struct Info: Decodable {

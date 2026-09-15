@@ -32,7 +32,7 @@ python3 scripts/integration-checks.py build/airplayer /tmp/airplayer-test.mp4 /t
 To serve fixtures without controlling the app, append `--serve`. The server binds to loopback and implements byte ranges needed for reliable loading. In another terminal, use the printed port for focused controller checks:
 
 ```bash
-swiftc -swift-version 6 -parse-as-library Sources/AirPlayerCore/Protocol.swift Sources/AirPlayerCore/SourceResolver.swift Sources/AirPlayerCore/HelperProcess.swift Sources/AirPlayerApp/MediaDiagnostics.swift Sources/AirPlayerApp/PlaybackController.swift Tests/ControllerChecks/main.swift -o .build/ControllerChecks
+swiftc -swift-version 6 -parse-as-library Sources/AirPlayerCore/*.swift Sources/AirPlayerApp/MediaDiagnostics.swift Sources/AirPlayerApp/PlaybackController.swift Tests/ControllerChecks/main.swift -o .build/ControllerChecks
 .build/ControllerChecks http://127.0.0.1:PORT
 ```
 
@@ -48,7 +48,7 @@ python3 scripts/native-media-checks.py
 
 The script generates original two-second MP4, MOV, HEVC, audio-only, and invalid-media fixtures, serves them with HTTP byte ranges, and checks native loading plus diagnostic privacy and lifecycle behavior. Each run writes fixtures and `results.json` to a new ignored `build/native-media-*` directory. The report records the host and explicitly leaves receiver picture, sound, seeking, and remote controls untested. `awaiting_receiver` means the native player loaded the item; it does not verify decoding or AirPlay compatibility.
 
-If FFmpeg is installed, the same check adds HLS, MKV, WebM, and H.264/FLAC fixtures. HLS regressions cover muxed audio/video, video-only, audio-only, extensionless URLs, and receiver-first negotiation after streaming tracks appear. Use `--ffmpeg /path/to/ffmpeg` to select a binary. Missing tools/encoders or unavailable native HEVC encoding produce explicit skipped rows. FFmpeg is a test-fixture dependency only; the application still has no conversion helper dependency. Silent HLS may retain unknown audio status because an empty dynamic track list cannot establish absence; file-based video-only fixtures still assert `hasAudio: false`. The FLAC case probes alternative audio handling; whether it is unsupported depends on the tested platform and receiver.
+If FFmpeg is installed, the same check adds HLS, MKV, WebM, and H.264/FLAC fixtures. HLS regressions cover muxed audio/video, video-only, audio-only, extensionless URLs, and receiver-first negotiation after streaming tracks appear. Use `--ffmpeg /path/to/ffmpeg` to select a binary. Missing tools/encoders or unavailable native HEVC encoding produce explicit skipped rows. The native matrix explicitly disables preparation to measure AVPlayer alone. The application uses optional FFmpeg/ffprobe helpers for the separate preparation path below. Silent HLS may retain unknown audio status because an empty dynamic track list cannot establish absence; file-based video-only fixtures still assert `hasAudio: false`. The FLAC case probes alternative audio handling; whether it is unsupported depends on the tested platform and receiver.
 
 For manual receiver checks, append `--serve --bind YOUR_MAC_LAN_IP` to keep the generated fixtures available on that interface. Load the printed server URL plus the fixture's `path` from `fixtures.json` in AirPlayer. The default interface is loopback, which a receiver cannot access. Stop the fixture server with Ctrl-C; keep it running during the receiver test. Record receiver model/firmware and actual results separately before claiming format support.
 
@@ -69,9 +69,27 @@ For an optional metadata-only live smoke check, install `yt-dlp` and `deno`, rec
 .build/ResolverChecks --resolve 'https://www.youtube.com/watch?v=VIDEO_ID'
 ```
 
-This uses the same resolver as the app and prints a redacted result. Live-site results may change independently of AirPlayer. Validate UI and CLI loading and receiver picture/sound separately. A preparation-required result means extraction succeeded but no eligible combined source was found; it is not a playback pass.
+This uses the same resolver as the app and prints a redacted result. Live-site results may change independently of AirPlayer. Validate UI and CLI loading and receiver picture/sound separately. The result distinguishes a combined source from separate tracks selected for preparation. It is metadata-only and is not a playback pass.
 
-The subprocess runs in its own process group with a 40-second deadline, 8 MiB JSON limit, and 256 KiB discarded stderr limit. Stop/replacement kills the group and reaps the helper. Arguments disable user configuration, plugins, cache, and remote component installation; no browser cookies or authentication are imported. JavaScript/EJS support must already be installed. Default yt-dlp browser headers are retained in memory but not forwarded; other headers make a candidate ineligible until a delivery layer exists. Even candidates with only default headers can fail if a site requires them at fetch time.
+The subprocess runs in its own process group with a 40-second deadline, 8 MiB JSON limit, and 256 KiB discarded stderr limit. Stop/replacement kills the group and reaps the helper. Arguments disable user configuration, plugins, cache, and remote component installation; no browser cookies or authentication are imported. JavaScript/EJS support must already be installed. Default yt-dlp browser headers are retained in memory; direct playback does not forward them, while FFmpeg/ffprobe receive them for separate HTTP tracks. Other headers remain ineligible. Even candidates with only default headers can fail if a site requires them at fetch time.
+
+## Preparation and HTTP delivery checks
+
+With Homebrew FFmpeg installed, run:
+
+```bash
+python3 scripts/preparation-checks.py
+```
+
+This generates original short H.264/AAC fixtures, remuxes MKV, joins separate MP4/M4A tracks, and compares compressed packet hashes to prove the tracks were copied. It verifies GET/HEAD, byte ranges and invalid ranges, exact session routes, server closure, missing helpers, unsupported audio, limits, cancellation, abandoned-file cleanup, preservation of active sessions, and controller fallback/replacement. Each run writes a report and fixtures under ignored `build/preparation-*`. Run this suite sequentially with the AVPlayer-based native/controller checks.
+
+For a bounded live website check, the generated `PreparationChecks` binary also accepts `--website URL`. It resolves, prepares when required, checks native audio/video tracks, and removes its temporary result. This downloads the selected media; use a short public test clip. It does not verify receiver playback.
+
+Preparation probes actual streams, maps one video and one audio stream, and invokes `-c copy`; no encoder fallback exists. Inputs are restricted to HTTP(S) MP4/M4A or Matroska/WebM demuxing. Output metadata/chapters/extra tracks are omitted. A 2 GiB output limit and final size/duration checks reject truncated output. ffprobe has a 40-second deadline per inspection, FFmpeg has ten minutes, and network reads have a 15-second inactivity limit. Limits also require finite duration of at most four hours, SDR H.264 8-bit 4:2:0 up to 1080p/60, AAC-LC up to stereo/48 kHz, and disk headroom.
+
+Session directories under the user’s temporary directory hold lease locks. Stop/replacement/failure closes the listener and detaches the player item before releasing files; startup removes unlocked abandoned directories. The HTTP server binds a selected local IPv4 address, allows up to eight clients, bounds headers and idle time, and serves only the prepared file through an unguessable URL. It supports single byte ranges and uses `Connection: close`; multiple ranges are rejected. There is no directory browser, general proxy, or HLS rewriting. `AIRPLAYER_MEDIA_HOST=127.0.0.1` is reserved for local automated checks; receiver tests need a LAN address.
+
+Hardware acceptance remains separate: verify prepared-file picture/sound/sync, seeking, receiver controls, firewall permission, replacement, route loss, and network changes on Apple TV, then a second receiver. Local loading and packet identity alone do not establish AirPlay compatibility.
 
 ## Packaging
 

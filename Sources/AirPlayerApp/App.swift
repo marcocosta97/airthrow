@@ -22,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let server = CommandServer()
     private var window: NSWindow?
     private var statusItem: NSStatusItem?
+    private var terminating = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         makeMenu()
@@ -41,6 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             controller.displayError(error)
         }
+        MediaPreparer.cleanAbandonedFiles()
         showWindow()
     }
 
@@ -62,6 +64,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         showWindow(); return true
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if !terminating {
+            terminating = true
+            server.stop()
+            Task { @MainActor in
+                await controller.shutdownAndWait()
+                sender.reply(toApplicationShouldTerminate: true)
+            }
+        }
+        return .terminateLater
+    }
     func applicationWillTerminate(_ notification: Notification) { server.stop(); controller.shutdown() }
 
     private func handle(_ request: Request) -> Response {

@@ -16,11 +16,18 @@ final class PlaybackController: ObservableObject {
     private var notifications: [NSObjectProtocol] = []
     private var timeObserver: Any?
     private var loadTask: Task<Void, Never>?
+    private var drainingLoads: [UUID: Task<Void, Never>] = [:]
+    private var loadingAsset: AVURLAsset?
     private var timeoutTask: Task<Void, Never>?
     private var probeTask: Task<Void, Never>?
     private var generation = UUID()
     private var loading = false
     private var resolving = false
+    private var preparing = false
+    private var originalURL: URL?
+    private var attemptedPreparation = false
+    private var preparedMedia: PreparedMedia?
+    private let prepareSource: (@Sendable (ResolvedSource) async throws -> PreparedMedia)?
     private var websiteURL: URL?
     private var retriedResolution = false
     private let resolveSource: @Sendable (URL) async throws -> ResolvedSource
@@ -45,8 +52,11 @@ final class PlaybackController: ObservableObject {
 
     init(resolveSource: @escaping @Sendable (URL) async throws -> ResolvedSource = {
         try await SourceResolver().resolve($0)
+    }, prepareSource: (@Sendable (ResolvedSource) async throws -> PreparedMedia)? = {
+        try await MediaPreparer().prepare($0)
     }) {
         self.resolveSource = resolveSource
+        self.prepareSource = prepareSource
         player.allowsExternalPlayback = true
         player.isMuted = true
         observations = [
@@ -70,12 +80,14 @@ final class PlaybackController: ObservableObject {
         startLoad(try MediaInput.url(input))
     }
 
-    private func startLoad(_ url: URL, retry: Bool = false) {
+    private func startLoad(_ url: URL, retry: Bool = false, remux: Bool = false) {
         let retryRoute = hasOpenedPicker || player.isExternalPlaybackActive
         resetItem(keepPlayerItem: true)
         probeWhenReady = retryRoute
         let id = generation
         loading = true
+        originalURL = url
+        attemptedPreparation = remux
         resolving = SourceResolver.isWebsite(url)
         websiteURL = resolving ? url : nil
         retriedResolution = retry
@@ -84,13 +96,28 @@ final class PlaybackController: ObservableObject {
         refresh()
         let resolver = resolveSource
         loadTask = Task { [weak self] in
+            defer { self?.drainingLoads.removeValue(forKey: id) }
             do {
                 let source = try await resolver(url)
                 guard let self, !Task.isCancelled, self.generation == id else { return }
                 self.resolving = false
+                var playbackURL = source.url
+                if source.needsPreparation || remux {
+                    guard let prepareSource = self.prepareSource else { throw PreparationFailure.unsupported }
+                    self.attemptedPreparation = true
+                    self.preparing = true
+                    self.timeoutTask?.cancel()
+                    self.refresh()
+                    let prepared = try await prepareSource(source)
+                    guard !Task.isCancelled, self.generation == id else { prepared.stop(); return }
+                    self.preparedMedia = prepared
+                    playbackURL = prepared.url
+                    self.preparing = false
+                }
                 self.scheduleLoadTimeout(id: id)
                 self.refresh()
-                let asset = AVURLAsset(url: source.url)
+                let asset = AVURLAsset(url: playbackURL)
+                self.loadingAsset = asset
                 let playable = try await asset.load(.isPlayable)
                 let video = try await asset.loadTracks(withMediaType: .video)
                 // HLS may expose alternate audio as media-selection options.
@@ -175,10 +202,11 @@ final class PlaybackController: ObservableObject {
                 self.refresh()
             } catch {
                 guard let self, !Task.isCancelled, self.generation == id else { return }
-                self.fail((error as? ResolutionFailure)?.reason
+                self.fail((error as? PreparationFailure)?.reason ?? (error as? ResolutionFailure)?.reason
                     ?? MediaDiagnostics.reason(for: error, fallback: .loadFailed))
             }
         }
+        drainingLoads[id] = loadTask
         if !resolving { scheduleLoadTimeout(id: id) }
     }
 
@@ -293,6 +321,7 @@ final class PlaybackController: ObservableObject {
     private func resetItem(keepPlayerItem: Bool = false) {
         generation = UUID()
         loadTask?.cancel(); loadTask = nil
+        loadingAsset?.cancelLoading(); loadingAsset = nil
         timeoutTask?.cancel(); timeoutTask = nil
         cancelProbe(restorePosition: false)
         player.isMuted = true
@@ -302,9 +331,12 @@ final class PlaybackController: ObservableObject {
         notifications.removeAll()
         mediaItem = nil
         probeWhenReady = false
-        // Avoid a nil item between URLs: swap directly on the same player.
-        if !keepPlayerItem { player.replaceCurrentItem(with: nil) }
-        loading = false; resolving = false; websiteURL = nil; retriedResolution = false
+        // Direct sources can retain the old paused item. Prepared media must be
+        // detached before closing its server and deleting its file.
+        if !keepPlayerItem || preparedMedia != nil { player.replaceCurrentItem(with: nil) }
+        preparedMedia?.stop(); preparedMedia = nil
+        loading = false; resolving = false; preparing = false; websiteURL = nil; retriedResolution = false
+        originalURL = nil; attemptedPreparation = false
         ended = false; hasPlayed = false; failure = nil; failureReason = nil
         hasAudio = nil
         hasVideo = false
@@ -318,7 +350,13 @@ final class PlaybackController: ObservableObject {
             startLoad(websiteURL, retry: true)
             return
         }
+        if reason == .unreadableMedia, let originalURL, !SourceResolver.isWebsite(originalURL),
+           !attemptedPreparation, !hasPlayed, prepareSource != nil {
+            startLoad(originalURL, remux: true)
+            return
+        }
         resolving = false
+        preparing = false
         cancelProbe(restorePosition: false)
         loading = false
         failureReason = reason
@@ -326,6 +364,13 @@ final class PlaybackController: ObservableObject {
         player.isMuted = true
         player.pause()
         timeoutTask?.cancel()
+        if preparedMedia != nil {
+            player.replaceCurrentItem(with: nil)
+            mediaItem = nil
+            itemObservations.removeAll()
+            notifications.forEach(NotificationCenter.default.removeObserver); notifications.removeAll()
+            preparedMedia?.stop(); preparedMedia = nil
+        }
         refresh()
     }
 
@@ -376,12 +421,8 @@ final class PlaybackController: ObservableObject {
                 timeoutTask?.cancel()
             } else if completeTrackInfo {
                 // Set the failure here without recursively entering refresh().
-                failureReason = .noVideo
-                failure = MediaFailureReason.noVideo.message
-                loading = false
-                timeoutTask?.cancel()
-                player.isMuted = true
-                player.pause()
+                fail(.noVideo)
+                return
             }
             // With incomplete track information, stay loading until observation
             // supplies video evidence or the existing bounded load timeout expires.
@@ -397,7 +438,7 @@ final class PlaybackController: ObservableObject {
         next.externalPlaybackActive = external
         next.error = failure
         next.errorReason = failureReason
-        next.loadingPhase = resolving ? "resolving" : nil
+        next.loadingPhase = resolving ? "resolving" : (preparing ? "preparing" : nil)
         next.hasAudio = hasAudio
         next.duration = item.flatMap { finite($0.duration.seconds) }
         next.position = item == nil ? nil : finite(player.currentTime().seconds)
@@ -421,6 +462,13 @@ final class PlaybackController: ObservableObject {
     }
 
     func clearNotice() { notice = nil }
+
+    /// Quit waits for cancelled jobs to reap their helpers and release temporary files.
+    func shutdownAndWait() async {
+        let pending = Array(drainingLoads.values)
+        shutdown()
+        for job in pending { await job.value }
+    }
 
     func shutdown() {
         stop()
@@ -498,9 +546,9 @@ final class PlaybackController: ObservableObject {
             info.nowPlayingInfo = metadata
             info.playbackState = snapshot.state == .playing ? .playing : .paused
         } else { info.nowPlayingInfo = nil; info.playbackState = .stopped }
-        let needsActivity = snapshot.state == .playing || snapshot.state == .buffering
+        let needsActivity = preparing || snapshot.state == .playing || snapshot.state == .buffering
         if needsActivity && activity == nil {
-            activity = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled], reason: "AirPlay video playback")
+            activity = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled], reason: "Preparing or playing AirPlay video")
         } else if !needsActivity, let activity {
             ProcessInfo.processInfo.endActivity(activity)
             self.activity = nil
