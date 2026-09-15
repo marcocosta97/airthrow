@@ -207,10 +207,25 @@ struct MediaChecks {
                   "Stale extraction replaced the newer direct source")
         replaced.shutdown()
 
+        let releaseAfterEnd = PlaybackController(resolveSource: { _ in
+            ResolvedSource(url: targetURL, title: "Resolved fixture title")
+        }, prepareSource: nil, afterPlaybackBehavior: { .unloadVideo })
+        try releaseAfterEnd.load(page)
+        try await waitForResolved(releaseAfterEnd)
+        try check(releaseAfterEnd.snapshot.title == "Resolved fixture title", "Resolved media title was not published")
+        let finishedItem = releaseAfterEnd.player.currentItem!
+        NotificationCenter.default.post(name: .AVPlayerItemDidPlayToEndTime, object: finishedItem)
+        try await Task.sleep(for: .milliseconds(100))
+        try check(releaseAfterEnd.snapshot.state == .idle && releaseAfterEnd.player.currentItem == nil,
+                  "Release-after-playback retained the finished item")
+        try check(releaseAfterEnd.notice?.contains("unloaded") == true,
+                  "Release-after-playback did not explain the completed action")
+        releaseAfterEnd.shutdown()
+
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         print(String(decoding: try encoder.encode(results), as: UTF8.self))
-        FileHandle.standardError.write(Data("PASS diagnostics, privacy, protocol compatibility, notification lifecycle, native media loads, resolver retry and cancellation\n".utf8))
+        FileHandle.standardError.write(Data("PASS diagnostics, privacy, protocol compatibility, notification lifecycle, native media loads, resolver retry, titles and end behavior\n".utf8))
     }
 }
 

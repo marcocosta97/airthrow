@@ -11,6 +11,7 @@ final class PlaybackController: ObservableObject {
     let player = AVPlayer()
     @Published private(set) var snapshot = PlaybackSnapshot()
     @Published private(set) var notice: String?
+    @Published private(set) var pendingSeek: Double?
     private var observations: [NSKeyValueObservation] = []
     private var itemObservations: [NSKeyValueObservation] = []
     private var notifications: [NSObjectProtocol] = []
@@ -31,6 +32,7 @@ final class PlaybackController: ObservableObject {
     private var websiteURL: URL?
     private var retriedResolution = false
     private let resolveSource: @Sendable (URL) async throws -> ResolvedSource
+    private let afterPlaybackBehavior: @MainActor () -> AfterPlaybackBehavior
     private var ended = false
     private var hasPlayed = false
     private var probing = false
@@ -54,9 +56,13 @@ final class PlaybackController: ObservableObject {
         try await SourceResolver().resolve($0)
     }, prepareSource: (@Sendable (ResolvedSource) async throws -> PreparedMedia)? = {
         try await MediaPreparer().prepare($0)
+    }, afterPlaybackBehavior: @escaping @MainActor () -> AfterPlaybackBehavior = {
+        guard let raw = UserDefaults.standard.string(forKey: "afterPlaybackBehavior") else { return .keepConnected }
+        return AfterPlaybackBehavior(rawValue: raw) ?? .keepConnected
     }) {
         self.resolveSource = resolveSource
         self.prepareSource = prepareSource
+        self.afterPlaybackBehavior = afterPlaybackBehavior
         player.allowsExternalPlayback = true
         player.isMuted = true
         observations = [
@@ -100,6 +106,7 @@ final class PlaybackController: ObservableObject {
             do {
                 let source = try await resolver(url)
                 guard let self, !Task.isCancelled, self.generation == id else { return }
+                if let sourceTitle = source.title { self.title = sourceTitle }
                 self.resolving = false
                 var playbackURL = source.url
                 if source.needsPreparation || remux {
@@ -123,6 +130,7 @@ final class PlaybackController: ObservableObject {
                 // HLS may expose alternate audio as media-selection options.
                 // An inspection error is unknown, not proof of a silent source.
                 let audio = try? await asset.loadTracks(withMediaType: .audio)
+                let metadataTitle = await self.metadataTitle(from: asset)
                 var detectedAudio: Bool?
                 if let audio {
                     if !audio.isEmpty {
@@ -142,6 +150,7 @@ final class PlaybackController: ObservableObject {
                 }
                 self.hasVideo = !video.isEmpty
                 self.hasAudio = detectedAudio
+                if source.title == nil, let metadataTitle { self.title = metadataTitle }
                 let item = AVPlayerItem(asset: asset)
                 self.itemObservations = [
                     item.observe(\.status, options: [.new]) { [weak self] _, _ in
@@ -183,9 +192,14 @@ final class PlaybackController: ObservableObject {
                             }
                             return
                         }
-                        self.ended = true
-                        self.player.pause()
-                        self.refresh()
+                        if self.afterPlaybackBehavior() == .unloadVideo {
+                            self.stop()
+                            self.notice = "Playback finished. The video was unloaded."
+                        } else {
+                            self.ended = true
+                            self.player.pause()
+                            self.refresh()
+                        }
                     }
                 })
                 self.notifications.append(NotificationCenter.default.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main) { [weak self] notification in
@@ -266,7 +280,26 @@ final class PlaybackController: ObservableObject {
             throw AppFailure(.routeRequired, "Choose a video receiver first.")
         }
         ended = false
-        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        pendingSeek = seconds
+        let id = generation
+        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600),
+                    toleranceBefore: CMTime(seconds: 0.5, preferredTimescale: 600),
+                    toleranceAfter: CMTime(seconds: 0.5, preferredTimescale: 600)) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.generation == id else { return }
+                self.pendingSeek = nil
+                self.refresh()
+            }
+        }
+        refresh()
+    }
+
+    func goLive() throws {
+        guard snapshot.isLive, let range = snapshot.seekableRanges.last else {
+            throw AppFailure(.unsupportedOperation, "This video is not a live stream.")
+        }
+        let preferred = finite(mediaItem?.recommendedTimeOffsetFromLive.seconds ?? .nan) ?? 0
+        try seek(max(range.start, range.end - preferred))
     }
 
     /// The picker is usable without media. Remember the interaction so a later
@@ -334,6 +367,7 @@ final class PlaybackController: ObservableObject {
         notifications.forEach(NotificationCenter.default.removeObserver)
         notifications.removeAll()
         mediaItem = nil
+        pendingSeek = nil
         probeWhenReady = false
         pickerIsOpen = false
         // Direct sources can retain the old paused item. Prepared media must be
@@ -379,6 +413,16 @@ final class PlaybackController: ObservableObject {
     }
 
     private func finite(_ number: Double) -> Double? { number.isFinite && number >= 0 ? number : nil }
+
+    private func metadataTitle(from asset: AVURLAsset) async -> String? {
+        guard let metadata = try? await asset.load(.commonMetadata) else { return nil }
+        let candidates = AVMetadataItem.metadataItems(from: metadata, filteredByIdentifier: .commonIdentifierTitle)
+        guard let first = candidates.first,
+              let value = try? await first.load(.stringValue) else { return nil }
+        let cleaned = value.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
+        let result = String(String.UnicodeScalarView(cleaned)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return result.isEmpty ? nil : String(result.prefix(200))
+    }
 
     func refresh() {
         // Receiver-side controls must not resume a retained old item or a new
@@ -451,7 +495,31 @@ final class PlaybackController: ObservableObject {
             guard let start = finite(range.start.seconds), let end = finite(CMTimeRangeGetEnd(range).seconds), end > start else { return nil }
             return SeekRange(start: start, end: end)
         }
-        next.isLive = item?.status == .readyToPlay && item?.duration.isIndefinite == true
+        let recommendedLiveOffset = item.flatMap { finite($0.recommendedTimeOffsetFromLive.seconds) }
+        next.isLive = item?.status == .readyToPlay
+            && (item?.duration.isIndefinite == true || recommendedLiveOffset != nil)
+        if next.isLive, let position = next.position, let edge = next.seekableRanges.last?.end {
+            next.liveOffset = max(0, edge - position)
+        }
+        if let item {
+            var diagnostics = PlaybackDiagnostics()
+            diagnostics.waitingReason = waitingReason(player.reasonForWaitingToPlay)
+            diagnostics.bufferedRanges = item.loadedTimeRanges.compactMap {
+                let range = $0.timeRangeValue
+                guard let start = finite(range.start.seconds),
+                      let end = finite(CMTimeRangeGetEnd(range).seconds), end > start else { return nil }
+                return SeekRange(start: start, end: end)
+            }
+            diagnostics.bufferEmpty = item.isPlaybackBufferEmpty
+            diagnostics.bufferFull = item.isPlaybackBufferFull
+            diagnostics.likelyToKeepUp = item.isPlaybackLikelyToKeepUp
+            if let event = item.accessLog()?.events.last {
+                diagnostics.observedBitrate = finite(event.observedBitrate)
+                diagnostics.indicatedBitrate = finite(event.indicatedBitrate)
+                diagnostics.stalls = event.numberOfStalls
+            }
+            next.diagnostics = diagnostics
+        }
         next.state = PlaybackPolicy.state(hasItem: item != nil || loading || failure != nil,
             failed: failure != nil, ready: item?.status == .readyToPlay && !loading,
             connecting: probing, external: external, ended: ended,
@@ -459,6 +527,16 @@ final class PlaybackController: ObservableObject {
             hasPlayed: hasPlayed)
         if snapshot != next { snapshot = next }
         updateNowPlaying()
+    }
+
+    private func waitingReason(_ reason: AVPlayer.WaitingReason?) -> PlaybackWaitingReason? {
+        switch reason {
+        case .toMinimizeStalls: .minimizingStalls
+        case .evaluatingBufferingRate: .evaluatingBufferingRate
+        case .noItemToPlay: .noItem
+        case .some: .other
+        case nil: nil
+        }
     }
 
     func displayError(_ error: Error) {

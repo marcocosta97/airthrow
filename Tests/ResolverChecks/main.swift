@@ -56,6 +56,8 @@ struct ResolverChecks {
         print("PASS direct bypass, exact hosts, video-only normalization and missing helpers")
 
         try check(try SourceResolver.select(raw).url.query == "signature=secret", "Lost signed URL in memory")
+        let titled = try SourceResolver.select(metadata([combined], extra: ["title": "  Example\nTitle  "]))
+        try check(titled.title == "ExampleTitle", "Resolver title was not sanitized")
         let videoOnly = combined.merging(["acodec": "none", "height": 2160]) { _, b in b }
         let unknown = combined.filter { $0.key != "acodec" }
         let headers = combined.merging(["http_headers": ["Referer": "secret"]]) { _, b in b }

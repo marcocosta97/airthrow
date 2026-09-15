@@ -57,6 +57,32 @@ public struct SeekRange: Codable, Sendable, Equatable {
     }
 }
 
+public enum AfterPlaybackBehavior: String, Codable, Sendable, CaseIterable {
+    case keepConnected = "keep_connected"
+    case unloadVideo = "unload_video"
+}
+
+public enum PlaybackWaitingReason: String, Codable, Sendable {
+    case minimizingStalls = "minimizing_stalls"
+    case evaluatingBufferingRate = "evaluating_buffering_rate"
+    case noItem = "no_item"
+    case other
+}
+
+/// Numeric and categorical playback observations only. Source URLs, request
+/// headers and AVFoundation error text are deliberately excluded.
+public struct PlaybackDiagnostics: Codable, Sendable, Equatable {
+    public var waitingReason: PlaybackWaitingReason?
+    public var bufferedRanges: [SeekRange] = []
+    public var bufferEmpty: Bool?
+    public var bufferFull: Bool?
+    public var likelyToKeepUp: Bool?
+    public var observedBitrate: Double?
+    public var indicatedBitrate: Double?
+    public var stalls: Int?
+    public init() {}
+}
+
 public enum MediaFailureReason: String, Codable, Sendable {
     case network, sourceUnavailable = "source_unavailable"
     case unreadableMedia = "unreadable_media", noVideo = "no_video"
@@ -100,12 +126,16 @@ public struct PlaybackSnapshot: Codable, Sendable, Equatable {
     public var seekableRanges: [SeekRange] = []
     public var title = "No video loaded"
     public var isLive = false
+    /// Seconds behind the current live edge. Present only for live media.
+    public var liveOffset: Double?
     /// nil means audio inspection was unavailable or no source is loaded.
     public var hasAudio: Bool?
     public var error: String?
     public var errorReason: MediaFailureReason?
     /// Additive protocol-v1 field; playback state remains loading during extraction.
     public var loadingPhase: String?
+    /// Additive, privacy-safe observations for troubleshooting and future policy.
+    public var diagnostics: PlaybackDiagnostics?
     public init() {}
 }
 

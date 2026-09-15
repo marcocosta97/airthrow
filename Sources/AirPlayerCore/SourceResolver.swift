@@ -23,12 +23,13 @@ public struct MediaTrack: Sendable {
 
 public struct ResolvedSource: Sendable {
     public let url: URL
+    public let title: String?
     // Keep request metadata in memory. Never put URLs, headers, or helper output into status/logs.
     public let headers: [String: String]
     public let audio: MediaTrack?
     public let needsPreparation: Bool
-    public init(url: URL, headers: [String: String] = [:], audio: MediaTrack? = nil, needsPreparation: Bool = false) {
-        self.url = url; self.headers = headers; self.audio = audio
+    public init(url: URL, title: String? = nil, headers: [String: String] = [:], audio: MediaTrack? = nil, needsPreparation: Bool = false) {
+        self.url = url; self.title = title; self.headers = headers; self.audio = audio
         self.needsPreparation = needsPreparation || audio != nil
     }
 }
@@ -102,6 +103,7 @@ public struct SourceResolver: Sendable {
         }
         guard info.has_drm != true else { throw ResolutionFailure.protectedMedia }
         guard let formats = info.formats, !formats.isEmpty else { throw ResolutionFailure.failed }
+        let title = cleanTitle(info.title)
         var candidates: [(Format, ResolvedSource)] = []
         for format in formats {
             guard format.has_drm != true,
@@ -113,7 +115,7 @@ public struct SourceResolver: Sendable {
                   format.fragments == nil else { continue }
             let headers = (info.http_headers ?? [:]).merging(format.http_headers ?? [:]) { _, value in value }
             guard headers.keys.allSatisfy({ defaultHeaders.contains($0.lowercased()) }) else { continue }
-            candidates.append((format, ResolvedSource(url: url, headers: headers)))
+            candidates.append((format, ResolvedSource(url: url, title: title, headers: headers)))
         }
         // Prefer the highest available combined H.264/AAC source. Never silently drop audio.
         let selected = candidates.max { lhs, rhs in
@@ -141,9 +143,17 @@ public struct SourceResolver: Sendable {
               let rawAudio = audio.url, let audioURL = try? MediaInput.url(rawAudio) else {
             throw ResolutionFailure.preparationRequired
         }
-        return ResolvedSource(url: videoURL,
+        return ResolvedSource(url: videoURL, title: title,
             headers: (info.http_headers ?? [:]).merging(video.http_headers ?? [:]) { _, rhs in rhs },
             audio: MediaTrack(url: audioURL, headers: (info.http_headers ?? [:]).merging(audio.http_headers ?? [:]) { _, rhs in rhs }))
+    }
+
+    private static func cleanTitle(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let cleaned = value.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
+        let title = String(String.UnicodeScalarView(cleaned)).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return nil }
+        return String(title.prefix(200))
     }
 
     private struct Info: Decodable {
@@ -155,6 +165,7 @@ public struct SourceResolver: Sendable {
         let live_status: String?
         let availability: String?
         let http_headers: [String: String]?
+        let title: String?
     }
     private struct Ignored: Decodable {}
     private struct Format: Decodable {

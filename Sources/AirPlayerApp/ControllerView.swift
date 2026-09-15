@@ -17,7 +17,7 @@ struct ControllerView: View {
 
     private var status: PlaybackSnapshot { controller.snapshot }
     private var busy: Bool { [.loading, .connecting].contains(status.state) }
-    private var range: SeekRange? { status.seekableRanges.first }
+    private var range: SeekRange? { status.isLive ? status.seekableRanges.last : status.seekableRanges.first }
     private var canControl: Bool {
         status.externalPlaybackActive && !busy && ![.idle, .failed].contains(status.state)
     }
@@ -80,7 +80,7 @@ struct ControllerView: View {
                 }
                 VStack(spacing: 4) {
                     Slider(value: Binding(get: {
-                        let value = scrubbing ? scrub : (status.position ?? 0)
+                        let value = scrubbing ? scrub : (controller.pendingSeek ?? status.position ?? 0)
                         return min(max(value, range?.start ?? 0), range?.end ?? 1)
                     }, set: { scrub = $0 }), in: (range?.start ?? 0)...(range?.end ?? 1), onEditingChanged: { editing in
                         scrubbing = editing
@@ -88,11 +88,17 @@ struct ControllerView: View {
                     })
                     .disabled(!canControl || range == nil)
                     .accessibilityLabel("Playback position")
-                    .accessibilityValue(time(status.position))
+                    .accessibilityValue(time(controller.pendingSeek ?? status.position))
                     HStack {
-                        Text(time(scrubbing ? scrub : status.position))
+                        Text(livePositionLabel)
                         Spacer()
-                        Text(status.isLive ? "Live" : time(status.duration))
+                        if status.isLive, (status.liveOffset ?? 0) > 3 {
+                            Button("Go Live") { perform { try controller.goLive() } }
+                                .buttonStyle(.link)
+                                .disabled(!canControl)
+                        } else {
+                            Text(status.isLive ? "Live" : time(status.duration))
+                        }
                     }
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 }
@@ -146,6 +152,16 @@ struct ControllerView: View {
         .padding(24)
         .frame(minWidth: 430, idealWidth: 470, maxWidth: .infinity)
         .onAppear { urlFocused = true }
+    }
+
+    private var livePositionLabel: String {
+        if status.isLive {
+            let offset = scrubbing
+                ? max(0, (range?.end ?? scrub) - scrub)
+                : (status.liveOffset ?? 0)
+            return offset > 3 ? "−\(time(offset))" : "Live"
+        }
+        return time(scrubbing ? scrub : (controller.pendingSeek ?? status.position))
     }
 
     private func load() { perform { try controller.load(url) }; urlFocused = false }
