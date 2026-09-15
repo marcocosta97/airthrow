@@ -63,8 +63,17 @@ public enum MediaFailureReason: String, Codable, Sendable {
     case protectedMedia = "protected_media", externalPlaybackUnsupported = "external_playback_unsupported"
     case loadFailed = "load_failed", playbackInterrupted = "playback_interrupted"
 
+    case resolverUnavailable = "resolver_unavailable", resolutionFailed = "resolution_failed"
+    case resolutionTimedOut = "resolution_timed_out", unsupportedWebsite = "unsupported_website"
+    case preparationRequired = "preparation_required"
+
     public var message: String {
         switch self {
+        case .resolverUnavailable: "Website playback needs yt-dlp and Deno. Install them with Homebrew, then load the link again."
+        case .resolutionFailed: "Could not find a playable video. The page may require sign-in, be unavailable, or need an updated yt-dlp installation."
+        case .resolutionTimedOut: "Finding the video timed out. Check the connection and try again."
+        case .unsupportedWebsite: "Choose a single public, on-demand YouTube video. Playlists, live streams and sign-in are not supported."
+        case .preparationRequired: "No directly playable combined H.264/AAC stream was found. This source needs media preparation that is not available yet."
         case .network: "Could not reach the media. Check the connection and try loading it again."
         case .sourceUnavailable: "The media is unavailable or requires access. Try a fresh direct video URL."
         case .unreadableMedia: "The media could not be read or decoded. Its format may be unsupported or its data damaged. Try another source."
@@ -89,6 +98,8 @@ public struct PlaybackSnapshot: Codable, Sendable, Equatable {
     public var hasAudio: Bool?
     public var error: String?
     public var errorReason: MediaFailureReason?
+    /// Additive protocol-v1 field; playback state remains loading during extraction.
+    public var loadingPhase: String?
     public init() {}
 }
 
@@ -118,7 +129,7 @@ public enum MediaInput {
               let host = components.host, !host.isEmpty,
               components.user == nil, components.password == nil,
               let url = URL(string: value) else {
-            throw AppFailure(.invalidRequest, "Enter a direct HTTP or HTTPS video URL without embedded credentials.")
+            throw AppFailure(.invalidRequest, "Enter an HTTP or HTTPS video URL without embedded credentials.")
         }
         return url
     }

@@ -13,7 +13,7 @@ struct AirPlayerCLI {
             AirPlayer — control the native AirPlay video session
 
             Usage:
-              airplayer open URL        Load a direct HTTP(S) video URL, initially paused
+              airplayer open URL        Load a direct video URL or YouTube link, paused
               airplayer play            Start/resume on the selected video receiver
               airplayer pause           Pause the current session
               airplayer seek SECONDS    Seek to an absolute position
@@ -97,6 +97,7 @@ struct AirPlayerCLI {
             FileHandle.standardError.write(Data((error.message + "\n").utf8))
         } else if let status = response.status {
             print("\(response.message)\nState: \(status.state.rawValue)\nExternal video: \(status.externalPlaybackActive ? "yes" : "no")")
+            if status.loadingPhase == "resolving" { print("Finding video…") }
             if let position = status.position { print("Position: \(String(format: "%.1f", position))s") }
             if let hasAudio = status.hasAudio {
                 print(hasAudio ? "Audio track: detected" : "Audio track: not detected; try a link that includes audio")

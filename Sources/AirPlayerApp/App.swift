@@ -71,7 +71,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let url = request.url else { throw AppFailure(.invalidRequest, "The open command requires a video URL.") }
                 try controller.load(url)
                 if !controller.snapshot.externalPlaybackActive { showWindow() }
-                return Response(message: "Loading video. Choose a receiver, then play.", pending: true, status: controller.snapshot)
+                return Response(message: controller.snapshot.loadingPhase == "resolving"
+                    ? "Finding video. Choose a receiver, then play." : "Loading video. Choose a receiver, then play.",
+                    pending: true, status: controller.snapshot)
             case .play:
                 try controller.play()
                 return Response(message: "Playback requested.", pending: true, status: controller.snapshot)

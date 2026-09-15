@@ -32,7 +32,7 @@ python3 scripts/integration-checks.py build/airplayer /tmp/airplayer-test.mp4 /t
 To serve fixtures without controlling the app, append `--serve`. The server binds to loopback and implements byte ranges needed for reliable loading. In another terminal, use the printed port for focused controller checks:
 
 ```bash
-swiftc -swift-version 6 -parse-as-library Sources/AirPlayerCore/Protocol.swift Sources/AirPlayerApp/MediaDiagnostics.swift Sources/AirPlayerApp/PlaybackController.swift Tests/ControllerChecks/main.swift -o .build/ControllerChecks
+swiftc -swift-version 6 -parse-as-library Sources/AirPlayerCore/Protocol.swift Sources/AirPlayerCore/SourceResolver.swift Sources/AirPlayerCore/HelperProcess.swift Sources/AirPlayerApp/MediaDiagnostics.swift Sources/AirPlayerApp/PlaybackController.swift Tests/ControllerChecks/main.swift -o .build/ControllerChecks
 .build/ControllerChecks http://127.0.0.1:PORT
 ```
 
@@ -51,6 +51,27 @@ The script generates original two-second MP4, MOV, HEVC, audio-only, and invalid
 If FFmpeg is installed, the same check adds HLS, MKV, WebM, and H.264/FLAC fixtures. HLS regressions cover muxed audio/video, video-only, audio-only, extensionless URLs, and receiver-first negotiation after streaming tracks appear. Use `--ffmpeg /path/to/ffmpeg` to select a binary. Missing tools/encoders or unavailable native HEVC encoding produce explicit skipped rows. FFmpeg is a test-fixture dependency only; the application still has no conversion helper dependency. Silent HLS may retain unknown audio status because an empty dynamic track list cannot establish absence; file-based video-only fixtures still assert `hasAudio: false`. The FLAC case probes alternative audio handling; whether it is unsupported depends on the tested platform and receiver.
 
 For manual receiver checks, append `--serve --bind YOUR_MAC_LAN_IP` to keep the generated fixtures available on that interface. Load the printed server URL plus the fixture's `path` from `fixtures.json` in AirPlayer. The default interface is loopback, which a receiver cannot access. Stop the fixture server with Ctrl-C; keep it running during the receiver test. Record receiver model/firmware and actual results separately before claiming format support.
+
+## Website resolver checks
+
+Deterministic checks use fake helper executables and metadata; no installed yt-dlp, external site, or receiver is needed:
+
+```bash
+swiftc -swift-version 6 -parse-as-library Sources/AirPlayerCore/Protocol.swift Sources/AirPlayerCore/SourceResolver.swift Sources/AirPlayerCore/HelperProcess.swift Tests/ResolverChecks/main.swift -o .build/ResolverChecks
+.build/ResolverChecks
+```
+
+They cover direct bypass, exact website hosts, playlist removal, missing helpers, combined-stream selection, unknown codecs, custom headers, DRM/live restrictions, malformed output, output limits, timeout, and cancellation of child processes. The native media matrix also checks resolver Stop/replacement and exactly one retry for a source-unavailable error, with all loads paused.
+
+For an optional metadata-only live smoke check, install `yt-dlp` and `deno`, record their `--version` output, and run:
+
+```bash
+.build/ResolverChecks --resolve 'https://www.youtube.com/watch?v=VIDEO_ID'
+```
+
+This uses the same resolver as the app and prints a redacted result. Live-site results may change independently of AirPlayer. Validate UI and CLI loading and receiver picture/sound separately. A preparation-required result means extraction succeeded but no eligible combined source was found; it is not a playback pass.
+
+The subprocess runs in its own process group with a 40-second deadline, 8 MiB JSON limit, and 256 KiB discarded stderr limit. Stop/replacement kills the group and reaps the helper. Arguments disable user configuration, plugins, cache, and remote component installation; no browser cookies or authentication are imported. JavaScript/EJS support must already be installed. Default yt-dlp browser headers are retained in memory but not forwarded; other headers make a candidate ineligible until a delivery layer exists. Even candidates with only default headers can fail if a site requires them at fetch time.
 
 ## Packaging
 

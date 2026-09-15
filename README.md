@@ -1,6 +1,6 @@
 # AirPlayer
 
-A small native macOS controller for playing direct video URLs on Apple TV and other video-capable AirPlay receivers. Built with Swift, AVPlayer, and Apple's system AirPlay picker, with a companion command-line tool.
+A small native macOS controller for playing video URLs on Apple TV and other video-capable AirPlay receivers. Built with Swift, AVPlayer, and Apple's system AirPlay picker, with a companion command-line tool.
 
 Early version: receiver compatibility, audio playback, and physical remote behavior still need hardware validation. The app has no local video view.
 
@@ -17,11 +17,25 @@ This creates a locally signed app, ZIP archive, and `build/airplayer`. Pass `deb
 
 ## Play a video
 
-1. Choose a video-capable receiver using **AirPlay**, and paste a direct video URL and click **Load**. Either order works.
+1. Choose a video-capable receiver using **AirPlay**, and paste a direct video URL or YouTube video link and click **Load**. Either order works.
 2. Press **Play** when the video and external route are ready.
 3. Use Pause, Stop, or the available timeline. Load another URL to change videos.
 
 Loading stays paused. AirPlayer may briefly attempt muted playback to establish the external video route. Route loss pauses and mutes playback. Closing the window keeps the app running; reopen it from the menu bar or CLI. The Mac must remain running and connected.
+
+## YouTube links (experimental)
+
+Install the optional helpers for website playback:
+
+```bash
+brew install yt-dlp deno
+```
+
+Paste a single public, on-demand YouTube watch, Shorts, or `youtu.be` link in the same field, or pass it to `airplayer open`. AirPlayer shows **Finding video…** while yt-dlp extracts metadata, then loads a combined H.264/AAC MP4 or HLS source paused when one is available. Direct video URLs work without these helpers.
+
+Some videos only offer separate tracks, incompatible codecs, or request headers that require delivery through the Mac. These produce a preparation-required message; remuxing and transcoding are not implemented yet. Live streams, playlists, sign-in/cookies, and other websites are outside this first resolver slice. Video links with playlist context load only the named video. Local extraction does not establish receiver picture or sound.
+
+The app finds helpers in standard Homebrew locations even when launched from Finder. For development, set `AIRPLAYER_YTDLP` and `AIRPLAYER_DENO` to absolute executable paths **in the app's launch environment**. Setting them only on a CLI command does not change an already-running app. Keep yt-dlp and its JavaScript support current; see [yt-dlp's runtime requirements](https://github.com/yt-dlp/yt-dlp/wiki/EJS). Helpers are not bundled yet.
 
 ## Command line
 
@@ -37,7 +51,7 @@ Loading stays paused. AirPlayer may briefly attempt muted playback to establish 
 
 `open` and `show` launch the app if necessary. Select the receiver through the UI; selection by name is not supported. `open` loads paused. `seek` takes absolute seconds within the available timeline. All commands accept `--json`; `pending: true` means an operation was accepted, so query `status` for its observed result. `hasAudio`, when present, describes the source's audio tracks, not audible output at the TV. Streaming track information can arrive after readiness; unknown audio status is omitted rather than reported as silence.
 
-`status --json` includes `errorReason` when a media failure is diagnosed: network, unavailable source, unreadable media, missing video, protected media, or unsupported external playback. Unclassified failures remain `load_failed` or `playback_interrupted`; messages omit underlying URLs and request details.
+`status --json` includes `errorReason` when a media failure is diagnosed: network, unavailable source, unreadable media, missing video, protected media, or unsupported external playback. Website failures additionally distinguish missing helpers, resolution failure/timeout, unsupported pages, and required media preparation. Unclassified player failures remain `load_failed` or `playback_interrupted`; messages omit underlying URLs and request details. During extraction, the existing `loading` state has an optional `loadingPhase: "resolving"` field.
 
 The CLI is also bundled at `AirPlayer.app/Contents/MacOS/airplayer`. Set `AIRPLAYER_APP` to the app's path if needed. Commands operate in the logged-in desktop session.
 
@@ -54,9 +68,11 @@ The CLI is also bundled at `AirPlayer.app/Contents/MacOS/airplayer`. Set `AIRPLA
 
 - Direct HTTP/HTTPS video supported by AVFoundation and the receiver; MP4 and HLS are the initial formats. Other extensions are accepted too; file extension alone does not establish compatibility. Native loading does not prove receiver playback.
 - Sources need their own audio track or HLS audio rendition. The app warns about detected video-only sources and does not combine separate audio/video URLs.
-- Website watch pages, yt-dlp extraction, remuxing, transcoding, custom headers/cookies, DRM integrations, and local-file input are not implemented.
+- Website extraction is limited to the experimental YouTube path above. Remuxing, transcoding, custom headers/cookies, DRM integrations, and local-file input are not implemented.
 - Audio-only AirPlay speakers cannot display video. Television/receiver controls own volume.
 - Apple TV Remote integration uses public Now Playing and remote-command APIs; actual receiver behavior remains subject to hardware testing.
+
+Stop and URL replacement cancel extraction, including its JavaScript process. A source reported unavailable during initial website loading gets one re-resolution attempt; established playback is never automatically restarted. Load the original link again if it later expires.
 
 The app stores no media history or pairing credentials of its own. Media URLs stay in memory and are omitted from status and errors; shell history is managed by your shell. macOS manages pairing and may save window geometry.
 

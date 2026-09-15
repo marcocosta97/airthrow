@@ -33,12 +33,12 @@ struct ControllerView: View {
                         .focused($urlFocused)
                         .onSubmit(load)
                         .accessibilityLabel("Video URL")
-                        .help("A direct MP4 or HLS video URL")
+                        .help("A direct video URL or a YouTube video link")
                     Button("Load", action: load)
                         .disabled(url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         .help("Load this video without starting playback")
                 }
-                Text("Direct MP4 or HLS links")
+                Text("Direct video or YouTube links")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
@@ -161,7 +161,7 @@ struct ControllerView: View {
     private var stateLabel: String {
         switch status.state {
         case .idle: "Ready for your next video"
-        case .loading: "Loading video…"
+        case .loading: controller.snapshot.loadingPhase == "resolving" ? "Finding video…" : "Loading video…"
         case .connecting: "Connecting to AirPlay…"
         case .awaitingReceiver: "Ready to connect"
         case .ready: "Ready to play"

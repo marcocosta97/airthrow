@@ -20,6 +20,10 @@ final class PlaybackController: ObservableObject {
     private var probeTask: Task<Void, Never>?
     private var generation = UUID()
     private var loading = false
+    private var resolving = false
+    private var websiteURL: URL?
+    private var retriedResolution = false
+    private let resolveSource: @Sendable (URL) async throws -> ResolvedSource
     private var ended = false
     private var hasPlayed = false
     private var probing = false
@@ -39,7 +43,10 @@ final class PlaybackController: ObservableObject {
     private var remoteTargets: [(MPRemoteCommand, Any)] = []
     private var activity: NSObjectProtocol?
 
-    init() {
+    init(resolveSource: @escaping @Sendable (URL) async throws -> ResolvedSource = {
+        try await SourceResolver().resolve($0)
+    }) {
+        self.resolveSource = resolveSource
         player.allowsExternalPlayback = true
         player.isMuted = true
         observations = [
@@ -60,18 +67,30 @@ final class PlaybackController: ObservableObject {
     }
 
     func load(_ input: String) throws {
-        let url = try MediaInput.url(input)
+        startLoad(try MediaInput.url(input))
+    }
+
+    private func startLoad(_ url: URL, retry: Bool = false) {
         let retryRoute = hasOpenedPicker || player.isExternalPlaybackActive
         resetItem(keepPlayerItem: true)
         probeWhenReady = retryRoute
         let id = generation
         loading = true
+        resolving = SourceResolver.isWebsite(url)
+        websiteURL = resolving ? url : nil
+        retriedResolution = retry
         title = url.host ?? "Video"
         notice = nil
         refresh()
+        let resolver = resolveSource
         loadTask = Task { [weak self] in
-            let asset = AVURLAsset(url: url)
             do {
+                let source = try await resolver(url)
+                guard let self, !Task.isCancelled, self.generation == id else { return }
+                self.resolving = false
+                self.scheduleLoadTimeout(id: id)
+                self.refresh()
+                let asset = AVURLAsset(url: source.url)
                 let playable = try await asset.load(.isPlayable)
                 let video = try await asset.loadTracks(withMediaType: .video)
                 // HLS may expose alternate audio as media-selection options.
@@ -89,7 +108,7 @@ final class PlaybackController: ObservableObject {
                         } catch { detectedAudio = nil }
                     }
                 }
-                guard let self, !Task.isCancelled, self.generation == id else { return }
+                guard !Task.isCancelled, self.generation == id else { return }
                 guard playable else {
                     self.fail(.unreadableMedia)
                     return
@@ -156,9 +175,15 @@ final class PlaybackController: ObservableObject {
                 self.refresh()
             } catch {
                 guard let self, !Task.isCancelled, self.generation == id else { return }
-                self.fail(MediaDiagnostics.reason(for: error, fallback: .loadFailed))
+                self.fail((error as? ResolutionFailure)?.reason
+                    ?? MediaDiagnostics.reason(for: error, fallback: .loadFailed))
             }
         }
+        if !resolving { scheduleLoadTimeout(id: id) }
+    }
+
+    private func scheduleLoadTimeout(id: UUID) {
+        timeoutTask?.cancel()
         timeoutTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(30))
             guard !Task.isCancelled, let self, self.generation == id, self.loading else { return }
@@ -279,13 +304,21 @@ final class PlaybackController: ObservableObject {
         probeWhenReady = false
         // Avoid a nil item between URLs: swap directly on the same player.
         if !keepPlayerItem { player.replaceCurrentItem(with: nil) }
-        loading = false; ended = false; hasPlayed = false; failure = nil; failureReason = nil
+        loading = false; resolving = false; websiteURL = nil; retriedResolution = false
+        ended = false; hasPlayed = false; failure = nil; failureReason = nil
         hasAudio = nil
         hasVideo = false
         wasExternal = player.isExternalPlaybackActive
     }
 
     private func fail(_ reason: MediaFailureReason, message: String? = nil) {
+        // A stale signed source may fail during initial loading. Resolve once more,
+        // still paused. Never restart established playback or retry indefinitely.
+        if reason == .sourceUnavailable, let websiteURL, !retriedResolution, !hasPlayed {
+            startLoad(websiteURL, retry: true)
+            return
+        }
+        resolving = false
         cancelProbe(restorePosition: false)
         loading = false
         failureReason = reason
@@ -324,15 +357,9 @@ final class PlaybackController: ObservableObject {
         }
         let item = mediaItem
         if item?.status == .failed && failure == nil {
-            cancelProbe(restorePosition: false)
-            loading = false
-            timeoutTask?.cancel()
-            let reason = MediaDiagnostics.reason(for: item?.error,
-                fallback: hasPlayed ? .playbackInterrupted : .loadFailed)
-            failureReason = reason
-            failure = reason.message
-            player.pause()
-            player.isMuted = true
+            fail(MediaDiagnostics.reason(for: item?.error,
+                fallback: hasPlayed ? .playbackInterrupted : .loadFailed))
+            return
         }
         if let item, item.status == .readyToPlay, failure == nil {
             // Streaming assets may expose no AVAsset tracks. Inspect the ready
@@ -370,6 +397,7 @@ final class PlaybackController: ObservableObject {
         next.externalPlaybackActive = external
         next.error = failure
         next.errorReason = failureReason
+        next.loadingPhase = resolving ? "resolving" : nil
         next.hasAudio = hasAudio
         next.duration = item.flatMap { finite($0.duration.seconds) }
         next.position = item == nil ? nil : finite(player.currentTime().seconds)
@@ -456,7 +484,7 @@ final class PlaybackController: ObservableObject {
         let hasItem = mediaItem != nil && failure == nil
         center.playCommand.isEnabled = hasItem && !loading && snapshot.externalPlaybackActive && !probing
         center.pauseCommand.isEnabled = hasItem
-        center.stopCommand.isEnabled = hasItem
+        center.stopCommand.isEnabled = hasItem || loading
         center.togglePlayPauseCommand.isEnabled = center.playCommand.isEnabled
         center.changePlaybackPositionCommand.isEnabled = center.playCommand.isEnabled && !snapshot.seekableRanges.isEmpty
         let info = MPNowPlayingInfoCenter.default()

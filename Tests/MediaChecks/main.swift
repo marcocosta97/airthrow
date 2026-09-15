@@ -163,9 +163,70 @@ struct MediaChecks {
             controller.stop()
         }
 
+        // The resolver is injected so lifecycle and expiry tests never depend on a live website.
+        controller.shutdown()
+        func waitForResolved(_ target: PlaybackController) async throws {
+            let deadline = Date().addingTimeInterval(12)
+            while Date() < deadline {
+                target.refresh()
+                if [.awaitingReceiver, .failed].contains(target.snapshot.state) { return }
+                try await Task.sleep(for: .milliseconds(30))
+            }
+            try check(false, "Resolved load did not settle")
+        }
+        let page = "https://www.youtube.com/watch?v=BaW_jenozKc"
+        let targetURL = URL(string: base + "/audio.mp4?signature=do-not-log")!
+        for failures in [1, 3] {
+            let fixture = ResolverFixture(url: targetURL, failures: failures)
+            let resolved = PlaybackController(resolveSource: { try await fixture.resolve($0) })
+            try resolved.load(page)
+            try check(resolved.snapshot.state == .loading && resolved.snapshot.loadingPhase == "resolving",
+                      "Resolution did not publish its pending phase")
+            try await waitForResolved(resolved)
+            let calls = await fixture.calls
+            try check(calls == 2, "Unavailable website source did not have exactly one retry")
+            try check(resolved.snapshot.state == (failures == 1 ? .awaitingReceiver : .failed), "Retry result incorrect")
+            try check(resolved.player.rate == 0 && resolved.player.isMuted, "Resolution/retry started playback")
+            let json = String(decoding: try JSONEncoder().encode(resolved.snapshot), as: UTF8.self)
+            try check(!json.contains("do-not-log"), "Resolved URL leaked into status")
+            resolved.shutdown()
+        }
+        let delayed = ResolverFixture(url: targetURL, failures: 0, delay: true)
+        let replaced = PlaybackController(resolveSource: { try await delayed.resolve($0) })
+        try replaced.load(page)
+        try await Task.sleep(for: .milliseconds(50))
+        replaced.stop()
+        try await Task.sleep(for: .milliseconds(100))
+        try check(replaced.snapshot.state == .idle && replaced.player.currentItem == nil, "Stopped extraction published a stale item")
+        try replaced.load(page)
+        try await Task.sleep(for: .milliseconds(50))
+        try replaced.load(base + "/video.mp4")
+        try await waitForResolved(replaced)
+        try check(replaced.snapshot.state == .awaitingReceiver && replaced.snapshot.hasAudio == false,
+                  "Stale extraction replaced the newer direct source")
+        replaced.shutdown()
+
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         print(String(decoding: try encoder.encode(results), as: UTF8.self))
-        FileHandle.standardError.write(Data("PASS diagnostics, privacy, protocol compatibility, notification lifecycle, and native media loads\n".utf8))
+        FileHandle.standardError.write(Data("PASS diagnostics, privacy, protocol compatibility, notification lifecycle, native media loads, resolver retry and cancellation\n".utf8))
+    }
+}
+
+private actor ResolverFixture {
+    let url: URL
+    let failures: Int
+    let delay: Bool
+    var calls = 0
+    init(url: URL, failures: Int, delay: Bool = false) { self.url = url; self.failures = failures; self.delay = delay }
+    func resolve(_ input: URL) async throws -> ResolvedSource {
+        guard SourceResolver.isWebsite(input) else { return ResolvedSource(url: input) }
+        calls += 1
+        // Deliberately return even when cancelled to verify the controller's generation guard.
+        if delay { try? await Task.sleep(for: .seconds(2)) }
+        if calls <= failures {
+            throw NSError(domain: AVFoundationErrorDomain, code: AVError.contentIsUnavailable.rawValue)
+        }
+        return ResolvedSource(url: url)
     }
 }
