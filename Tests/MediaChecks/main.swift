@@ -68,6 +68,28 @@ struct MediaChecks {
         let base = CommandLine.arguments[1]
         let cases = try JSONDecoder().decode([MediaCase].self,
             from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[2])))
+        // Exercise the real bounded HTTP reader, including a response with no
+        // Content-Length, so a chunked/unbounded body cannot bypass the limit.
+        for path in ["oversized-master", "oversized-stream", "missing-master"] {
+            do {
+                _ = try await HLSMaster.fetch(URL(string: base + "/" + path)!)
+                try check(false, "Invalid manifest response was accepted")
+            } catch is ResolutionFailure {}
+        }
+        let cancelledFetch = Task { try await HLSMaster.fetch(URL(string: base + "/slow.mp4")!) }
+        try await Task.sleep(for: .milliseconds(100))
+        cancelledFetch.cancel()
+        do {
+            _ = try await cancelledFetch.value
+            try check(false, "Cancelled manifest fetch returned data")
+        } catch is CancellationError {} catch let error as URLError {
+            try check(error.code == .cancelled, "Manifest cancellation returned wrong error")
+        }
+        if cases.contains(where: { $0.name == "HLS alternate audio" }) {
+            let url = URL(string: base + "/alternate-audio.m3u8")!
+            let data = try await HLSMaster.fetch(url)
+            try check(HLSMaster.hasAudioVideo(data, at: url), "Local alternate-audio master was not recognized")
+        }
         let controller = PlaybackController(prepareSource: nil)
         defer { controller.shutdown() }
         func settled(states: [PlaybackState] = [.awaitingReceiver, .failed], audio: Bool? = nil) async throws -> PlaybackSnapshot {

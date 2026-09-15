@@ -122,7 +122,48 @@ public struct SourceResolver: Sendable {
                          "--no-playlist", "--playlist-items", "1", "--simulate", "--dump-single-json",
                          "--no-warnings", "--socket-timeout", "10",
                          "--retries", "0", "--extractor-retries", "0", "--", page.absoluteString]
-        return try Self.select(try await HelperProcess.run(executable: helper, arguments: arguments))
+        let data = try await HelperProcess.run(executable: helper, arguments: arguments)
+        return try await Self.selectWithHLS(data)
+    }
+
+    /// yt-dlp flattens alternate-audio HLS into video-only and audio-only
+    /// formats. Their shared master URL can still be a complete presentation.
+    static func selectWithHLS(_ data: Data,
+        fetch: @Sendable (URL) async throws -> Data = HLSMaster.fetch) async throws -> ResolvedSource {
+        let info = try validatedInfo(data)
+        let fallback: ResolvedSource?
+        do { fallback = try select(data) }
+        catch ResolutionFailure.preparationRequired { fallback = nil }
+        if let fallback, !fallback.needsPreparation { return fallback }
+
+        var seen = Set<URL>()
+        for format in info.formats ?? [] {
+            let headers = (info.http_headers ?? [:]).merging(format.http_headers ?? [:]) { _, rhs in rhs }
+            guard format.has_drm != true,
+                  ["m3u8", "m3u8_native"].contains(format.protocol ?? ""),
+                  format.vcodec == "h264" || format.vcodec?.hasPrefix("avc1") == true,
+                  let raw = format.manifest_url, let master = try? MediaInput.url(raw),
+                  headers.keys.allSatisfy({ defaultHeaders.contains($0.lowercased()) }),
+                  seen.insert(master).inserted else { continue }
+            // Bound the total extra work even when an extractor reports many masters.
+            if seen.count > 2 { break }
+            try Task.checkCancellation()
+            do {
+                let manifest = try await fetch(master)
+                try Task.checkCancellation()
+                if HLSMaster.hasAudioVideo(manifest, at: master) {
+                    return ResolvedSource(url: master, title: cleanTitle(info.title))
+                }
+            } catch {
+                try Task.checkCancellation()
+                if error is CancellationError { throw error }
+                // Expired/unavailable/malformed masters must not remove the
+                // existing compatible MP4 fallback or expose network error text.
+            }
+        }
+        try Task.checkCancellation()
+        guard let fallback else { throw ResolutionFailure.preparationRequired }
+        return fallback
     }
 
     public func resolvePlaylist(_ url: URL) async throws -> ResolvedPlaylist {
@@ -172,7 +213,7 @@ public struct SourceResolver: Sendable {
     // All other headers require a future Mac-side delivery path. No private AVURLAsset options.
     private static let defaultHeaders: Set<String> = ["user-agent", "accept", "accept-language", "sec-fetch-mode"]
 
-    static func select(_ data: Data) throws -> ResolvedSource {
+    private static func validatedInfo(_ data: Data) throws -> Info {
         let info: Info
         do { info = try JSONDecoder().decode(Info.self, from: data) }
         catch { throw ResolutionFailure.failed }
@@ -182,6 +223,11 @@ public struct SourceResolver: Sendable {
             throw ResolutionFailure.unsupportedPage
         }
         guard info.has_drm != true else { throw ResolutionFailure.protectedMedia }
+        return info
+    }
+
+    static func select(_ data: Data) throws -> ResolvedSource {
+        let info = try validatedInfo(data)
         guard let formats = info.formats, !formats.isEmpty else { throw ResolutionFailure.failed }
         let title = cleanTitle(info.title)
         var candidates: [(Format, ResolvedSource)] = []
@@ -263,6 +309,7 @@ public struct SourceResolver: Sendable {
     private struct Ignored: Decodable {}
     private struct Format: Decodable {
         let url: String?
+        let manifest_url: String?
         let vcodec: String?
         let acodec: String?
         let ext: String?
@@ -272,5 +319,92 @@ public struct SourceResolver: Sendable {
         let tbr: Double?
         let http_headers: [String: String]?
         let fragments: [Ignored]?
+    }
+}
+
+/// Conservative recognition of a native HLS presentation, not a playlist
+/// rewriter. AVPlayer owns rendition selection, fetching and synchronization.
+enum HLSMaster {
+    static let maximumBytes = 1024 * 1024
+
+    static func fetch(_ url: URL) async throws -> Data {
+        let config = URLSessionConfiguration.ephemeral
+        config.httpCookieStorage = nil
+        config.urlCredentialStorage = nil
+        config.urlCache = nil
+        config.timeoutIntervalForRequest = 6
+        config.timeoutIntervalForResource = 8
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        let (bytes, response) = try await session.bytes(from: url)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              http.expectedContentLength <= maximumBytes else { throw ResolutionFailure.failed }
+        var data = Data()
+        for try await byte in bytes {
+            try Task.checkCancellation()
+            guard data.count < maximumBytes else { throw ResolutionFailure.tooMuchOutput }
+            data.append(byte)
+        }
+        return data
+    }
+
+    static func hasAudioVideo(_ data: Data, at base: URL) -> Bool {
+        guard data.count <= maximumBytes, let text = String(data: data, encoding: .utf8) else { return false }
+        let lines = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
+        guard lines.first == "#EXTM3U",
+              !lines.contains(where: { $0.hasPrefix("#EXT-X-SESSION-KEY:") }) else { return false }
+        var audioGroups = Set<String>()
+        for line in lines where line.hasPrefix("#EXT-X-MEDIA:") {
+            guard let attrs = attributes(String(line.dropFirst("#EXT-X-MEDIA:".count))),
+                  attrs["TYPE"] == "AUDIO", let group = attrs["GROUP-ID"], !group.isEmpty,
+                  let uri = attrs["URI"], validURI(uri, at: base) else { continue }
+            audioGroups.insert(group)
+        }
+        for (index, line) in lines.enumerated() where line.hasPrefix("#EXT-X-STREAM-INF:") {
+            guard let attrs = attributes(String(line.dropFirst("#EXT-X-STREAM-INF:".count))),
+                  let codecs = attrs["CODECS"]?.split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }),
+                  codecs.count == 2, codecs.contains(where: { $0.hasPrefix("avc1.") }),
+                  codecs.contains(where: { ["mp4a.40.2", "mp4a.40.5", "mp4a.40.29"].contains($0) }),
+                  attrs["VIDEO-RANGE"] == nil || attrs["VIDEO-RANGE"] == "SDR",
+                  let bandwidth = attrs["BANDWIDTH"].flatMap(Int.init), bandwidth > 0,
+                  index + 1 < lines.count, validURI(lines[index + 1], at: base) else { continue }
+            // With no AUDIO attribute the advertised audio is muxed in the variant.
+            if let group = attrs["AUDIO"], !audioGroups.contains(group) { continue }
+            return true
+        }
+        return false
+    }
+
+    private static func validURI(_ value: String, at base: URL) -> Bool {
+        guard !value.isEmpty, !value.hasPrefix("#"),
+              !value.unicodeScalars.contains(where: { CharacterSet.whitespacesAndNewlines.contains($0) || CharacterSet.controlCharacters.contains($0) }),
+              let url = URL(string: value, relativeTo: base)?.absoluteURL else { return false }
+        return (try? MediaInput.url(url.absoluteString)) != nil
+    }
+
+    // Attribute lists contain commas inside quoted CODECS and URI values.
+    // Reject duplicate keys and unbalanced quotes rather than guessing.
+    private static func attributes(_ text: String) -> [String: String]? {
+        var fields: [String] = []
+        var current = ""
+        var quoted = false
+        for char in text {
+            if char == "\"" { quoted.toggle() }
+            if char == ",", !quoted { fields.append(current); current = "" }
+            else { current.append(char) }
+        }
+        guard !quoted else { return nil }
+        fields.append(current)
+        var result: [String: String] = [:]
+        for field in fields {
+            guard let split = field.firstIndex(of: "=") else { return nil }
+            let key = String(field[..<split]).trimmingCharacters(in: .whitespaces)
+            var value = String(field[field.index(after: split)...]).trimmingCharacters(in: .whitespaces)
+            guard !key.isEmpty, !value.isEmpty, result[key] == nil else { return nil }
+            if value.hasPrefix("\"") && value.hasSuffix("\"") { value = String(value.dropFirst().dropLast()) }
+            guard !value.contains("\"") else { return nil }
+            result[key] = value
+        }
+        return result
     }
 }

@@ -88,6 +88,14 @@ for name, path, container, video, audio, options in extra:
     if name == 'HLS with audio':
         case('HLS without URL extension', None if reason else 'hls-no-extension', container, video, audio,
              expected='awaiting_receiver', has_audio=True, skipped=reason)
+if (out / 'silent.m3u8').exists() and (out / 'audio-only.m3u8').exists():
+    (out / 'alternate-audio.m3u8').write_text(
+        '#EXTM3U\n#EXT-X-VERSION:3\n'
+        '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="Default",DEFAULT=YES,AUTOSELECT=YES,URI="audio-only.m3u8"\n'
+        '#EXT-X-STREAM-INF:BANDWIDTH=500000,CODECS="avc1.42e01e,mp4a.40.2",AUDIO="aac"\n'
+        'silent.m3u8\n')
+    case('HLS alternate audio', 'alternate-audio.m3u8', 'HLS / MPEG-TS', 'H.264', 'AAC',
+         expected='awaiting_receiver', has_audio=True)
 (out / 'fixtures.json').write_text(json.dumps(cases, indent=2) + '\n')
 
 # Only expose generated fixtures. URL query strings are ignored and never logged.
@@ -111,6 +119,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def respond(self, body):
         name = urllib.parse.urlsplit(self.path).path.removeprefix('/')
+        if name in {'oversized-master', 'oversized-stream'}:
+            self.send_response(200)
+            if name == 'oversized-master':
+                self.send_header('Content-Length', str(1024 * 1024 + 1))
+            self.end_headers()
+            try:
+                self.wfile.write(b'x' * (1024 * 1024 + 1))
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
         path = files.get(name)
         if path is None:
             self.send_error(404)

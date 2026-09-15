@@ -4,7 +4,7 @@ import Darwin
 @main
 @MainActor
 struct ResolverChecks {
-    static func check(_ condition: Bool, _ message: String) throws {
+    nonisolated static func check(_ condition: Bool, _ message: String) throws {
         if !condition { throw NSError(domain: "ResolverChecks", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
     }
     static func expect(_ expected: ResolutionFailure, _ action: () async throws -> Void) async throws {
@@ -24,7 +24,7 @@ struct ResolverChecks {
                     result = try await SourceResolver().resolve(MediaInput.url(CommandLine.arguments[2]))
                 }
                 print(result.needsPreparation ? "Selected separate tracks for preparation; URLs and headers withheld."
-                    : "Resolved a combined source; URLs and headers withheld.")
+                    : "Resolved a native audio/video presentation; URLs and headers withheld.")
             } catch let error as ResolutionFailure {
                 print("\(error.reason.rawValue): \(error.reason.message)")
                 exit(1)
@@ -90,6 +90,79 @@ struct ResolverChecks {
         try await expect(.failed) { _ = try SourceResolver.select(Data("broken JSON with secret URL".utf8)) }
         print("PASS combined/HLS selection; separate tracks, unknown codecs, custom headers, DRM and live/playlist restrictions")
 
+        let masterURL = URL(string: "https://media.example/master.m3u8?signature=secret")!
+        let master = """
+        #EXTM3U
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Italian, default",URI="audio.m3u8?token=a,b",DEFAULT=YES,AUTOSELECT=YES
+        #EXT-X-STREAM-INF:BANDWIDTH=4000000,CODECS="avc1.64002a,mp4a.40.2",RESOLUTION=1920x1080,AUDIO="audio"
+        video.m3u8
+        """
+        let masterData = Data(master.utf8)
+        let adaptiveVideo = separateVideo.merging(["protocol": "m3u8_native", "manifest_url": masterURL.absoluteString]) { _, rhs in rhs }
+        let adaptiveData = try metadata([adaptiveVideo, separateVideo, separateAudio], extra: ["title": "HLS title"])
+        try check(HLSMaster.hasAudioVideo(masterData, at: masterURL), "Alternate audio master was not recognized")
+        let native = try await SourceResolver.selectWithHLS(adaptiveData) { url in
+            try check(url == masterURL, "Fetched a leaf rendition instead of the master")
+            return masterData
+        }
+        try check(native.url == masterURL && !native.needsPreparation && native.audio == nil && native.title == "HLS title",
+                  "Validated master did not bypass complete-file preparation")
+        let hlsOnly = try await SourceResolver.selectWithHLS(metadata([adaptiveVideo])) { _ in masterData }
+        try check(hlsOnly.url == masterURL, "HLS required a progressive fallback to work")
+        let invalidMasters = [
+            master.replacingOccurrences(of: "GROUP-ID=\"audio\"", with: "GROUP-ID=\"other\""),
+            master.replacingOccurrences(of: ",mp4a.40.2", with: ""),
+            master.replacingOccurrences(of: "avc1.64002a", with: "vp09.00.40.08"),
+            master.replacingOccurrences(of: "URI=\"audio.m3u8?token=a,b\"", with: "URI=\"file:///tmp/audio.m3u8\""),
+            master.replacingOccurrences(of: "video.m3u8", with: "data:video/mp4,invalid"),
+            master.replacingOccurrences(of: "CODECS=", with: "AUDIO=\"duplicate\",CODECS="),
+            master + "\n#EXT-X-SESSION-KEY:METHOD=SAMPLE-AES,URI=\"key\"",
+            "#EXTM3U\n#EXTINF:6,\nsegment.ts\n#EXT-X-ENDLIST",
+            "<html>Access denied</html>",
+            master.replacingOccurrences(of: "NAME=\"Italian, default\"", with: "NAME=\"unclosed")
+        ]
+        for invalid in invalidMasters {
+            let data = Data(invalid.utf8)
+            try check(!HLSMaster.hasAudioVideo(data, at: masterURL), "Invalid or silent master accepted")
+            let result = try await SourceResolver.selectWithHLS(adaptiveData) { _ in data }
+            try check(result.needsPreparation, "Invalid master removed the preparation fallback")
+        }
+        try check(!HLSMaster.hasAudioVideo(Data(repeating: 65, count: HLSMaster.maximumBytes + 1), at: masterURL),
+                  "Oversized manifest was accepted")
+        let failedMaster = try await SourceResolver.selectWithHLS(adaptiveData) { _ in throw URLError(.timedOut) }
+        try check(failedMaster.needsPreparation, "Master network failure removed the fallback")
+        do {
+            _ = try await SourceResolver.selectWithHLS(adaptiveData) { _ in throw CancellationError() }
+            try check(false, "Cancelled master fetch started preparation")
+        } catch is CancellationError {}
+        let combinedFirst = try await SourceResolver.selectWithHLS(metadata([adaptiveVideo, combined])) { _ in
+            try check(false, "Existing combined source performed an unnecessary manifest fetch")
+            return masterData
+        }
+        try check(combinedFirst.url.path == "/video", "Combined source lost priority")
+        let customHeader = adaptiveVideo.merging(["http_headers": ["Cookie": "secret"]]) { _, rhs in rhs }
+        let customFallback = try await SourceResolver.selectWithHLS(metadata([customHeader, separateVideo, separateAudio])) { _ in
+            try check(false, "Custom headers were ignored for a master candidate")
+            return masterData
+        }
+        try check(customFallback.needsPreparation, "Custom-header master selected")
+        let manyMasters = (0..<8).map { index in
+            adaptiveVideo.merging(["manifest_url": "https://media.example/master\(index).m3u8"]) { _, rhs in rhs }
+        }
+        let counter = ManifestCounter()
+        _ = try await SourceResolver.selectWithHLS(metadata(manyMasters + [separateVideo, separateAudio])) { _ in
+            await counter.increment()
+            throw URLError(.timedOut)
+        }
+        try check(await counter.count == 2, "Too many master URLs fetched")
+        let duplicateCounter = ManifestCounter()
+        _ = try await SourceResolver.selectWithHLS(metadata([adaptiveVideo, adaptiveVideo, separateVideo, separateAudio])) { _ in
+            await duplicateCounter.increment()
+            return Data()
+        }
+        try check(await duplicateCounter.count == 1, "Master URLs were not deduplicated")
+        print("PASS alternate-audio HLS masters, selection priority, fallback, malformed input, size/attempt bounds and cancellation")
+
         var playlistEntries: [[String: Any]] = [
             ["id": "BaW_jenozKc", "title": " First "],
             ["id": "jNQXAC9IVRw", "title": "Live", "is_live": true],
@@ -141,4 +214,9 @@ struct ResolverChecks {
         print("PASS structured output, controlled flags, nonzero exit, output limit, timeout and process-group cancellation")
         print("All resolver checks passed (no physical receiver)")
     }
+}
+
+private actor ManifestCounter {
+    private(set) var count = 0
+    func increment() { count += 1 }
 }
