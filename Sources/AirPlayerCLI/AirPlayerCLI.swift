@@ -13,10 +13,12 @@ struct AirPlayerCLI {
             AirPlayer — control the native AirPlay video session
 
             Usage:
-              airplayer open URL        Load a direct video URL or YouTube link, paused
+              airplayer open URL        Load a video or public YouTube playlist, paused
               airplayer play            Start/resume on the selected video receiver
               airplayer pause           Pause the current session
               airplayer seek SECONDS    Seek to an absolute position
+              airplayer previous        Load the previous playlist item
+              airplayer next            Load the next playlist item
               airplayer stop            Stop and unload the video
               airplayer status [--json] Show observed playback state
               airplayer show            Open the controller and choose a receiver
@@ -97,11 +99,16 @@ struct AirPlayerCLI {
             FileHandle.standardError.write(Data((error.message + "\n").utf8))
         } else if let status = response.status {
             print("\(response.message)\nState: \(status.state.rawValue)\nExternal video: \(status.externalPlaybackActive ? "yes" : "no")")
+            print("Title: \(status.title)")
             if status.loadingPhase == "resolving" { print("Finding video…") }
             if status.loadingPhase == "preparing" { print("Preparing video…") }
             if let position = status.position { print("Position: \(String(format: "%.1f", position))s") }
             if let hasAudio = status.hasAudio {
                 print(hasAudio ? "Audio track: detected" : "Audio track: not detected; try a link that includes audio")
+            }
+            if let queue = status.queue {
+                print("Playlist: \(queue.title)")
+                print("Item: \(queue.currentIndex + 1)/\(queue.items.count)")
             }
             if let error = status.error { print("Playback error: \(error)") }
         } else { print(response.message) }

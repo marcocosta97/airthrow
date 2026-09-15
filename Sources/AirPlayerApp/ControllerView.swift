@@ -33,12 +33,12 @@ struct ControllerView: View {
                         .focused($urlFocused)
                         .onSubmit(load)
                         .accessibilityLabel("Video URL")
-                        .help("A direct video URL or a YouTube video link")
+                    .help("A direct video URL, YouTube video, or public YouTube playlist")
                     Button("Load", action: load)
                         .disabled(url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         .help("Load this video without starting playback")
                 }
-                Text("Direct video or YouTube links")
+                Text("Direct video, YouTube video, or public playlist")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
@@ -104,7 +104,42 @@ struct ControllerView: View {
                 }
                 .padding(.top, 6)
 
+                if let queue = status.queue {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text(queue.title).font(.subheadline.weight(.medium)).lineLimit(1)
+                            Spacer()
+                            Text("\(queue.currentIndex + 1) of \(queue.items.count)")
+                                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                        }
+                        ScrollViewReader { proxy in
+                            ScrollView {
+                                LazyVStack(alignment: .leading, spacing: 4) {
+                                    ForEach(Array(queue.items.enumerated()), id: \.offset) { index, item in
+                                        HStack(spacing: 6) {
+                                            Image(systemName: queueIcon(item.state))
+                                                .frame(width: 14).foregroundStyle(item.state == .current ? Color.accentColor : .secondary)
+                                            Text(item.title).lineLimit(1).foregroundStyle(item.state == .skipped ? .secondary : .primary)
+                                        }
+                                        .font(.caption)
+                                        .id(index)
+                                    }
+                                }
+                            }
+                            .frame(maxHeight: 72)
+                            .onChange(of: queue.currentIndex) { _, index in proxy.scrollTo(index, anchor: .center) }
+                        }
+                    }
+                    .padding(8)
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                }
+
                 HStack(spacing: 12) {
+                    if let queue = status.queue {
+                        Button { perform { try controller.previous() } } label: { Image(systemName: "backward.end.fill") }
+                            .disabled(queue.currentIndex == 0 || busy)
+                            .help("Previous playlist item").accessibilityLabel("Previous playlist item")
+                    }
                     Button { perform { try controller.seek(max(range?.start ?? 0, (status.position ?? 0) - 10)) } } label: {
                         Image(systemName: "gobackward.10")
                     }
@@ -124,6 +159,12 @@ struct ControllerView: View {
                     Button { controller.stop() } label: { Image(systemName: "stop.fill") }
                         .disabled(status.state == .idle)
                         .help("Stop and unload video").accessibilityLabel("Stop")
+
+                    if let queue = status.queue {
+                        Button { perform { try controller.next() } } label: { Image(systemName: "forward.end.fill") }
+                            .disabled(queue.currentIndex + 1 >= queue.items.count || busy)
+                            .help("Next playlist item").accessibilityLabel("Next playlist item")
+                    }
                 }
                 .controlSize(.large)
                 .padding(.top, 8)
@@ -173,6 +214,13 @@ struct ControllerView: View {
         let value = Int(seconds)
         if value >= 3600 { return String(format: "%d:%02d:%02d", value / 3600, (value / 60) % 60, value % 60) }
         return String(format: "%d:%02d", value / 60, value % 60)
+    }
+    private func queueIcon(_ state: QueueItemState) -> String {
+        switch state {
+        case .current: "play.circle.fill"
+        case .skipped: "exclamationmark.circle"
+        case .pending: "circle"
+        }
     }
     private var stateLabel: String {
         switch status.state {

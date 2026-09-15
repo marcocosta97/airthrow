@@ -8,6 +8,14 @@ import AirPlayerCore
 
 @MainActor
 final class PlaybackController: ObservableObject {
+    private struct QueueState {
+        let title: String
+        let entries: [PlaylistEntry]
+        let truncated: Bool
+        var currentIndex: Int
+        var skipped: Set<Int> = []
+    }
+
     let player = AVPlayer()
     @Published private(set) var snapshot = PlaybackSnapshot()
     @Published private(set) var notice: String?
@@ -32,6 +40,7 @@ final class PlaybackController: ObservableObject {
     private var websiteURL: URL?
     private var retriedResolution = false
     private let resolveSource: @Sendable (URL) async throws -> ResolvedSource
+    private let resolvePlaylist: @Sendable (URL) async throws -> ResolvedPlaylist
     private let afterPlaybackBehavior: @MainActor () -> AfterPlaybackBehavior
     private var ended = false
     private var hasPlayed = false
@@ -51,9 +60,15 @@ final class PlaybackController: ObservableObject {
     private var title = "No video loaded"
     private var remoteTargets: [(MPRemoteCommand, Any)] = []
     private var activity: NSObjectProtocol?
+    private var queue: QueueState?
+    private var queueDirection = 1
+    private var queueAttemptsRemaining = 0
+    private var playWhenReady = false
 
     init(resolveSource: @escaping @Sendable (URL) async throws -> ResolvedSource = {
         try await SourceResolver().resolve($0)
+    }, resolvePlaylist: @escaping @Sendable (URL) async throws -> ResolvedPlaylist = {
+        try await SourceResolver().resolvePlaylist($0)
     }, prepareSource: (@Sendable (ResolvedSource) async throws -> PreparedMedia)? = {
         try await MediaPreparer().prepare($0)
     }, afterPlaybackBehavior: @escaping @MainActor () -> AfterPlaybackBehavior = {
@@ -61,6 +76,7 @@ final class PlaybackController: ObservableObject {
         return AfterPlaybackBehavior(rawValue: raw) ?? .keepConnected
     }) {
         self.resolveSource = resolveSource
+        self.resolvePlaylist = resolvePlaylist
         self.prepareSource = prepareSource
         self.afterPlaybackBehavior = afterPlaybackBehavior
         player.allowsExternalPlayback = true
@@ -83,12 +99,50 @@ final class PlaybackController: ObservableObject {
     }
 
     func load(_ input: String) throws {
-        startLoad(try MediaInput.url(input))
+        let url = try MediaInput.url(input)
+        if SourceResolver.playlistPage(url) != nil {
+            startPlaylistLoad(url)
+        } else {
+            startLoad(url)
+        }
     }
 
-    private func startLoad(_ url: URL, retry: Bool = false, remux: Bool = false) {
+    private func startPlaylistLoad(_ url: URL) {
         let retryRoute = hasOpenedPicker || player.isExternalPlaybackActive
         resetItem(keepPlayerItem: true)
+        probeWhenReady = retryRoute
+        let id = generation
+        loading = true
+        resolving = true
+        title = "YouTube playlist"
+        notice = nil
+        refresh()
+        let resolver = resolvePlaylist
+        loadTask = Task { [weak self] in
+            defer { self?.drainingLoads.removeValue(forKey: id) }
+            do {
+                let playlist = try await resolver(url)
+                guard let self, !Task.isCancelled, self.generation == id else { return }
+                self.loadTask = nil
+                self.queue = QueueState(title: playlist.title, entries: playlist.entries,
+                                        truncated: playlist.truncated, currentIndex: 0)
+                self.notice = playlist.truncated
+                    ? "This playlist was limited to the first \(SourceResolver.maximumPlaylistEntries) items."
+                    : nil
+                self.loadQueueItem(at: 0, direction: 1, autoplay: false)
+            } catch {
+                guard let self, !Task.isCancelled, self.generation == id else { return }
+                self.fail((error as? ResolutionFailure)?.reason ?? .resolutionFailed)
+            }
+        }
+        drainingLoads[id] = loadTask
+    }
+
+    private func startLoad(_ url: URL, retry: Bool = false, remux: Bool = false,
+                           preservingQueue: Bool = false, autoplay: Bool = false,
+                           titleOverride: String? = nil) {
+        let retryRoute = hasOpenedPicker || player.isExternalPlaybackActive
+        resetItem(keepPlayerItem: true, preserveQueue: preservingQueue)
         probeWhenReady = retryRoute
         let id = generation
         loading = true
@@ -97,8 +151,9 @@ final class PlaybackController: ObservableObject {
         resolving = SourceResolver.isWebsite(url)
         websiteURL = resolving ? url : nil
         retriedResolution = retry
-        title = url.host ?? "Video"
-        notice = nil
+        title = titleOverride ?? url.host ?? "Video"
+        playWhenReady = autoplay
+        if !preservingQueue { notice = nil }
         refresh()
         let resolver = resolveSource
         loadTask = Task { [weak self] in
@@ -192,7 +247,18 @@ final class PlaybackController: ObservableObject {
                             }
                             return
                         }
-                        if self.afterPlaybackBehavior() == .unloadVideo {
+                        let hasNext = self.queue.map { $0.currentIndex + 1 < $0.entries.count } ?? false
+                        if QueuePolicy.shouldAdvanceAfterEnd(hasPlayed: self.hasPlayed,
+                            externalPlaybackActive: self.player.isExternalPlaybackActive,
+                            isProbing: self.probing, hasNext: hasNext) {
+                            self.loadQueueItem(at: (self.queue?.currentIndex ?? -1) + 1,
+                                               direction: 1, autoplay: true)
+                        } else if self.queue != nil {
+                            self.ended = true
+                            self.player.pause()
+                            if !hasNext { self.notice = "End of playlist." }
+                            self.refresh()
+                        } else if self.afterPlaybackBehavior() == .unloadVideo {
                             self.stop()
                             self.notice = "Playback finished. The video was unloaded."
                         } else {
@@ -260,6 +326,7 @@ final class PlaybackController: ObservableObject {
     }
 
     func pause() {
+        playWhenReady = false
         probeWhenReady = false
         cancelProbe(restorePosition: true)
         player.pause()
@@ -271,6 +338,50 @@ final class PlaybackController: ObservableObject {
         title = "No video loaded"
         notice = nil
         refresh()
+    }
+
+    func previous() throws {
+        guard let queue, queue.currentIndex > 0 else {
+            throw AppFailure(.unsupportedOperation, "There is no previous playlist item.")
+        }
+        let autoplay = hasPlayed && player.rate > 0 && player.isExternalPlaybackActive
+        loadQueueItem(at: queue.currentIndex - 1, direction: -1, autoplay: autoplay)
+    }
+
+    func next() throws {
+        guard let queue, queue.currentIndex + 1 < queue.entries.count else {
+            throw AppFailure(.unsupportedOperation, "There is no next playlist item.")
+        }
+        let autoplay = hasPlayed && player.rate > 0 && player.isExternalPlaybackActive
+        loadQueueItem(at: queue.currentIndex + 1, direction: 1, autoplay: autoplay)
+    }
+
+    private func loadQueueItem(at requestedIndex: Int, direction: Int, autoplay: Bool,
+                               attemptsRemaining: Int? = nil) {
+        guard var queue else { return }
+        var attempts = attemptsRemaining ?? queue.entries.count
+        var index = requestedIndex
+        var skippedTitles: [String] = []
+        while attempts > 0, queue.entries.indices.contains(index), queue.entries[index].url == nil {
+            queue.skipped.insert(index)
+            skippedTitles.append(queue.entries[index].title)
+            index += direction
+            attempts -= 1
+        }
+        guard attempts > 0, queue.entries.indices.contains(index), let url = queue.entries[index].url else {
+            self.queue = queue
+            resetItem(preserveQueue: true)
+            title = queue.title
+            notice = skippedTitles.isEmpty ? "No more playable playlist items." : "Skipped unavailable items. No more playable playlist items."
+            refresh()
+            return
+        }
+        queue.currentIndex = index
+        self.queue = queue
+        queueDirection = direction
+        queueAttemptsRemaining = attempts
+        if !skippedTitles.isEmpty { notice = "Skipped \(skippedTitles.count) unavailable playlist item\(skippedTitles.count == 1 ? "" : "s")." }
+        startLoad(url, preservingQueue: true, autoplay: autoplay, titleOverride: queue.entries[index].title)
     }
 
     func seek(_ seconds: Double) throws {
@@ -355,7 +466,7 @@ final class PlaybackController: ObservableObject {
         }
     }
 
-    private func resetItem(keepPlayerItem: Bool = false) {
+    private func resetItem(keepPlayerItem: Bool = false, preserveQueue: Bool = false) {
         generation = UUID()
         loadTask?.cancel(); loadTask = nil
         loadingAsset?.cancelLoading(); loadingAsset = nil
@@ -377,21 +488,37 @@ final class PlaybackController: ObservableObject {
         loading = false; resolving = false; preparing = false; websiteURL = nil; retriedResolution = false
         originalURL = nil; attemptedPreparation = false
         ended = false; hasPlayed = false; failure = nil; failureReason = nil
+        playWhenReady = false
         hasAudio = nil
         hasVideo = false
         wasExternal = player.isExternalPlaybackActive
+        if !preserveQueue {
+            queue = nil
+            queueAttemptsRemaining = 0
+        }
     }
 
     private func fail(_ reason: MediaFailureReason, message: String? = nil) {
         // A stale signed source may fail during initial loading. Resolve once more,
         // still paused. Never restart established playback or retry indefinitely.
         if reason == .sourceUnavailable, let websiteURL, !retriedResolution, !hasPlayed {
-            startLoad(websiteURL, retry: true)
+            startLoad(websiteURL, retry: true, preservingQueue: queue != nil,
+                      autoplay: playWhenReady, titleOverride: queue.map { $0.entries[$0.currentIndex].title })
             return
         }
         if reason == .unreadableMedia, let originalURL, !SourceResolver.isWebsite(originalURL),
            !attemptedPreparation, !hasPlayed, prepareSource != nil {
             startLoad(originalURL, remux: true)
+            return
+        }
+        if var queue, queueAttemptsRemaining > 1 {
+            queue.skipped.insert(queue.currentIndex)
+            let failedTitle = queue.entries[queue.currentIndex].title
+            let nextIndex = queue.currentIndex + queueDirection
+            self.queue = queue
+            notice = "Skipped “\(failedTitle)” because it could not be played."
+            loadQueueItem(at: nextIndex, direction: queueDirection, autoplay: playWhenReady,
+                          attemptsRemaining: queueAttemptsRemaining - 1)
             return
         }
         resolving = false
@@ -476,6 +603,16 @@ final class PlaybackController: ObservableObject {
             // supplies video evidence or the existing bounded load timeout expires.
         }
         beginProbeIfReady()
+        if playWhenReady, !loading, item?.status == .readyToPlay {
+            playWhenReady = false
+            if external && !probing {
+                hasPlayed = true
+                player.isMuted = false
+                player.play()
+            } else {
+                notice = "Next playlist item is ready. Choose a receiver, then press Play."
+            }
+        }
         if external && !probing && player.rate > 0 {
             hasPlayed = true
             player.isMuted = false
@@ -488,6 +625,13 @@ final class PlaybackController: ObservableObject {
         next.errorReason = failureReason
         next.loadingPhase = resolving ? "resolving" : (preparing ? "preparing" : nil)
         next.hasAudio = hasAudio
+        if let queue {
+            next.queue = PlaybackQueueSnapshot(title: queue.title, currentIndex: queue.currentIndex,
+                items: queue.entries.indices.map { index in
+                    QueueItemSnapshot(title: queue.entries[index].title,
+                        state: index == queue.currentIndex ? .current : (queue.skipped.contains(index) ? .skipped : .pending))
+                }, truncated: queue.truncated)
+        }
         next.duration = item.flatMap { finite($0.duration.seconds) }
         next.position = item == nil ? nil : finite(player.currentTime().seconds)
         next.seekableRanges = (item?.seekableTimeRanges ?? []).compactMap {
@@ -565,6 +709,8 @@ final class PlaybackController: ObservableObject {
         register(center.playCommand, command: .play)
         register(center.pauseCommand, command: .pause)
         register(center.stopCommand, command: .stop)
+        register(center.previousTrackCommand, command: .previous)
+        register(center.nextTrackCommand, command: .next)
         let target = center.togglePlayPauseCommand.addTarget { [weak self] _ in
             Self.onMain {
                 guard let self else { return .commandFailed }
@@ -595,6 +741,8 @@ final class PlaybackController: ObservableObject {
                     case .play: try self.play()
                     case .pause: self.pause()
                     case .stop: self.stop()
+                    case .previous: try self.previous()
+                    case .next: try self.next()
                     default: return .commandFailed
                     }
                     return .success
@@ -617,6 +765,8 @@ final class PlaybackController: ObservableObject {
         center.stopCommand.isEnabled = hasItem || loading
         center.togglePlayPauseCommand.isEnabled = center.playCommand.isEnabled
         center.changePlaybackPositionCommand.isEnabled = center.playCommand.isEnabled && !snapshot.seekableRanges.isEmpty
+        center.previousTrackCommand.isEnabled = queue.map { $0.currentIndex > 0 } ?? false
+        center.nextTrackCommand.isEnabled = queue.map { $0.currentIndex + 1 < $0.entries.count } ?? false
         let info = MPNowPlayingInfoCenter.default()
         if hasItem {
             var metadata: [String: Any] = [MPMediaItemPropertyTitle: title,
@@ -625,6 +775,10 @@ final class PlaybackController: ObservableObject {
                 MPNowPlayingInfoPropertyIsLiveStream: snapshot.isLive]
             if let position = snapshot.position { metadata[MPNowPlayingInfoPropertyElapsedPlaybackTime] = position }
             if let duration = snapshot.duration { metadata[MPMediaItemPropertyPlaybackDuration] = duration }
+            if let queue {
+                metadata[MPNowPlayingInfoPropertyPlaybackQueueIndex] = queue.currentIndex
+                metadata[MPNowPlayingInfoPropertyPlaybackQueueCount] = queue.entries.count
+            }
             info.nowPlayingInfo = metadata
             info.playbackState = snapshot.state == .playing ? .playing : .paused
         } else { info.nowPlayingInfo = nil; info.playbackState = .stopped }

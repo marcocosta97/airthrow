@@ -34,7 +34,30 @@ public struct ResolvedSource: Sendable {
     }
 }
 
+public struct PlaylistEntry: Sendable, Equatable {
+    public let url: URL?
+    public let title: String
+    public let unavailableReason: String?
+    public init(url: URL?, title: String, unavailableReason: String? = nil) {
+        self.url = url
+        self.title = title
+        self.unavailableReason = unavailableReason
+    }
+}
+
+public struct ResolvedPlaylist: Sendable, Equatable {
+    public let title: String
+    public let entries: [PlaylistEntry]
+    public let truncated: Bool
+    public init(title: String, entries: [PlaylistEntry], truncated: Bool) {
+        self.title = title
+        self.entries = entries
+        self.truncated = truncated
+    }
+}
+
 public struct SourceResolver: Sendable {
+    public static let maximumPlaylistEntries = 100
     private let environment: [String: String]
     public init(environment: [String: String] = ProcessInfo.processInfo.environment) {
         self.environment = environment
@@ -43,6 +66,20 @@ public struct SourceResolver: Sendable {
     public static func isWebsite(_ url: URL) -> Bool {
         ["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be",
          "youtube-nocookie.com", "www.youtube-nocookie.com"].contains(url.host?.lowercased() ?? "")
+    }
+
+    /// Dedicated playlist pages opt into queue playback. A watch URL carrying
+    /// `list=` remains a single-video request.
+    public static func playlistPage(_ url: URL) -> URL? {
+        guard isWebsite(url), url.host?.lowercased() != "youtu.be", url.path == "/playlist",
+              let list = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+                .first(where: { $0.name == "list" })?.value,
+              (10...200).contains(list.count),
+              list.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") }),
+              !list.hasPrefix("RD") else { return nil }
+        var components = URLComponents(string: "https://www.youtube.com/playlist")!
+        components.queryItems = [URLQueryItem(name: "list", value: list)]
+        return components.url
     }
 
     /// Normalize video links, dropping playlist context and preventing playlist/channel extraction.
@@ -86,6 +123,49 @@ public struct SourceResolver: Sendable {
                          "--no-warnings", "--socket-timeout", "10",
                          "--retries", "0", "--extractor-retries", "0", "--", page.absoluteString]
         return try Self.select(try await HelperProcess.run(executable: helper, arguments: arguments))
+    }
+
+    public func resolvePlaylist(_ url: URL) async throws -> ResolvedPlaylist {
+        guard let page = Self.playlistPage(url) else { throw ResolutionFailure.unsupportedPage }
+        guard let helper = executable("yt-dlp", override: "AIRPLAYER_YTDLP"),
+              let deno = executable("deno", override: "AIRPLAYER_DENO") else {
+            throw ResolutionFailure.unavailable
+        }
+        let arguments = ["--ignore-config", "--no-plugin-dirs", "--no-cache-dir", "--no-remote-components",
+                         "--no-js-runtimes", "--js-runtimes", "deno:\(deno)",
+                         "--flat-playlist", "--playlist-end", String(Self.maximumPlaylistEntries + 1),
+                         "--simulate", "--dump-single-json", "--no-warnings", "--socket-timeout", "10",
+                         "--retries", "0", "--extractor-retries", "0", "--", page.absoluteString]
+        let data = try await HelperProcess.run(executable: helper, arguments: arguments)
+        return try Self.selectPlaylist(data)
+    }
+
+    static func selectPlaylist(_ data: Data) throws -> ResolvedPlaylist {
+        let info: PlaylistInfo
+        do { info = try JSONDecoder().decode(PlaylistInfo.self, from: data) }
+        catch { throw ResolutionFailure.failed }
+        guard info._type == "playlist", let rawEntries = info.entries, !rawEntries.isEmpty else {
+            throw ResolutionFailure.unsupportedPage
+        }
+        let truncated = rawEntries.count > maximumPlaylistEntries
+        let entries = rawEntries.prefix(maximumPlaylistEntries).enumerated().map { offset, entry in
+            guard let entry else {
+                return PlaylistEntry(url: nil, title: "Playlist item \(offset + 1)",
+                                     unavailableReason: "This playlist entry is unavailable.")
+            }
+            let title = cleanTitle(entry.title) ?? "Playlist item \(offset + 1)"
+            let live = entry.is_live == true || (entry.live_status != nil && entry.live_status != "not_live" && entry.live_status != "was_live")
+            let unavailable = entry.availability.map { !["public", "unlisted"].contains($0) } ?? false
+            let id = entry.id ?? entry.url
+            let validID = id.map { value in
+                value.count == 11 && value.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") }
+            } ?? false
+            if live { return PlaylistEntry(url: nil, title: title, unavailableReason: "Live playlist entries are not supported.") }
+            if unavailable || !validID { return PlaylistEntry(url: nil, title: title, unavailableReason: "This playlist entry is unavailable.") }
+            return PlaylistEntry(url: URL(string: "https://www.youtube.com/watch?v=\(id!)"), title: title)
+        }
+        guard entries.contains(where: { $0.url != nil }) else { throw ResolutionFailure.unsupportedPage }
+        return ResolvedPlaylist(title: cleanTitle(info.title) ?? "YouTube playlist", entries: entries, truncated: truncated)
     }
 
     // yt-dlp reports these defaults even for public URLs that need no custom headers.
@@ -166,6 +246,19 @@ public struct SourceResolver: Sendable {
         let availability: String?
         let http_headers: [String: String]?
         let title: String?
+    }
+    private struct PlaylistInfo: Decodable {
+        let _type: String?
+        let title: String?
+        let entries: [PlaylistInfoEntry?]?
+    }
+    private struct PlaylistInfoEntry: Decodable {
+        let id: String?
+        let url: String?
+        let title: String?
+        let availability: String?
+        let is_live: Bool?
+        let live_status: String?
     }
     private struct Ignored: Decodable {}
     private struct Format: Decodable {

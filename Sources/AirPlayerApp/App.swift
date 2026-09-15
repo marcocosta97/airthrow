@@ -49,7 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func showWindow() {
         if window == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 420), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 520), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
             window.title = "AirPlayer"
             window.isReleasedWhenClosed = false
             window.contentView = NSHostingView(rootView: ControllerView(controller: controller))
@@ -111,6 +111,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let seconds = request.seconds else { throw AppFailure(.invalidRequest, "The seek command requires seconds.") }
                 try controller.seek(seconds)
                 return Response(message: "Seek requested.", pending: true, status: controller.snapshot)
+            case .previous:
+                try controller.previous()
+                return Response(message: "Previous playlist item requested.", pending: true, status: controller.snapshot)
+            case .next:
+                try controller.next()
+                return Response(message: "Next playlist item requested.", pending: true, status: controller.snapshot)
             case .show: showWindow()
             case .status: controller.refresh()
             }

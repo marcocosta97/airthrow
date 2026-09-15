@@ -50,6 +50,16 @@ let tests: [(String, () throws -> Void)] = [
             external: false, ended: false, playing: false, waiting: false, hasPlayed: false) == .failed,
             "Failed item reported as loading")
     }),
+    ("playlist auto-advance gate", {
+        try check(QueuePolicy.shouldAdvanceAfterEnd(hasPlayed: true, externalPlaybackActive: true,
+            isProbing: false, hasNext: true), "Completed playing item did not advance")
+        for condition in [
+            QueuePolicy.shouldAdvanceAfterEnd(hasPlayed: false, externalPlaybackActive: true, isProbing: false, hasNext: true),
+            QueuePolicy.shouldAdvanceAfterEnd(hasPlayed: true, externalPlaybackActive: false, isProbing: false, hasNext: true),
+            QueuePolicy.shouldAdvanceAfterEnd(hasPlayed: true, externalPlaybackActive: true, isProbing: true, hasNext: true),
+            QueuePolicy.shouldAdvanceAfterEnd(hasPlayed: true, externalPlaybackActive: true, isProbing: false, hasNext: false)
+        ] { try check(!condition, "Playlist advanced without a genuine routed playback end") }
+    }),
     ("wire protocol and URL privacy", {
         let request = Request(.open, url: "https://example.com/video.mp4?token=private")
         let decoded = try JSONDecoder().decode(Request.self, from: JSONEncoder().encode(request))
@@ -58,6 +68,12 @@ let tests: [(String, () throws -> Void)] = [
         let data = try JSONEncoder().encode(response)
         try check(!String(decoding: data, as: UTF8.self).contains("token"), "Status leaked URL")
         try check(JSONDecoder().decode(Response.self, from: data).pending, "Pending response was lost")
+        var queueStatus = PlaybackSnapshot()
+        queueStatus.queue = PlaybackQueueSnapshot(title: "Example", currentIndex: 0,
+            items: [QueueItemSnapshot(title: "First", state: .current)], truncated: false)
+        let queueData = try JSONEncoder().encode(queueStatus)
+        try check(try JSONDecoder().decode(PlaybackSnapshot.self, from: queueData).queue?.items.count == 1,
+                  "Queue status did not round-trip")
     }),
     ("socket round-trip, duplicate ownership, protocol version", {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ap-test-\(UUID().uuidString.prefix(8))")

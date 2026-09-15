@@ -61,7 +61,9 @@ swiftc -swift-version 6 -parse-as-library Sources/AirPlayerCore/Protocol.swift S
 .build/ResolverChecks
 ```
 
-They cover direct bypass, exact website hosts, playlist removal, missing helpers, combined-stream selection, unknown codecs, custom headers, DRM/live restrictions, malformed output, output limits, timeout, and cancellation of child processes. The native media matrix also checks resolver Stop/replacement and exactly one retry for a source-unavailable error, with all loads paused.
+They cover direct bypass, exact website hosts, single-video playlist-context removal, bounded flat-playlist extraction, ordering, unavailable entries, Mix rejection, missing helpers, combined-stream selection, unknown codecs, custom headers, DRM/live restrictions, malformed output, output limits, timeout, and cancellation of child processes. The native media matrix also checks resolver Stop/replacement and exactly one retry for a source-unavailable error, with all loads paused.
+
+Playlist controller checks use injected deterministic metadata and media URLs. They verify that the first playable item stays paused, unavailable entries are skipped, navigation resolves items lazily, and Stop clears the queue. Physical receiver acceptance still needs normal-end automatic advancement, Previous/Next while playing and paused, route loss, replacement during preparation, and a public playlist containing both direct and remuxed entries.
 
 For an optional metadata-only live smoke check, install `yt-dlp` and `deno`, record their `--version` output, and run:
 

@@ -1,6 +1,12 @@
 import Foundation
 import AVFoundation
 
+private actor CancellationProbe {
+    private var cancelled = false
+    func markCancelled() { cancelled = true }
+    func wasCancelled() -> Bool { cancelled }
+}
+
 @main
 struct ControllerChecks {
     @MainActor static func main() async throws {
@@ -58,6 +64,68 @@ struct ControllerChecks {
         try await Task.sleep(for: .milliseconds(200))
         try check(player.currentItem == nil && controller.snapshot.state == .idle && player.rate == 0, "Stop did not cancel pending negotiation")
         print("PASS picker during loading, newer URL, and Stop preserve session boundaries")
-        print("3/3 controller checks passed (no physical receiver)")
+
+        let mediaURL = URL(string: base + "/audio.mp4")!
+        let queueController = PlaybackController(resolveSource: { url in
+            ResolvedSource(url: mediaURL, title: URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "v" })?.value)
+        }, resolvePlaylist: { _ in
+            ResolvedPlaylist(title: "Test queue", entries: [
+                PlaylistEntry(url: nil, title: "Unavailable", unavailableReason: "Unavailable"),
+                PlaylistEntry(url: URL(string: "https://www.youtube.com/watch?v=BaW_jenozKc"), title: "First"),
+                PlaylistEntry(url: URL(string: "https://www.youtube.com/watch?v=jNQXAC9IVRw"), title: "Second")
+            ], truncated: false)
+        }, prepareSource: nil)
+        defer { queueController.shutdown() }
+        func waitForQueue(_ index: Int, seconds: Double = 10) async throws {
+            let deadline = Date().addingTimeInterval(seconds)
+            while Date() < deadline {
+                queueController.refresh()
+                if queueController.snapshot.queue?.currentIndex == index,
+                   queueController.snapshot.state == .awaitingReceiver { return }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            throw NSError(domain: "ControllerChecks", code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "Timed out waiting for queue item \(index): \(queueController.snapshot)"])
+        }
+        try queueController.load("https://www.youtube.com/playlist?list=PL12345678")
+        try await waitForQueue(1)
+        try check(queueController.player.rate == 0 && queueController.player.isMuted,
+                  "First playable queue item did not stay paused")
+        try check(queueController.snapshot.queue?.items[0].state == .skipped,
+                  "Unavailable leading item was not skipped")
+        try queueController.next()
+        try await waitForQueue(2)
+        try check(queueController.snapshot.title == "jNQXAC9IVRw", "Next did not resolve near playback time")
+        try queueController.previous()
+        try await waitForQueue(1)
+        queueController.stop()
+        try check(queueController.snapshot.queue == nil && queueController.player.currentItem == nil,
+                  "Stop did not clear the queue and player item")
+        print("PASS playlist loads paused, skips unavailable entries, navigates lazily and clears on Stop")
+
+        let cancellation = CancellationProbe()
+        let replacementController = PlaybackController(resolveSource: { _ in ResolvedSource(url: mediaURL) },
+            resolvePlaylist: { _ in
+                do { try await Task.sleep(for: .seconds(5)) }
+                catch { await cancellation.markCancelled(); throw error }
+                return ResolvedPlaylist(title: "Stale", entries: [
+                    PlaylistEntry(url: URL(string: "https://www.youtube.com/watch?v=BaW_jenozKc"), title: "Stale")
+                ], truncated: false)
+            }, prepareSource: nil)
+        defer { replacementController.shutdown() }
+        try replacementController.load("https://www.youtube.com/playlist?list=PL12345678")
+        try replacementController.load(base + "/audio.mp4")
+        let replacementDeadline = Date().addingTimeInterval(10)
+        while Date() < replacementDeadline, replacementController.snapshot.state != .awaitingReceiver {
+            replacementController.refresh()
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        try check(await cancellation.wasCancelled(), "URL replacement did not cancel playlist extraction")
+        try check(replacementController.snapshot.state == .awaitingReceiver && replacementController.snapshot.queue == nil,
+                  "Stale playlist extraction replaced the newer source")
+        print("PASS URL replacement cancels playlist extraction and rejects stale queue results")
+        print("5/5 controller checks passed (no physical receiver)")
     }
 }

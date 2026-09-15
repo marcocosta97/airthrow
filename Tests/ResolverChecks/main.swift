@@ -51,6 +51,12 @@ struct ResolverChecks {
         for link in [page, URL(string: "https://youtu.be/BaW_jenozKc")!, URL(string: "https://youtube.com/shorts/BaW_jenozKc")!] {
             try check(try SourceResolver.videoPage(link).absoluteString == "https://www.youtube.com/watch?v=BaW_jenozKc", "Video link was not normalized")
         }
+        let playlistPage = URL(string: "https://youtube.com/playlist?list=PL12345678&feature=share")!
+        try check(SourceResolver.playlistPage(playlistPage)?.absoluteString == "https://www.youtube.com/playlist?list=PL12345678",
+                  "Dedicated playlist was not normalized")
+        try check(SourceResolver.playlistPage(page) == nil, "Watch URL with playlist context became a queue")
+        try check(SourceResolver.playlistPage(URL(string: "https://youtube.com/playlist?list=RD12345678")!) == nil,
+                  "YouTube Mix was accepted")
         try await expect(.unsupportedPage) { _ = try await absent.resolve(URL(string: "https://youtube.com/playlist?list=x")!) }
         try await expect(.unavailable) { _ = try await absent.resolve(page) }
         print("PASS direct bypass, exact hosts, video-only normalization and missing helpers")
@@ -83,6 +89,32 @@ struct ResolverChecks {
         }
         try await expect(.failed) { _ = try SourceResolver.select(Data("broken JSON with secret URL".utf8)) }
         print("PASS combined/HLS selection; separate tracks, unknown codecs, custom headers, DRM and live/playlist restrictions")
+
+        var playlistEntries: [[String: Any]] = [
+            ["id": "BaW_jenozKc", "title": " First "],
+            ["id": "jNQXAC9IVRw", "title": "Live", "is_live": true],
+            ["id": "aqz-KE-bpKQ", "title": "Private", "availability": "private"]
+        ]
+        playlistEntries += (3...SourceResolver.maximumPlaylistEntries).map {
+            ["id": String(format: "item%07d", $0), "title": "Item \($0)"]
+        }
+        let playlistData = try JSONSerialization.data(withJSONObject: [
+            "_type": "playlist", "title": " Test Playlist ", "entries": playlistEntries
+        ])
+        let playlist = try SourceResolver.selectPlaylist(playlistData)
+        try check(playlist.title == "Test Playlist" && playlist.entries.count == SourceResolver.maximumPlaylistEntries,
+                  "Playlist title/order/limit was not preserved")
+        try check(playlist.entries[0].url?.absoluteString == "https://www.youtube.com/watch?v=BaW_jenozKc",
+                  "Playlist entry was not normalized")
+        try check(playlist.entries[1].url == nil && playlist.entries[2].url == nil && playlist.truncated,
+                  "Unsupported playlist entries or truncation were not recorded")
+        let playlistHelper = try helper("playlist", "printf '%s\\n' \"$@\" > '\(temp.path)/playlist-args'\ncat <<'JSON'\n\(String(decoding: playlistData, as: UTF8.self))\nJSON\n")
+        let playlistResolver = SourceResolver(environment: ["AIRPLAYER_YTDLP": playlistHelper, "AIRPLAYER_DENO": "/usr/bin/true"])
+        _ = try await playlistResolver.resolvePlaylist(playlistPage)
+        let playlistArgs = try String(contentsOf: temp.appendingPathComponent("playlist-args"), encoding: .utf8)
+        try check(playlistArgs.contains("--flat-playlist") && playlistArgs.contains("--playlist-end"),
+                  "Playlist helper was not bounded to flat metadata extraction")
+        print("PASS dedicated playlist parsing, ordering, unavailable entries, Mix rejection and queue limit")
 
         let good = try helper("good", "printf '%s\\n' \"$@\" > '\(temp.path)/args'\ncat <<'JSON'\n\(String(decoding: raw, as: UTF8.self))\nJSON\n")
         let resolver = SourceResolver(environment: ["AIRPLAYER_YTDLP": good, "AIRPLAYER_DENO": "/usr/bin/true"])

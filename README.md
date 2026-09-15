@@ -17,7 +17,7 @@ This creates a locally signed app, ZIP archive, and `build/airplayer`. Pass `deb
 
 ## Play a video
 
-1. Choose a video-capable receiver using **AirPlay**, and paste a direct video URL or YouTube video link and click **Load**. Either order works.
+1. Choose a video-capable receiver using **AirPlay**, and paste a direct video URL, YouTube video link, or public YouTube playlist and click **Load**. Either order works.
 2. Press **Play** when the video and external route are ready.
 3. Use Pause, Stop, or the available timeline. Load another URL to change videos.
 
@@ -33,9 +33,11 @@ Install the optional helpers for website playback:
 brew install yt-dlp deno ffmpeg
 ```
 
-Paste a single public, on-demand YouTube watch, Shorts, or `youtu.be` link in the same field, or pass it to `airplayer open`. AirPlayer shows **Finding video…** while yt-dlp extracts metadata. It prefers a combined H.264/AAC MP4 or HLS source. If only suitable separate MP4/M4A tracks are available, it shows **Preparing video…**, copies them into a temporary MP4 without re-encoding, and serves the finished file to the receiver. Loading stays paused. Directly playable video URLs work without these helpers.
+Paste a public, on-demand YouTube watch, Shorts, `youtu.be`, or dedicated playlist link in the same field, or pass it to `airplayer open`. AirPlayer shows **Finding video…** while yt-dlp extracts metadata. It prefers a combined H.264/AAC MP4 or HLS source. If only suitable separate MP4/M4A tracks are available, it shows **Preparing video…**, copies them into a temporary MP4 without re-encoding, and serves the finished file to the receiver. Loading stays paused. Directly playable video URLs work without these helpers.
 
-Some videos offer incompatible codecs, fragmented delivery, or custom request headers that this preparation path cannot handle. These produce a limitation message. Transcoding is not implemented. Live streams, playlists, sign-in/cookies, and other websites are outside this first resolver slice. Video links with playlist context load only the named video. Local extraction does not establish receiver picture or sound.
+Dedicated `youtube.com/playlist?list=…` links create a queue of up to 100 entries. The first playable item loads paused. Use Previous and Next in the app or CLI; once playback has actually started on a receiver, a normally completed item advances to the next playable entry. Entries resolve only when selected, so signed media URLs are not retained for the whole playlist. Unavailable, live, or unsupported entries are skipped with a notice. YouTube Mixes, private/authenticated playlists, shuffle, repeat, and queue editing are not supported. A watch link that also contains `list=` continues to load only its named video.
+
+Some videos offer incompatible codecs, fragmented delivery, or custom request headers that this preparation path cannot handle. These produce a limitation message. Transcoding is not implemented. Live website streams, sign-in/cookies, and other websites remain outside this resolver slice. Local extraction does not establish receiver picture or sound.
 
 The app finds helpers in standard Homebrew locations even when launched from Finder. For development, set `AIRPLAYER_YTDLP`, `AIRPLAYER_DENO`, `AIRPLAYER_FFMPEG`, and `AIRPLAYER_FFPROBE` to absolute executable paths **in the app's launch environment**. Setting them only on a CLI command does not change an already-running app. Keep yt-dlp and its JavaScript support current; see [yt-dlp's runtime requirements](https://github.com/yt-dlp/yt-dlp/wiki/EJS). Helpers are not bundled yet.
 
@@ -46,14 +48,16 @@ The app finds helpers in standard Homebrew locations even when launched from Fin
 ./build/airplayer play
 ./build/airplayer pause
 ./build/airplayer seek 120
+./build/airplayer next
+./build/airplayer previous
 ./build/airplayer status --json
 ./build/airplayer stop
 ./build/airplayer show
 ```
 
-`open` and `show` launch the app if necessary. Select the receiver through the UI; selection by name is not supported. `open` loads paused. `seek` takes absolute seconds within the available timeline. All commands accept `--json`; `pending: true` means an operation was accepted, so query `status` for its observed result. `hasAudio`, when present, describes the source's audio tracks, not audible output at the TV. Streaming track information can arrive after readiness; unknown audio status is omitted rather than reported as silence.
+`open` and `show` launch the app if necessary. Select the receiver through the UI; selection by name is not supported. `open` loads paused. `seek` takes absolute seconds within the available timeline. `next` and `previous` navigate an active playlist. All commands accept `--json`; `pending: true` means an operation was accepted, so query `status` for its observed result. `hasAudio`, when present, describes the source's audio tracks, not audible output at the TV. Streaming track information can arrive after readiness; unknown audio status is omitted rather than reported as silence.
 
-`status --json` includes `errorReason` when a media failure is diagnosed: network, unavailable source, unreadable media, missing video, protected media, or unsupported external playback. Website failures additionally distinguish missing helpers, resolution failure/timeout, unsupported pages, and required media preparation. Unclassified player failures remain `load_failed` or `playback_interrupted`; messages omit underlying URLs and request details. During extraction or preparation, the existing `loading` state has an optional `loadingPhase` field (`resolving` or `preparing`). Preparation failures distinguish missing helpers, limits, processing failure, and local delivery failure. Live status can include `liveOffset`; the optional `diagnostics` object reports buffer ranges and state, waiting reason, bitrate estimates, and stall count without source URLs or request data.
+`status --json` includes `errorReason` when a media failure is diagnosed: network, unavailable source, unreadable media, missing video, protected media, or unsupported external playback. Website failures additionally distinguish missing helpers, resolution failure/timeout, unsupported pages, and required media preparation. Unclassified player failures remain `load_failed` or `playback_interrupted`; messages omit underlying URLs and request details. During extraction or preparation, the existing `loading` state has an optional `loadingPhase` field (`resolving` or `preparing`). An active playlist adds a privacy-safe `queue` object with its title, current zero-based index, item titles/states, and truncation flag; source URLs remain omitted. Preparation failures distinguish missing helpers, limits, processing failure, and local delivery failure. Live status can include `liveOffset`; the optional `diagnostics` object reports buffer ranges and state, waiting reason, bitrate estimates, and stall count without source URLs or request data.
 
 The CLI is also bundled at `AirPlayer.app/Contents/MacOS/airplayer`. Set `AIRPLAYER_APP` to the app's path if needed. Commands operate in the logged-in desktop session.
 

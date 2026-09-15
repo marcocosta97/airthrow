@@ -1,7 +1,7 @@
 import Foundation
 
 public enum Command: String, Codable, Sendable {
-    case open, play, pause, stop, seek, status, show
+    case open, play, pause, stop, seek, previous, next, status, show
 }
 
 public struct Request: Codable, Sendable {
@@ -83,6 +83,33 @@ public struct PlaybackDiagnostics: Codable, Sendable, Equatable {
     public init() {}
 }
 
+public enum QueueItemState: String, Codable, Sendable {
+    case pending, current, skipped
+}
+
+public struct QueueItemSnapshot: Codable, Sendable, Equatable {
+    public let title: String
+    public let state: QueueItemState
+    public init(title: String, state: QueueItemState) {
+        self.title = title
+        self.state = state
+    }
+}
+
+public struct PlaybackQueueSnapshot: Codable, Sendable, Equatable {
+    public let title: String
+    /// Zero-based index of the current entry.
+    public let currentIndex: Int
+    public let items: [QueueItemSnapshot]
+    public let truncated: Bool
+    public init(title: String, currentIndex: Int, items: [QueueItemSnapshot], truncated: Bool) {
+        self.title = title
+        self.currentIndex = currentIndex
+        self.items = items
+        self.truncated = truncated
+    }
+}
+
 public enum MediaFailureReason: String, Codable, Sendable {
     case network, sourceUnavailable = "source_unavailable"
     case unreadableMedia = "unreadable_media", noVideo = "no_video"
@@ -100,7 +127,7 @@ public enum MediaFailureReason: String, Codable, Sendable {
         case .resolverUnavailable: "Website playback needs yt-dlp and Deno. Install them with Homebrew, then load the link again."
         case .resolutionFailed: "Could not find a playable video. The page may require sign-in, be unavailable, or need an updated yt-dlp installation."
         case .resolutionTimedOut: "Finding the video timed out. Check the connection and try again."
-        case .unsupportedWebsite: "Choose a single public, on-demand YouTube video. Playlists, live streams and sign-in are not supported."
+        case .unsupportedWebsite: "Choose a public, on-demand YouTube video or dedicated public playlist. Live streams, Mixes and sign-in are not supported."
         case .preparationRequired: "This source needs conversion or a delivery method that is not supported yet. Try an H.264/AAC video."
         case .preparerUnavailable: "Preparing this video needs FFmpeg and ffprobe. Install FFmpeg with Homebrew, then load the link again."
         case .preparationFailed: "Could not prepare the video. Check the source, connection and available disk space, then load it again."
@@ -136,7 +163,16 @@ public struct PlaybackSnapshot: Codable, Sendable, Equatable {
     public var loadingPhase: String?
     /// Additive, privacy-safe observations for troubleshooting and future policy.
     public var diagnostics: PlaybackDiagnostics?
+    /// Present while a playlist owns the shared playback session.
+    public var queue: PlaybackQueueSnapshot?
     public init() {}
+}
+
+public enum QueuePolicy {
+    public static func shouldAdvanceAfterEnd(hasPlayed: Bool, externalPlaybackActive: Bool,
+                                             isProbing: Bool, hasNext: Bool) -> Bool {
+        hasPlayed && externalPlaybackActive && !isProbing && hasNext
+    }
 }
 
 public struct Response: Codable, Sendable {
