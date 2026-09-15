@@ -76,7 +76,7 @@ public struct MediaPreparer: Sendable {
     public static func cleanAbandonedFiles() { PreparationWorkspace.cleanAbandoned() }
 
     public func prepare(_ source: ResolvedSource) async throws -> PreparedMedia {
-        let finder = SourceResolver(environment: environment)
+        let finder = HelperExecutables(environment: environment)
         guard let ffmpeg = finder.executable("ffmpeg", override: "AIRPLAYER_FFMPEG"),
               let ffprobe = finder.executable("ffprobe", override: "AIRPLAYER_FFPROBE") else {
             throw PreparationFailure.unavailable

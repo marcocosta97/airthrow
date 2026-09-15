@@ -1,6 +1,20 @@
 import Foundation
 import Darwin
 
+struct HelperExecutables {
+    let environment: [String: String]
+    func executable(_ name: String, override: String) -> String? {
+        let fm = FileManager.default
+        if let path = environment[override] {
+            return path.hasPrefix("/") && fm.isExecutableFile(atPath: path) ? path : nil
+        }
+        let paths = ["/opt/homebrew/bin", "/usr/local/bin"]
+            + (environment["PATH"] ?? "").split(separator: ":").map(String.init)
+        return paths.filter { $0.hasPrefix("/") }.map { "\($0)/\(name)" }
+            .first { fm.isExecutableFile(atPath: $0) }
+    }
+}
+
 /// A private process group lets cancellation also stop the helper's JS runtime.
 /// Pipes are drained without blocking or retaining unbounded extractor output.
 enum HelperProcess {

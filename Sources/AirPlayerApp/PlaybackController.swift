@@ -33,8 +33,7 @@ final class PlaybackController: ObservableObject {
     private var loading = false
     private var resolving = false
     private var preparing = false
-    private var originalURL: URL?
-    private var attemptedPreparation = false
+    private var selectedSource: ResolvedSource?
     private var preparedMedia: PreparedMedia?
     private let prepareSource: (@Sendable (ResolvedSource) async throws -> PreparedMedia)?
     private var websiteURL: URL?
@@ -138,7 +137,7 @@ final class PlaybackController: ObservableObject {
         drainingLoads[id] = loadTask
     }
 
-    private func startLoad(_ url: URL, retry: Bool = false, remux: Bool = false,
+    private func startLoad(_ url: URL, retry: Bool = false, fallback: ResolvedSource? = nil,
                            preservingQueue: Bool = false, autoplay: Bool = false,
                            titleOverride: String? = nil) {
         let retryRoute = hasOpenedPicker || player.isExternalPlaybackActive
@@ -146,10 +145,8 @@ final class PlaybackController: ObservableObject {
         probeWhenReady = retryRoute
         let id = generation
         loading = true
-        originalURL = url
-        attemptedPreparation = remux
-        resolving = SourceResolver.isWebsite(url)
-        websiteURL = resolving ? url : nil
+        resolving = fallback == nil && SourceResolver.isWebsite(url)
+        websiteURL = SourceResolver.isWebsite(url) ? url : nil
         retriedResolution = retry
         title = titleOverride ?? url.host ?? "Video"
         playWhenReady = autoplay
@@ -159,14 +156,16 @@ final class PlaybackController: ObservableObject {
         loadTask = Task { [weak self] in
             defer { self?.drainingLoads.removeValue(forKey: id) }
             do {
-                let source = try await resolver(url)
+                let source: ResolvedSource
+                if let fallback { source = fallback }
+                else { source = try await resolver(url) }
                 guard let self, !Task.isCancelled, self.generation == id else { return }
+                self.selectedSource = source
                 if let sourceTitle = source.title { self.title = sourceTitle }
                 self.resolving = false
                 var playbackURL = source.url
-                if source.needsPreparation || remux {
+                if source.needsPreparation {
                     guard let prepareSource = self.prepareSource else { throw PreparationFailure.unsupported }
-                    self.attemptedPreparation = true
                     self.preparing = true
                     self.timeoutTask?.cancel()
                     self.refresh()
@@ -486,7 +485,7 @@ final class PlaybackController: ObservableObject {
         if !keepPlayerItem || preparedMedia != nil { player.replaceCurrentItem(with: nil) }
         preparedMedia?.stop(); preparedMedia = nil
         loading = false; resolving = false; preparing = false; websiteURL = nil; retriedResolution = false
-        originalURL = nil; attemptedPreparation = false
+        selectedSource = nil
         ended = false; hasPlayed = false; failure = nil; failureReason = nil
         playWhenReady = false
         hasAudio = nil
@@ -506,9 +505,11 @@ final class PlaybackController: ObservableObject {
                       autoplay: playWhenReady, titleOverride: queue.map { $0.entries[$0.currentIndex].title })
             return
         }
-        if reason == .unreadableMedia, let originalURL, !SourceResolver.isWebsite(originalURL),
-           !attemptedPreparation, !hasPlayed, prepareSource != nil {
-            startLoad(originalURL, remux: true)
+        if !hasPlayed, prepareSource != nil, let selectedSource,
+           let fallback = MediaSelector.remuxFallback(for: selectedSource, reason: reason) {
+            startLoad(websiteURL ?? selectedSource.url, retry: retriedResolution, fallback: fallback,
+                      preservingQueue: queue != nil, autoplay: playWhenReady,
+                      titleOverride: title)
             return
         }
         if var queue, queueAttemptsRemaining > 1 {
@@ -624,6 +625,7 @@ final class PlaybackController: ObservableObject {
         next.error = failure
         next.errorReason = failureReason
         next.loadingPhase = resolving ? "resolving" : (preparing ? "preparing" : nil)
+        next.playbackPath = failure == nil ? selectedSource?.playbackPath : nil
         next.hasAudio = hasAudio
         if let queue {
             next.queue = PlaybackQueueSnapshot(title: queue.title, currentIndex: queue.currentIndex,

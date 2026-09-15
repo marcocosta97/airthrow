@@ -100,6 +100,7 @@ struct AirPlayerCLI {
         } else if let status = response.status {
             print("\(response.message)\nState: \(status.state.rawValue)\nExternal video: \(status.externalPlaybackActive ? "yes" : "no")")
             print("Title: \(status.title)")
+            if let path = status.playbackPath { print("Playback path: \(path.label) (tier \(path.tier))") }
             if status.loadingPhase == "resolving" { print("Finding video…") }
             if status.loadingPhase == "preparing" { print("Preparing video…") }
             if let position = status.position { print("Position: \(String(format: "%.1f", position))s") }

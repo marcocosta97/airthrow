@@ -12,6 +12,35 @@ func rejects(_ action: () throws -> Void) throws {
 }
 
 let tests: [(String, () throws -> Void)] = [
+    ("shared media selection and bounded fallback", {
+        let file = MediaCandidate(source: ResolvedSource(url: URL(string: "https://cdn.example/video")!, delivery: .file), height: 720)
+        let hls = MediaCandidate(source: ResolvedSource(url: URL(string: "https://other.example/master")!, delivery: .hls), height: 720)
+        let remux = MediaCandidate(source: ResolvedSource(url: URL(string: "https://third.example/video")!, needsPreparation: true), height: 1080)
+        for candidates in [[file, hls, remux], [remux, hls, file], [hls, file, remux]] {
+            try check(MediaSelector.select(candidates).url == hls.source.url, "Provider order changed native selection")
+        }
+        let highFile = MediaCandidate(source: file.source, height: 1080)
+        try check(MediaSelector.select([hls, highFile]).url == file.source.url, "HLS overrode higher native quality")
+        try check(MediaSelector.select([remux, file]).playbackPath == .direct, "Default unexpectedly prepared higher quality")
+        try check(MediaSelector.select([remux]).playbackPath == .remux, "Only usable preparation option was lost")
+        let fallback = MediaSelector.remuxFallback(for: file.source, reason: .unreadableMedia)
+        try check(fallback?.playbackPath == .remux, "Native format failure did not permit remux inspection")
+        try check(MediaSelector.remuxFallback(for: fallback!, reason: .unreadableMedia) == nil, "Preparation retried itself")
+        try check(MediaSelector.remuxFallback(for: hls.source, reason: .unreadableMedia) == nil, "Unsupported HLS remux attempted")
+        for reason: MediaFailureReason in [.network, .sourceUnavailable, .protectedMedia, .noVideo] {
+            try check(MediaSelector.remuxFallback(for: file.source, reason: reason) == nil, "Unrelated failure started remuxing")
+        }
+    }),
+    ("playback path protocol compatibility", {
+        let old = try JSONEncoder().encode(PlaybackSnapshot())
+        try check(JSONDecoder().decode(PlaybackSnapshot.self, from: old).playbackPath == nil, "Old status required a playback path")
+        for path: PlaybackPath in [.direct, .remux] {
+            var status = PlaybackSnapshot()
+            status.playbackPath = path
+            let data = try JSONEncoder().encode(status)
+            try check(JSONDecoder().decode(PlaybackSnapshot.self, from: data).playbackPath == path, "Playback path lost on wire")
+        }
+    }),
     ("signed URL preservation", {
         let value = "https://cdn.example.com/a%2Fb/movie.m3u8?token=a%2Bb%3D&expires=123&x=1&x=2"
         try check(MediaInput.url("  \(value)\n").absoluteString == value, "Signed URL changed")

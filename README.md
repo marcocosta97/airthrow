@@ -25,6 +25,8 @@ Loading stays paused. AirPlayer may briefly attempt muted playback to establish 
 
 Live streams show their distance from the live edge and offer **Go Live** when playback falls behind. In **Settings**, choose whether a finished video remains loaded for replay or is unloaded so the receiver can return to its normal screen.
 
+The playback summary shows the selected path: **Direct playback** uses the source without preparing a local file; **Remuxed playback** copies its compressed audio/video into a compatible file on the Mac. Hover over the label for details. These are processing tiers, not quality scores or confirmation of receiver playback. The same path appears in CLI status and the optional JSON `playbackPath` field (`direct` or `remux`).
+
 ## YouTube links (experimental)
 
 Install the optional helpers for website playback:
@@ -35,7 +37,7 @@ brew install yt-dlp deno ffmpeg
 
 Paste a public, on-demand YouTube watch, Shorts, `youtu.be`, or dedicated playlist link in the same field, or pass it to `airplayer open`. AirPlayer shows **Finding video…** while yt-dlp extracts metadata. It prefers a combined H.264/AAC MP4 or HLS source. If only suitable separate MP4/M4A tracks are available, it shows **Preparing video…**, copies them into a temporary MP4 without re-encoding, and serves the finished file to the receiver. Loading stays paused. Directly playable video URLs work without these helpers.
 
-When yt-dlp lists separate HLS renditions, AirPlayer checks their shared master playlist for H.264 video with AAC audio before preparing a file. A usable master loads directly in AVPlayer, which fetches and synchronizes the tracks as playback proceeds. This avoids downloading the whole video first and does not require FFmpeg. If that check fails, suitable separate MP4/M4A tracks still use complete-file preparation; large videos can take several minutes.
+Source adapters discover candidates, and one shared policy prefers native playback over preparation. Among native candidates it prefers higher known resolution, then HLS at equal resolution, then bitrate. YouTube HLS masters are checked alongside combined MP4/HLS candidates; a lower-quality HLS option does not automatically beat a higher-quality native MP4. A usable H.264/AAC master goes directly to AVPlayer, which selects and synchronizes its renditions; FFmpeg is not involved. Direct URLs usually supply one candidate and retain their native attempt even when format details are unknown. Sources without a usable native presentation still need the preparation path above, which finishes the full file before playback.
 
 Dedicated `youtube.com/playlist?list=…` links create a queue of up to 100 entries. The first playable item loads paused. Use Previous and Next in the app or CLI; once playback has actually started on a receiver, a normally completed item advances to the next playable entry. Entries resolve only when selected, so signed media URLs are not retained for the whole playlist. Unavailable, live, or unsupported entries are skipped with a notice. YouTube Mixes, private/authenticated playlists, shuffle, repeat, and queue editing are not supported. A watch link that also contains `list=` continues to load only its named video.
 

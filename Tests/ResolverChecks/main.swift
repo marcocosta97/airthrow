@@ -135,11 +135,18 @@ struct ResolverChecks {
             _ = try await SourceResolver.selectWithHLS(adaptiveData) { _ in throw CancellationError() }
             try check(false, "Cancelled master fetch started preparation")
         } catch is CancellationError {}
-        let combinedFirst = try await SourceResolver.selectWithHLS(metadata([adaptiveVideo, combined])) { _ in
-            try check(false, "Existing combined source performed an unnecessary manifest fetch")
-            return masterData
-        }
-        try check(combinedFirst.url.path == "/video", "Combined source lost priority")
+        let discovered = try await YouTubeSourceAdapter.candidatesWithHLS(metadata([adaptiveVideo, combined, separateVideo, separateAudio])) { _ in masterData }
+        try check(discovered.count == 3 && discovered.contains(where: { $0.source.needsPreparation }),
+                  "Adapter discarded alternatives before shared selection")
+        try check(try MediaSelector.select(discovered).url == masterURL, "Higher-quality native HLS was not considered alongside MP4")
+        let lowMaster = Data(master.replacingOccurrences(of: "1920x1080", with: "640x360").utf8)
+        let higherMP4 = try await SourceResolver.selectWithHLS(metadata([adaptiveVideo, combined])) { _ in lowMaster }
+        try check(higherMP4.url.path == "/video", "Low-quality HLS displaced a higher-quality native MP4")
+        let mixedCodecs = master + "\n#EXT-X-STREAM-INF:BANDWIDTH=8000000,CODECS=\"vp09.00.40.08,mp4a.40.2\",RESOLUTION=3840x2160,AUDIO=\"audio\"\nvp9.m3u8"
+        try check(HLSMaster.quality(Data(mixedCodecs.utf8), at: masterURL)?.height == 1080,
+                  "Ineligible variant inflated HLS candidate quality")
+        let failedWithMP4 = try await SourceResolver.selectWithHLS(metadata([adaptiveVideo, combined])) { _ in throw URLError(.timedOut) }
+        try check(failedWithMP4.url.path == "/video", "Failed inspection removed a native MP4 candidate")
         let customHeader = adaptiveVideo.merging(["http_headers": ["Cookie": "secret"]]) { _, rhs in rhs }
         let customFallback = try await SourceResolver.selectWithHLS(metadata([customHeader, separateVideo, separateAudio])) { _ in
             try check(false, "Custom headers were ignored for a master candidate")
@@ -219,4 +226,17 @@ struct ResolverChecks {
 private actor ManifestCounter {
     private(set) var count = 0
     func increment() { count += 1 }
+}
+
+// Exercise the same adapter -> shared selector boundary with deterministic metadata.
+private extension SourceResolver {
+    static func select(_ data: Data) throws -> ResolvedSource {
+        try MediaSelector.select(YouTubeSourceAdapter.candidates(data))
+    }
+    static func selectWithHLS(_ data: Data, fetch: @Sendable (URL) async throws -> Data) async throws -> ResolvedSource {
+        try await MediaSelector.select(YouTubeSourceAdapter.candidatesWithHLS(data, fetch: fetch))
+    }
+    static func selectPlaylist(_ data: Data) throws -> ResolvedPlaylist {
+        try YouTubeSourceAdapter.selectPlaylist(data)
+    }
 }

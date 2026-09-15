@@ -123,10 +123,12 @@ struct PreparationChecks {
         }
         try check(preparingController.snapshot.state == .loading && preparingController.snapshot.loadingPhase == "preparing",
                   "Preparing phase did not retain pending loading state")
+        try check(preparingController.snapshot.playbackPath == .remux, "Preparation path was not visible while pending")
         preparingController.stop()
         try await Task.sleep(for: .milliseconds(100))
         try check(preparingController.snapshot.state == .idle && preparingController.player.currentItem == nil,
                   "Stop allowed a prepared result to return")
+        try check(preparingController.snapshot.playbackPath == nil, "Stop retained a stale playback path")
         // Quit also waits for jobs that Stop has already cancelled.
         await preparingController.shutdownAndWait()
         try check(Set(try FileManager.default.contentsOfDirectory(atPath: cache.path)).isEmpty,
@@ -148,6 +150,7 @@ struct PreparationChecks {
         try await settled()
         try check(controller.snapshot.state == .awaitingReceiver && controller.snapshot.hasAudio == true,
                   "Native failure did not recover through remuxing")
+        try check(controller.snapshot.playbackPath == .remux, "Native fallback was still labelled direct")
         try check(controller.player.rate == 0 && controller.player.isMuted, "Preparation started local playback")
         let served = (controller.player.currentItem!.asset as! AVURLAsset).url
         let status = String(decoding: try JSONEncoder().encode(controller.snapshot), as: UTF8.self)
@@ -155,10 +158,27 @@ struct PreparationChecks {
         try controller.load(base + "/combined.mp4")
         try await settled()
         try check(controller.snapshot.state == .awaitingReceiver, "Replacing prepared item failed")
+        try check(controller.snapshot.playbackPath == .direct, "Replacement retained the old preparation label")
         do { _ = try await fetch(served); try check(false, "Replacement retained the old server") }
         catch is URLError {}
         controller.stop()
         print("PASS controller native-first fallback, paused readiness, privacy and replacement cleanup")
+        await controller.shutdownAndWait()
+
+        // The source adapter must not change format-failure policy. A website
+        // presentation gets the same native -> remux attempt as a direct URL.
+        let websiteController = PlaybackController(resolveSource: { _ in
+            ResolvedSource(url: URL(string: base + "/combined.mkv")!, title: "Website title")
+        }, prepareSource: { try await controlledPreparer.prepare($0) })
+        try websiteController.load("https://youtu.be/BaW_jenozKc")
+        let websiteDeadline = Date().addingTimeInterval(15)
+        while ![.awaitingReceiver, .failed].contains(websiteController.snapshot.state), Date() < websiteDeadline {
+            try await Task.sleep(for: .milliseconds(30))
+        }
+        try check(websiteController.snapshot.state == .awaitingReceiver && websiteController.snapshot.playbackPath == .remux
+                  && websiteController.snapshot.title == "Website title", "Website native failure did not use shared remux policy")
+        await websiteController.shutdownAndWait()
+        print("PASS source-independent remux fallback and title preservation")
         print("Preparation checks passed; receiver playback remains untested")
     }
 }

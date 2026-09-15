@@ -72,6 +72,13 @@ struct ControllerView: View {
                     .font(.subheadline).foregroundStyle(.secondary)
                     .lineLimit(1).truncationMode(.middle)
                     .textSelection(.enabled)
+                if let path = status.playbackPath {
+                    Text(path.label)
+                        .font(.caption).foregroundStyle(.secondary)
+                        .help(path.explanation)
+                        .accessibilityLabel("Playback path: \(path.label)")
+                        .accessibilityHint(path.explanation)
+                }
                 if status.hasAudio == false {
                     Label("No audio track detected. Try a link that includes audio.", systemImage: "speaker.slash")
                         .font(.callout)

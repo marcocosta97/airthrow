@@ -28,9 +28,13 @@ public struct ResolvedSource: Sendable {
     public let headers: [String: String]
     public let audio: MediaTrack?
     public let needsPreparation: Bool
-    public init(url: URL, title: String? = nil, headers: [String: String] = [:], audio: MediaTrack? = nil, needsPreparation: Bool = false) {
+    public let delivery: MediaDelivery
+    public var playbackPath: PlaybackPath { needsPreparation ? .remux : .direct }
+    public init(url: URL, title: String? = nil, headers: [String: String] = [:], audio: MediaTrack? = nil,
+                needsPreparation: Bool = false, delivery: MediaDelivery = .unknown) {
         self.url = url; self.title = title; self.headers = headers; self.audio = audio
         self.needsPreparation = needsPreparation || audio != nil
+        self.delivery = delivery
     }
 }
 
@@ -57,6 +61,33 @@ public struct ResolvedPlaylist: Sendable, Equatable {
 }
 
 public struct SourceResolver: Sendable {
+    public static let maximumPlaylistEntries = YouTubeSourceAdapter.maximumPlaylistEntries
+    private let youtube: YouTubeSourceAdapter
+    public init(environment: [String: String] = ProcessInfo.processInfo.environment) {
+        youtube = YouTubeSourceAdapter(environment: environment)
+    }
+
+    public func candidates(for url: URL) async throws -> [MediaCandidate] {
+        if Self.isWebsite(url) { return try await youtube.candidates(url) }
+        return DirectSourceAdapter.candidates(url)
+    }
+
+    public func resolve(_ url: URL) async throws -> ResolvedSource {
+        let candidates = try await candidates(for: url)
+        try Task.checkCancellation()
+        return try MediaSelector.select(candidates)
+    }
+
+    public func resolvePlaylist(_ url: URL) async throws -> ResolvedPlaylist {
+        try await youtube.resolvePlaylist(url)
+    }
+    public static func isWebsite(_ url: URL) -> Bool { YouTubeSourceAdapter.isWebsite(url) }
+    public static func videoPage(_ url: URL) throws -> URL { try YouTubeSourceAdapter.videoPage(url) }
+    public static func playlistPage(_ url: URL) -> URL? { YouTubeSourceAdapter.playlistPage(url) }
+}
+
+/// yt-dlp extraction and eligibility checks only; ranking belongs to MediaSelector.
+struct YouTubeSourceAdapter: Sendable {
     public static let maximumPlaylistEntries = 100
     private let environment: [String: String]
     public init(environment: [String: String] = ProcessInfo.processInfo.environment) {
@@ -99,22 +130,11 @@ public struct SourceResolver: Sendable {
         return URL(string: "https://www.youtube.com/watch?v=\(id)")!
     }
 
-    func executable(_ name: String, override: String) -> String? {
-        let fm = FileManager.default
-        if let path = environment[override] {
-            return path.hasPrefix("/") && fm.isExecutableFile(atPath: path) ? path : nil
-        }
-        let paths = ["/opt/homebrew/bin", "/usr/local/bin"]
-            + (environment["PATH"] ?? "").split(separator: ":").map(String.init)
-        return paths.filter { $0.hasPrefix("/") }.map { "\($0)/\(name)" }
-            .first { fm.isExecutableFile(atPath: $0) }
-    }
-
-    public func resolve(_ url: URL) async throws -> ResolvedSource {
-        guard Self.isWebsite(url) else { return ResolvedSource(url: url) }
+    func candidates(_ url: URL) async throws -> [MediaCandidate] {
         let page = try Self.videoPage(url)
-        guard let helper = executable("yt-dlp", override: "AIRPLAYER_YTDLP"),
-              let deno = executable("deno", override: "AIRPLAYER_DENO") else {
+        let finder = HelperExecutables(environment: environment)
+        guard let helper = finder.executable("yt-dlp", override: "AIRPLAYER_YTDLP"),
+              let deno = finder.executable("deno", override: "AIRPLAYER_DENO") else {
             throw ResolutionFailure.unavailable
         }
         let arguments = ["--ignore-config", "--no-plugin-dirs", "--no-cache-dir", "--no-remote-components",
@@ -123,18 +143,15 @@ public struct SourceResolver: Sendable {
                          "--no-warnings", "--socket-timeout", "10",
                          "--retries", "0", "--extractor-retries", "0", "--", page.absoluteString]
         let data = try await HelperProcess.run(executable: helper, arguments: arguments)
-        return try await Self.selectWithHLS(data)
+        return try await Self.candidatesWithHLS(data)
     }
 
     /// yt-dlp flattens alternate-audio HLS into video-only and audio-only
     /// formats. Their shared master URL can still be a complete presentation.
-    static func selectWithHLS(_ data: Data,
-        fetch: @Sendable (URL) async throws -> Data = HLSMaster.fetch) async throws -> ResolvedSource {
+    static func candidatesWithHLS(_ data: Data,
+        fetch: @Sendable (URL) async throws -> Data = HLSMaster.fetch) async throws -> [MediaCandidate] {
         let info = try validatedInfo(data)
-        let fallback: ResolvedSource?
-        do { fallback = try select(data) }
-        catch ResolutionFailure.preparationRequired { fallback = nil }
-        if let fallback, !fallback.needsPreparation { return fallback }
+        var candidates = try candidates(data)
 
         var seen = Set<URL>()
         for format in info.formats ?? [] {
@@ -151,8 +168,10 @@ public struct SourceResolver: Sendable {
             do {
                 let manifest = try await fetch(master)
                 try Task.checkCancellation()
-                if HLSMaster.hasAudioVideo(manifest, at: master) {
-                    return ResolvedSource(url: master, title: cleanTitle(info.title))
+                if let quality = HLSMaster.quality(manifest, at: master) {
+                    candidates.append(MediaCandidate(
+                        source: ResolvedSource(url: master, title: cleanTitle(info.title), delivery: .hls),
+                        height: quality.height, bitrate: quality.bitrate))
                 }
             } catch {
                 try Task.checkCancellation()
@@ -162,14 +181,14 @@ public struct SourceResolver: Sendable {
             }
         }
         try Task.checkCancellation()
-        guard let fallback else { throw ResolutionFailure.preparationRequired }
-        return fallback
+        return candidates
     }
 
     public func resolvePlaylist(_ url: URL) async throws -> ResolvedPlaylist {
         guard let page = Self.playlistPage(url) else { throw ResolutionFailure.unsupportedPage }
-        guard let helper = executable("yt-dlp", override: "AIRPLAYER_YTDLP"),
-              let deno = executable("deno", override: "AIRPLAYER_DENO") else {
+        let finder = HelperExecutables(environment: environment)
+        guard let helper = finder.executable("yt-dlp", override: "AIRPLAYER_YTDLP"),
+              let deno = finder.executable("deno", override: "AIRPLAYER_DENO") else {
             throw ResolutionFailure.unavailable
         }
         let arguments = ["--ignore-config", "--no-plugin-dirs", "--no-cache-dir", "--no-remote-components",
@@ -226,11 +245,11 @@ public struct SourceResolver: Sendable {
         return info
     }
 
-    static func select(_ data: Data) throws -> ResolvedSource {
+    static func candidates(_ data: Data) throws -> [MediaCandidate] {
         let info = try validatedInfo(data)
         guard let formats = info.formats, !formats.isEmpty else { throw ResolutionFailure.failed }
         let title = cleanTitle(info.title)
-        var candidates: [(Format, ResolvedSource)] = []
+        var candidates: [MediaCandidate] = []
         for format in formats {
             guard format.has_drm != true,
                   let video = format.vcodec?.lowercased(), video == "h264" || video.hasPrefix("avc1"),
@@ -241,15 +260,11 @@ public struct SourceResolver: Sendable {
                   format.fragments == nil else { continue }
             let headers = (info.http_headers ?? [:]).merging(format.http_headers ?? [:]) { _, value in value }
             guard headers.keys.allSatisfy({ defaultHeaders.contains($0.lowercased()) }) else { continue }
-            candidates.append((format, ResolvedSource(url: url, title: title, headers: headers)))
+            candidates.append(MediaCandidate(source: ResolvedSource(url: url, title: title, headers: headers,
+                delivery: ["m3u8", "m3u8_native"].contains(format.protocol ?? "") ? .hls : .file),
+                height: format.height, bitrate: format.tbr))
         }
-        // Prefer the highest available combined H.264/AAC source. Never silently drop audio.
-        let selected = candidates.max { lhs, rhs in
-            if (lhs.0.height ?? 0) != (rhs.0.height ?? 0) { return (lhs.0.height ?? 0) < (rhs.0.height ?? 0) }
-            return (lhs.0.tbr ?? 0) < (rhs.0.tbr ?? 0)
-        }
-        if let selected { return selected.1 }
-        // Fall back to separate progressive MP4/M4A tracks, never to a silent video.
+        // Keep separate progressive MP4/M4A presentations alongside native ones.
         // Actual codecs/profile, duration and stream indices are verified by ffprobe before copying.
         let eligible = formats.filter {
             $0.has_drm != true && $0.fragments == nil && ["https", "http"].contains($0.protocol ?? "")
@@ -258,20 +273,21 @@ public struct SourceResolver: Sendable {
                 && ($0.http_headers ?? [:]).keys.allSatisfy({ defaultHeaders.contains($0.lowercased()) })
         }
         guard (info.http_headers ?? [:]).keys.allSatisfy({ defaultHeaders.contains($0.lowercased()) }),
-              let video = eligible.filter({
-                  ($0.vcodec == "h264" || $0.vcodec?.hasPrefix("avc1") == true) && $0.acodec == "none"
-                      && ($0.height ?? .infinity) <= 1080
-              }).max(by: { ($0.height ?? 0, $0.tbr ?? 0) < ($1.height ?? 0, $1.tbr ?? 0) }),
               let audio = eligible.filter({
                   $0.vcodec == "none" && ($0.acodec == "aac" || $0.acodec?.hasPrefix("mp4a") == true)
               }).max(by: { ($0.tbr ?? 0) < ($1.tbr ?? 0) }),
-              let rawVideo = video.url, let videoURL = try? MediaInput.url(rawVideo),
               let rawAudio = audio.url, let audioURL = try? MediaInput.url(rawAudio) else {
-            throw ResolutionFailure.preparationRequired
+            return candidates
         }
-        return ResolvedSource(url: videoURL, title: title,
-            headers: (info.http_headers ?? [:]).merging(video.http_headers ?? [:]) { _, rhs in rhs },
-            audio: MediaTrack(url: audioURL, headers: (info.http_headers ?? [:]).merging(audio.http_headers ?? [:]) { _, rhs in rhs }))
+        for video in eligible where (video.vcodec == "h264" || video.vcodec?.hasPrefix("avc1") == true)
+            && video.acodec == "none" && (video.height ?? .infinity) <= 1080 {
+            guard let videoURL = try? MediaInput.url(video.url ?? "") else { continue }
+            candidates.append(MediaCandidate(source: ResolvedSource(url: videoURL, title: title,
+                headers: (info.http_headers ?? [:]).merging(video.http_headers ?? [:]) { _, rhs in rhs },
+                audio: MediaTrack(url: audioURL, headers: (info.http_headers ?? [:]).merging(audio.http_headers ?? [:]) { _, rhs in rhs }),
+                delivery: .file), height: video.height, bitrate: video.tbr))
+        }
+        return candidates
     }
 
     private static func cleanTitle(_ value: String?) -> String? {
@@ -349,10 +365,19 @@ enum HLSMaster {
     }
 
     static func hasAudioVideo(_ data: Data, at base: URL) -> Bool {
-        guard data.count <= maximumBytes, let text = String(data: data, encoding: .utf8) else { return false }
+        quality(data, at: base) != nil
+    }
+
+    struct Quality {
+        let height: Double?
+        let bitrate: Double
+    }
+
+    static func quality(_ data: Data, at base: URL) -> Quality? {
+        guard data.count <= maximumBytes, let text = String(data: data, encoding: .utf8) else { return nil }
         let lines = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
         guard lines.first == "#EXTM3U",
-              !lines.contains(where: { $0.hasPrefix("#EXT-X-SESSION-KEY:") }) else { return false }
+              !lines.contains(where: { $0.hasPrefix("#EXT-X-SESSION-KEY:") }) else { return nil }
         var audioGroups = Set<String>()
         for line in lines where line.hasPrefix("#EXT-X-MEDIA:") {
             guard let attrs = attributes(String(line.dropFirst("#EXT-X-MEDIA:".count))),
@@ -360,6 +385,7 @@ enum HLSMaster {
                   let uri = attrs["URI"], validURI(uri, at: base) else { continue }
             audioGroups.insert(group)
         }
+        var best: Quality?
         for (index, line) in lines.enumerated() where line.hasPrefix("#EXT-X-STREAM-INF:") {
             guard let attrs = attributes(String(line.dropFirst("#EXT-X-STREAM-INF:".count))),
                   let codecs = attrs["CODECS"]?.split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }),
@@ -370,9 +396,17 @@ enum HLSMaster {
                   index + 1 < lines.count, validURI(lines[index + 1], at: base) else { continue }
             // With no AUDIO attribute the advertised audio is muxed in the variant.
             if let group = attrs["AUDIO"], !audioGroups.contains(group) { continue }
-            return true
+            let dimensions = attrs["RESOLUTION"]?.split(separator: "x").compactMap(Double.init)
+            let height = dimensions.flatMap { values -> Double? in
+                guard values.count == 2, values.allSatisfy({ $0.isFinite && $0 > 0 }) else { return nil }
+                return values[1]
+            }
+            let quality = Quality(height: height, bitrate: Double(bandwidth) / 1000)
+            if best == nil || (quality.height ?? 0, quality.bitrate) > (best!.height ?? 0, best!.bitrate) {
+                best = quality
+            }
         }
-        return false
+        return best
     }
 
     private static func validURI(_ value: String, at base: URL) -> Bool {

@@ -10,6 +10,10 @@
 
 Use Apple's public APIs and the system receiver picker. Keep one playback session shared by the UI and CLI, with no local video presentation. Derive status from observed playback state and cancel stale work when media changes.
 
+`SourceResolver` dispatches discovery to direct/YouTube adapters. Adapters return complete `MediaCandidate` presentations rather than selecting one: an upstream master, combined file, or paired audio/video tracks. `MediaSelector` ranks them without provider-specific logic and returns a `ResolvedSource` execution plan. Native playback wins over remuxing by default; within a tier, known resolution wins, HLS breaks resolution ties, then bitrate. HLS quality comes from eligible variants in the inspected master and is not the observed playback quality. Unknown direct media remains eligible for a native attempt without helper/network preflight. The shared remux fallback handles initial native format failures; HLS, network/DRM failures and already-prepared sources do not enter that fallback. `MediaPreparer` still validates actual streams before copying them.
+
+The additive protocol-v1 `playbackPath` reports the chosen plan (`direct` or `remux`), including during preparation, and is absent before selection, after Stop, and on terminal failure. The UI and CLI use the same snapshot. It neither exposes candidate URLs nor asserts receiver compatibility. Resolver/core checks cover ranking independently of adapter order, preserving alternatives, lower-quality HLS versus native MP4, and bounded fallback; preparation checks cover label changes and cleanup across replacement/Stop.
+
 ## Core checks
 
 ```bash
@@ -57,7 +61,7 @@ For manual receiver checks, append `--serve --bind YOUR_MAC_LAN_IP` to keep the 
 Deterministic checks use fake helper executables and metadata; no installed yt-dlp, external site, or receiver is needed:
 
 ```bash
-swiftc -swift-version 6 -parse-as-library Sources/AirPlayerCore/Protocol.swift Sources/AirPlayerCore/SourceResolver.swift Sources/AirPlayerCore/HelperProcess.swift Tests/ResolverChecks/main.swift -o .build/ResolverChecks
+swiftc -swift-version 6 -parse-as-library Sources/AirPlayerCore/Protocol.swift Sources/AirPlayerCore/MediaSelection.swift Sources/AirPlayerCore/SourceResolver.swift Sources/AirPlayerCore/HelperProcess.swift Tests/ResolverChecks/main.swift -o .build/ResolverChecks
 .build/ResolverChecks
 ```
 

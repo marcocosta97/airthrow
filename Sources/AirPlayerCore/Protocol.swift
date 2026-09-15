@@ -48,6 +48,19 @@ public enum PlaybackState: String, Codable, Sendable {
     case ready, buffering, playing, paused, ended, failed
 }
 
+/// Processing cost, not a quality score or proof of receiver playback.
+public enum PlaybackPath: String, Codable, Sendable {
+    case direct, remux
+    public var tier: Int { self == .direct ? 1 : 2 }
+    public var label: String { self == .direct ? "Direct playback" : "Remuxed playback" }
+    public var explanation: String {
+        switch self {
+        case .direct: "Tier 1: Plays the source directly, without preparing a file on this Mac."
+        case .remux: "Tier 2: Copies audio and video into a compatible file on this Mac without re-encoding. Playback waits for preparation to finish."
+        }
+    }
+}
+
 public struct SeekRange: Codable, Sendable, Equatable {
     public let start: Double
     public let end: Double
@@ -161,6 +174,8 @@ public struct PlaybackSnapshot: Codable, Sendable, Equatable {
     public var errorReason: MediaFailureReason?
     /// Additive protocol-v1 field; playback state remains loading during extraction.
     public var loadingPhase: String?
+    /// Selected processing path, not evidence that playback has started.
+    public var playbackPath: PlaybackPath?
     /// Additive, privacy-safe observations for troubleshooting and future policy.
     public var diagnostics: PlaybackDiagnostics?
     /// Present while a playlist owns the shared playback session.
