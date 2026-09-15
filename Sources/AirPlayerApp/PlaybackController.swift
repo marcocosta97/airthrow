@@ -246,6 +246,7 @@ final class PlaybackController: ObservableObject {
     }
 
     func pause() {
+        probeWhenReady = false
         cancelProbe(restorePosition: true)
         player.pause()
         refresh()
@@ -280,9 +281,12 @@ final class PlaybackController: ObservableObject {
 
     private func beginProbeIfReady() {
         guard probeWhenReady, mediaItem?.status == .readyToPlay, !loading else { return }
+        if player.isExternalPlaybackActive || failure != nil {
+            probeWhenReady = false
+            return
+        }
+        guard !probing else { return }
         probeWhenReady = false
-        guard !player.isExternalPlaybackActive,
-              failure == nil, !probing else { return }
         probePosition = finite(player.currentTime().seconds) ?? 0
         probing = true
         player.isMuted = true
@@ -331,6 +335,7 @@ final class PlaybackController: ObservableObject {
         notifications.removeAll()
         mediaItem = nil
         probeWhenReady = false
+        pickerIsOpen = false
         // Direct sources can retain the old paused item. Prepared media must be
         // detached before closing its server and deleting its file.
         if !keepPlayerItem || preparedMedia != nil { player.replaceCurrentItem(with: nil) }
@@ -364,13 +369,12 @@ final class PlaybackController: ObservableObject {
         player.isMuted = true
         player.pause()
         timeoutTask?.cancel()
-        if preparedMedia != nil {
-            player.replaceCurrentItem(with: nil)
-            mediaItem = nil
-            itemObservations.removeAll()
-            notifications.forEach(NotificationCenter.default.removeObserver); notifications.removeAll()
-            preparedMedia?.stop(); preparedMedia = nil
-        }
+        player.replaceCurrentItem(with: nil)
+        loadingAsset?.cancelLoading(); loadingAsset = nil
+        mediaItem = nil
+        itemObservations.removeAll()
+        notifications.forEach(NotificationCenter.default.removeObserver); notifications.removeAll()
+        preparedMedia?.stop(); preparedMedia = nil
         refresh()
     }
 

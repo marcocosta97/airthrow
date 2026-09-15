@@ -8,7 +8,7 @@ import AirPlayerCore
 struct AirPlayerCLI {
     @MainActor static func main() async {
         var arguments = Array(CommandLine.arguments.dropFirst())
-        if arguments.isEmpty || arguments == ["--help"] || arguments == ["-h"] {
+        if arguments.isEmpty || arguments.contains(where: { $0 == "--help" || $0 == "-h" }) {
             print("""
             AirPlayer — control the native AirPlay video session
 

@@ -29,7 +29,10 @@ ffmpeg('-i', OUT / 'combined.mp4', '-map', '0', '-c', 'copy', OUT / 'combined.mk
 ffmpeg('-i', OUT / 'combined.mp4', '-map', '0:v:0', '-c', 'copy', OUT / 'video.mp4')
 ffmpeg('-i', OUT / 'combined.mp4', '-map', '0:a:0', '-c', 'copy', OUT / 'audio.m4a')
 ffmpeg('-i', OUT / 'combined.mp4', '-c:v', 'copy', '-c:a', 'flac', OUT / 'flac.mkv')
-FILES = {f'/{name}': (OUT / name).read_bytes() for name in ['combined.mp4', 'combined.mkv', 'video.mp4', 'audio.m4a', 'flac.mkv']}
+ffmpeg('-i', OUT / 'combined.mp4', '-f', 'lavfi', '-i', 'sine=frequency=330:sample_rate=48000',
+       '-t', '2', '-map', '0:v', '-map', '0:a', '-map', '1:a',
+       '-c:v', 'copy', '-c:a:0', 'pcm_s16le', '-c:a:1', 'aac', '-ac:a:1', '2', OUT / 'multitrack.mkv')
+FILES = {f'/{name}': (OUT / name).read_bytes() for name in ['combined.mp4', 'combined.mkv', 'video.mp4', 'audio.m4a', 'flac.mkv', 'multitrack.mkv']}
 
 
 class Handler(http.server.BaseHTTPRequestHandler):

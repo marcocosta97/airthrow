@@ -95,6 +95,18 @@ let tests: [(String, () throws -> Void)] = [
             try check(response.error?.code == .invalidRequest, "Malformed input was accepted")
         }
     }),
+    ("socket restart releases ownership", {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ap-restart-\(UUID().uuidString.prefix(8))")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("control.sock").path
+        let first = CommandServer(path: path)
+        try first.start { _, reply in reply(Response(message: "first")) }
+        first.stop()
+        let second = CommandServer(path: path)
+        try second.start { _, reply in reply(Response(message: "second")) }
+        defer { second.stop() }
+        try check(LocalSocket.send(Request(.status), path: path).message == "second", "Restarted server did not own the endpoint")
+    }),
     ("private command directory", {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ap-insecure-\(UUID().uuidString.prefix(8))").path
         mkdir(directory, 0o755)

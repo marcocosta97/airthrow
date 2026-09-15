@@ -113,6 +113,8 @@ public final class CommandServer: @unchecked Sendable {
     public typealias Handler = @Sendable (Request, @escaping @Sendable (Response) -> Void) -> Void
     private let queue = DispatchQueue(label: "app.airplayer.commands", qos: .userInitiated)
     private var source: DispatchSourceRead?
+    private var descriptor: Int32 = -1
+    private var lock: Int32 = -1
     private let path: String
 
     public init(path: String = LocalSocket.path) { self.path = path }
@@ -167,13 +169,8 @@ public final class CommandServer: @unchecked Sendable {
                         }
                     }
                 }
-                let socketPath = path
-                source.setCancelHandler {
-                    Darwin.close(fd)
-                    unlink(socketPath)
-                    flock(lock, LOCK_UN)
-                    Darwin.close(lock)
-                }
+                self.descriptor = fd
+                self.lock = lock
                 self.source = source
                 source.resume()
             } catch { Darwin.close(fd); Darwin.close(lock); throw error }
@@ -181,7 +178,25 @@ public final class CommandServer: @unchecked Sendable {
     }
 
     public func stop() {
-        queue.async { [self] in source?.cancel(); source = nil }
+        queue.sync {
+            guard let source else { return }
+            source.cancel()
+            self.source = nil
+            releaseEndpoint()
+        }
+    }
+
+    deinit {
+        guard source != nil else { return }
+        source?.cancel()
+        source = nil
+        releaseEndpoint()
+    }
+
+    private func releaseEndpoint() {
+        if descriptor >= 0 { Darwin.close(descriptor); descriptor = -1 }
+        unlink(path)
+        if lock >= 0 { flock(lock, LOCK_UN); Darwin.close(lock); lock = -1 }
     }
 }
 

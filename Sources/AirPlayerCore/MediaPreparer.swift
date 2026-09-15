@@ -90,9 +90,10 @@ public struct MediaPreparer: Sendable {
             if let audio = source.audio {
                 audioInput = try await probe(audio.url, headers: audio.headers, executable: ffprobe)
             } else { audioInput = videoInput }
-            guard let video = videoInput.streams.first(where: { $0.codec_type == "video" && $0.disposition?.attached_pic != 1 }),
-                  let audio = audioInput.streams.first(where: { $0.codec_type == "audio" }),
-                  video.compatibleVideo, audio.compatibleAudio else { throw PreparationFailure.unsupported }
+            guard let video = videoInput.streams.first(where: { $0.compatibleVideo }),
+                  let audio = audioInput.streams.first(where: { $0.compatibleAudio }) else {
+                throw PreparationFailure.unsupported
+            }
             let videoDuration = try videoInput.finiteDuration
             let audioDuration = try audioInput.finiteDuration
             guard abs(videoDuration - audioDuration) <= 2 else { throw PreparationFailure.unsupported }
@@ -152,7 +153,7 @@ public struct MediaPreparer: Sendable {
         if !local { _ = try MediaInput.url(url.absoluteString) }
         let options = local ? ["-protocol_whitelist", "file", "-format_whitelist", "mov"] : try Self.inputOptions(headers: headers)
         let arguments = ["-v", "error"] + options + ["-show_entries",
-            "format=duration,size:stream=index,codec_type,codec_name,codec_tag_string,pix_fmt,width,height,profile,channels,sample_rate,color_transfer,avg_frame_rate:stream_disposition=attached_pic",
+            "format=duration,size:stream=index,codec_type,codec_name,codec_tag_string,pix_fmt,width,height,profile,channels,sample_rate,color_transfer,avg_frame_rate,r_frame_rate:stream_disposition=attached_pic",
             "-of", "json", "-i", local ? url.path : url.absoluteString]
         let data = try await HelperProcess.run(executable: executable, arguments: arguments)
         return try JSONDecoder().decode(Probe.self, from: data)
@@ -183,16 +184,24 @@ public struct MediaPreparer: Sendable {
         let sample_rate: String?
         let color_transfer: String?
         let avg_frame_rate: String?
+        let r_frame_rate: String?
         let disposition: Disposition?
         struct Disposition: Decodable { let attached_pic: Int? }
+        var frameRate: Double? {
+            for value in [avg_frame_rate, r_frame_rate] {
+                let parts = (value ?? "").split(separator: "/").compactMap { Double($0) }
+                if parts.count == 2, parts[1] > 0, parts[0] > 0 { return parts[0] / parts[1] }
+            }
+            return nil
+        }
         var compatibleVideo: Bool {
-            let fps = (avg_frame_rate ?? "").split(separator: "/").compactMap { Double($0) }
+            guard let fps = frameRate else { return false }
             return codec_type == "video" && codec_name == "h264" && codec_tag_string != "encv"
                 && ["yuv420p", "yuvj420p"].contains(pix_fmt ?? "")
                 && ["Constrained Baseline", "Baseline", "Main", "High"].contains(profile ?? "")
                 && (1...1920).contains(width ?? 0) && (1...1080).contains(height ?? 0)
                 && !["smpte2084", "arib-std-b67"].contains(color_transfer ?? "")
-                && fps.count == 2 && fps[1] > 0 && fps[0] / fps[1] > 0 && fps[0] / fps[1] <= 60
+                && fps <= 60
                 && disposition?.attached_pic != 1
         }
         var compatibleAudio: Bool {

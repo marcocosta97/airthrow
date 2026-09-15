@@ -135,6 +135,7 @@ struct MediaChecks {
         try check(controller.snapshot.state == .failed && controller.snapshot.errorReason == .network,
                   "Playback error notification lost its underlying network reason")
         try check(controller.player.isMuted && controller.player.rate == 0, "Failed playback was not stopped")
+        try check(controller.player.currentItem == nil, "Failed item remained attached to the player")
         try controller.load(base + "/video.mp4")
         try check(controller.snapshot.errorReason == nil, "Replacement retained old diagnostic")
         try check(try await settled().state == .awaitingReceiver, "Failed load did not recover")

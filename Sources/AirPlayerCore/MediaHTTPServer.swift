@@ -43,7 +43,7 @@ public final class MediaHTTPServer {
                             server.url = URL(string: "http://\(server.host):\(port.rawValue)\(server.path)")
                             server.ready?.resume(); server.ready = nil
                             server.startupTimeout?.cancel()
-                        case .failed, .waiting: server.stop()
+                        case .failed: server.stop()
                         default: break
                         }
                     }

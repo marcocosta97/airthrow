@@ -85,6 +85,9 @@ struct PreparationChecks {
         let (joinedData, _) = try await fetch(joined.url)
         try joinedData.write(to: directory.appendingPathComponent("joined.mp4"))
         joined.stop()
+        let multiple = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/multitrack.mkv")!))
+        multiple.stop()
+        print("PASS multi-track input selects a compatible audio stream")
         let shortLimit = MediaPreparer(environment: environment, maximumBytes: 1000)
         try await expect(.preparationLimit) { _ = try await shortLimit.prepare(source) }
         try await expect(.preparationRequired) {
