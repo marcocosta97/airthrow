@@ -2,11 +2,16 @@ import AVFoundation
 import CoreVideo
 import Foundation
 
-// Synthetic two-second H.264 test fixture. Never bundled with the application.
+// Synthetic two-second test fixture. Usage: OUTPUT.mp4|mov [h264|hevc]. Never bundled with the app.
+guard (2...3).contains(CommandLine.arguments.count) else { fatalError("Usage: OUTPUT.mp4|mov [h264|hevc]") }
 let output = URL(fileURLWithPath: CommandLine.arguments[1])
-let writer = try AVAssetWriter(outputURL: output, fileType: .mp4)
+guard ["mp4", "mov"].contains(output.pathExtension.lowercased()),
+      CommandLine.arguments.count <= 3 else { fatalError("Usage: OUTPUT.mp4|mov [h264|hevc]") }
+let codec = CommandLine.arguments.count == 3 ? CommandLine.arguments[2] : "h264"
+guard ["h264", "hevc"].contains(codec) else { fatalError("Codec must be h264 or hevc") }
+let writer = try AVAssetWriter(outputURL: output, fileType: output.pathExtension.lowercased() == "mov" ? .mov : .mp4)
 let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
-    AVVideoCodecKey: AVVideoCodecType.h264,
+    AVVideoCodecKey: codec == "hevc" ? AVVideoCodecType.hevc : AVVideoCodecType.h264,
     AVVideoWidthKey: 320,
     AVVideoHeightKey: 180
 ])

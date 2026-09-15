@@ -35,7 +35,9 @@ Loading stays paused. AirPlayer may briefly attempt muted playback to establish 
 ./build/airplayer show
 ```
 
-`open` and `show` launch the app if necessary. Select the receiver through the UI; selection by name is not supported. `open` loads paused. `seek` takes absolute seconds within the available timeline. All commands accept `--json`; `pending: true` means an operation was accepted, so query `status` for its observed result. `hasAudio`, when present, describes the source's audio tracks, not audible output at the TV.
+`open` and `show` launch the app if necessary. Select the receiver through the UI; selection by name is not supported. `open` loads paused. `seek` takes absolute seconds within the available timeline. All commands accept `--json`; `pending: true` means an operation was accepted, so query `status` for its observed result. `hasAudio`, when present, describes the source's audio tracks, not audible output at the TV. Streaming track information can arrive after readiness; unknown audio status is omitted rather than reported as silence.
+
+`status --json` includes `errorReason` when a media failure is diagnosed: network, unavailable source, unreadable media, missing video, protected media, or unsupported external playback. Unclassified failures remain `load_failed` or `playback_interrupted`; messages omit underlying URLs and request details.
 
 The CLI is also bundled at `AirPlayer.app/Contents/MacOS/airplayer`. Set `AIRPLAYER_APP` to the app's path if needed. Commands operate in the logged-in desktop session.
 
@@ -50,7 +52,7 @@ The CLI is also bundled at `AirPlayer.app/Contents/MacOS/airplayer`. Set `AIRPLA
 
 ## Supported sources and limitations
 
-- Direct HTTP/HTTPS video supported by AVFoundation and the receiver; MP4 and HLS are the initial formats. File extension alone does not establish compatibility.
+- Direct HTTP/HTTPS video supported by AVFoundation and the receiver; MP4 and HLS are the initial formats. Other extensions are accepted too; file extension alone does not establish compatibility. Native loading does not prove receiver playback.
 - Sources need their own audio track or HLS audio rendition. The app warns about detected video-only sources and does not combine separate audio/video URLs.
 - Website watch pages, yt-dlp extraction, remuxing, transcoding, custom headers/cookies, DRM integrations, and local-file input are not implemented.
 - Audio-only AirPlay speakers cannot display video. Television/receiver controls own volume.

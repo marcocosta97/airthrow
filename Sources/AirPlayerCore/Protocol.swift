@@ -57,6 +57,26 @@ public struct SeekRange: Codable, Sendable, Equatable {
     }
 }
 
+public enum MediaFailureReason: String, Codable, Sendable {
+    case network, sourceUnavailable = "source_unavailable"
+    case unreadableMedia = "unreadable_media", noVideo = "no_video"
+    case protectedMedia = "protected_media", externalPlaybackUnsupported = "external_playback_unsupported"
+    case loadFailed = "load_failed", playbackInterrupted = "playback_interrupted"
+
+    public var message: String {
+        switch self {
+        case .network: "Could not reach the media. Check the connection and try loading it again."
+        case .sourceUnavailable: "The media is unavailable or requires access. Try a fresh direct video URL."
+        case .unreadableMedia: "The media could not be read or decoded. Its format may be unsupported or its data damaged. Try another source."
+        case .noVideo: "This source has no video track. Choose a video source."
+        case .protectedMedia: "This source is protected. Protected-media playback is not supported by this app."
+        case .externalPlaybackUnsupported: "This source cannot play on the external video route. Try another source."
+        case .loadFailed: "Could not load the video. Check the source and try again."
+        case .playbackInterrupted: "Playback was interrupted. Check the source and receiver, then load the video again."
+        }
+    }
+}
+
 public struct PlaybackSnapshot: Codable, Sendable, Equatable {
     public var state: PlaybackState = .idle
     public var externalPlaybackActive = false
@@ -68,6 +88,7 @@ public struct PlaybackSnapshot: Codable, Sendable, Equatable {
     /// nil means audio inspection was unavailable or no source is loaded.
     public var hasAudio: Bool?
     public var error: String?
+    public var errorReason: MediaFailureReason?
     public init() {}
 }
 

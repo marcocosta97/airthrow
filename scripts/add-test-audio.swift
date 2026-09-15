@@ -29,7 +29,7 @@ try composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPers
     .insertTimeRange(range, of: audioTrack, at: .zero)
 let exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality)!
 exporter.outputURL = output
-exporter.outputFileType = .mp4
+exporter.outputFileType = output.pathExtension.lowercased() == "mov" ? .mov : .mp4
 await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
     exporter.exportAsynchronously { continuation.resume() }
 }
