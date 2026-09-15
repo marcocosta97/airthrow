@@ -1,0 +1,13 @@
+.build/
+build/
+.swiftpm/
+.DS_Store
+*.xcuserstate
+xcuserdata/
+.impeccable/review/
+__pycache__/
+
+# Local development context and editor state
+AGENTS.override.md
+.impeccable/
+.vscode/
