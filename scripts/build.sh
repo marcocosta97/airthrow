@@ -14,6 +14,7 @@ cp "$bin_dir/AirPlayerApp" "$app/Contents/MacOS/AirPlayerApp"
 cp "$bin_dir/airplayer" "$app/Contents/MacOS/airplayer"
 cp "$bin_dir/airplayer" "$build_dir/airplayer"
 cp Resources/Info.plist "$app/Contents/Info.plist"
+bash scripts/write-build-commit.sh "$app/Contents/Resources/BuildCommit.txt"
 swift scripts/make-icon.swift "$build_dir/AirPlayer.iconset"
 iconutil -c icns "$build_dir/AirPlayer.iconset" -o "$app/Contents/Resources/AirPlayer.icns"
 # Finder/iCloud can attach metadata to a generated .app inside Documents.

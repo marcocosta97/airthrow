@@ -80,3 +80,5 @@ The subprocess runs in its own process group with a 40-second deadline, 8 MiB JS
 For distribution, supply `CODE_SIGN_IDENTITY='Developer ID Application: Your Name (TEAMID)'` to the build script. This enables hardened runtime and timestamping; notarization is a separate release step. The app is not App Sandbox-enabled. Its command endpoint is a private per-user Unix socket, not a TCP listener.
 
 Prefer extracting the packaged ZIP to an unsynced application directory: cloud-sync metadata on a loose app can interfere with strict signature verification. Do not commit build output, signing credentials, or local editor state.
+
+The standard About AirPlayer panel shows the build’s short Git commit. Packaging and Xcode builds stamp it into `BuildCommit.txt` before signing; `-dirty` indicates uncommitted changes (including untracked, non-ignored files). Builds from a source export without Git metadata display `unknown`. Plain `swift build` does not package this resource; use the packaging script or Xcode for the About metadata.

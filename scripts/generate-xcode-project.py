@@ -48,7 +48,7 @@ def config_list(name, extra):
     return add(name + 'Configurations', dict(isa='XCConfigurationList', buildConfigurations=ids, defaultConfigurationIsVisible='0', defaultConfigurationName='Release'))
 
 project_configs = config_list('Project', {})
-app_configs = config_list('App', dict(PRODUCT_NAME='AirPlayer', PRODUCT_MODULE_NAME='AirPlayerApp', EXECUTABLE_NAME='AirPlayerApp', INFOPLIST_FILE='Resources/Info.plist', PRODUCT_BUNDLE_IDENTIFIER='app.airplayer.mac', CODE_SIGN_STYLE='Automatic', ENABLE_HARDENED_RUNTIME='YES', COMBINE_HIDPI_IMAGES='YES'))
+app_configs = config_list('App', dict(PRODUCT_NAME='AirPlayer', PRODUCT_MODULE_NAME='AirPlayerApp', EXECUTABLE_NAME='AirPlayerApp', INFOPLIST_FILE='Resources/Info.plist', PRODUCT_BUNDLE_IDENTIFIER='app.airplayer.mac', CODE_SIGN_STYLE='Automatic', ENABLE_HARDENED_RUNTIME='YES', COMBINE_HIDPI_IMAGES='YES', ENABLE_USER_SCRIPT_SANDBOXING='NO'))
 cli_configs = config_list('CLI', dict(PRODUCT_NAME='airplayer', PRODUCT_MODULE_NAME='AirPlayerCLI', CODE_SIGN_STYLE='Automatic', ENABLE_HARDENED_RUNTIME='YES', SKIP_INSTALL='YES'))
 
 def source_phase(name, folders):
@@ -66,7 +66,11 @@ copy = add('CopyCLI', dict(isa='PBXCopyFilesBuildPhase', buildActionMask='214748
 add('CLITarget', dict(isa='PBXNativeTarget', buildConfigurationList=cli_configs, buildPhases=[source_phase('CLI', ['AirPlayerCore', 'AirPlayerCLI'])], buildRules=[], dependencies=[], name='airplayer', productName='airplayer', productReference=cli_product, productType='com.apple.product-type.tool'))
 icon_build = add('IconBuild', dict(isa='PBXBuildFile', fileRef=icon))
 resources = add('AppResources', dict(isa='PBXResourcesBuildPhase', buildActionMask='2147483647', files=[icon_build], runOnlyForDeploymentPostprocessing='0'))
-app_target = add('AppTarget', dict(isa='PBXNativeTarget', buildConfigurationList=app_configs, buildPhases=[source_phase('App', ['AirPlayerCore', 'AirPlayerApp']), resources, copy], buildRules=[], dependencies=[dependency], name='AirPlayer', productName='AirPlayer', productReference=app_product, productType='com.apple.product-type.application'))
+commit_phase = add('BuildCommit', dict(isa='PBXShellScriptBuildPhase', buildActionMask='2147483647', files=[],
+    name='Stamp Git commit', inputPaths=[], outputPaths=['$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/BuildCommit.txt'],
+    alwaysOutOfDate='1', runOnlyForDeploymentPostprocessing='0', shellPath='/bin/bash',
+    shellScript='bash "$SRCROOT/scripts/write-build-commit.sh" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/BuildCommit.txt"\n'))
+app_target = add('AppTarget', dict(isa='PBXNativeTarget', buildConfigurationList=app_configs, buildPhases=[source_phase('App', ['AirPlayerCore', 'AirPlayerApp']), resources, copy, commit_phase], buildRules=[], dependencies=[dependency], name='AirPlayer', productName='AirPlayer', productReference=app_product, productType='com.apple.product-type.application'))
 add('Project', dict(isa='PBXProject', attributes=dict(LastUpgradeCheck='1600'), buildConfigurationList=project_configs, compatibilityVersion='Xcode 14.0', developmentRegion='en', hasScannedForEncodings='0', knownRegions=['en', 'Base'], mainGroup=main_group, productRefGroup=products, projectDirPath='', projectRoot='', targets=[app_target, cli_target]))
 project = root / 'AirPlayer.xcodeproj'
 project.mkdir(exist_ok=True)
