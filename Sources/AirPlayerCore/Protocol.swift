@@ -56,7 +56,7 @@ public enum PlaybackPath: String, Codable, Sendable {
     public var explanation: String {
         switch self {
         case .direct: "Tier 1: Plays the source directly, without preparing a file on this Mac."
-        case .remux: "Tier 2: Copies audio and video into a compatible file on this Mac without re-encoding. Playback waits for preparation to finish."
+        case .remux: "Tier 2: Copies audio and video into compatible media on this Mac without re-encoding. Preparation may continue during playback."
         }
     }
 }

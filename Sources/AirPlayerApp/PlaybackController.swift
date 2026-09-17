@@ -170,8 +170,17 @@ final class PlaybackController: ObservableObject {
                     self.timeoutTask?.cancel()
                     self.refresh()
                     let prepared = try await prepareSource(source)
-                    guard !Task.isCancelled, self.generation == id else { prepared.stop(); return }
+                    guard !Task.isCancelled, self.generation == id else {
+                        prepared.stop(); await prepared.waitForProducer(); return
+                    }
                     self.preparedMedia = prepared
+                    if let failure = prepared.productionFailure { throw failure }
+                    prepared.onFailure = { [weak self] failure in
+                        guard let self, self.generation == id else { return }
+                        // The prepared URL already reached this session. A later
+                        // producer failure ends it rather than advancing a queue.
+                        self.fail(failure.reason, advancingQueue: false)
+                    }
                     playbackURL = prepared.url
                     self.preparing = false
                 }
@@ -197,7 +206,7 @@ final class PlaybackController: ObservableObject {
                         } catch { detectedAudio = nil }
                     }
                 }
-                guard !Task.isCancelled, self.generation == id else { return }
+                guard !Task.isCancelled, self.generation == id, self.failure == nil else { return }
                 guard playable else {
                     self.fail(.unreadableMedia)
                     return
@@ -206,6 +215,11 @@ final class PlaybackController: ObservableObject {
                 self.hasAudio = detectedAudio
                 if source.title == nil, let metadataTitle { self.title = metadataTitle }
                 let item = AVPlayerItem(asset: asset)
+                // EVENT is finite here, but AVPlayer initially treats its growing
+                // playlist as live. Keep fetching updates while Load stays paused.
+                if self.preparedMedia?.sourceDuration != nil {
+                    item.canUseNetworkResourcesForLiveStreamingWhilePaused = true
+                }
                 self.itemObservations = [
                     item.observe(\.status, options: [.new]) { [weak self] _, _ in
                         Task { @MainActor in
@@ -465,6 +479,17 @@ final class PlaybackController: ObservableObject {
         }
     }
 
+    private func stopPreparedMedia() {
+        guard let prepared = preparedMedia else { return }
+        preparedMedia = nil
+        prepared.stop()
+        let id = UUID()
+        drainingLoads[id] = Task { [weak self] in
+            await prepared.waitForProducer()
+            self?.drainingLoads.removeValue(forKey: id)
+        }
+    }
+
     private func resetItem(keepPlayerItem: Bool = false, preserveQueue: Bool = false) {
         generation = UUID()
         loadTask?.cancel(); loadTask = nil
@@ -483,7 +508,7 @@ final class PlaybackController: ObservableObject {
         // Direct sources can retain the old paused item. Prepared media must be
         // detached before closing its server and deleting its file.
         if !keepPlayerItem || preparedMedia != nil { player.replaceCurrentItem(with: nil) }
-        preparedMedia?.stop(); preparedMedia = nil
+        stopPreparedMedia()
         loading = false; resolving = false; preparing = false; websiteURL = nil; retriedResolution = false
         selectedSource = nil
         ended = false; hasPlayed = false; failure = nil; failureReason = nil
@@ -497,7 +522,10 @@ final class PlaybackController: ObservableObject {
         }
     }
 
-    private func fail(_ reason: MediaFailureReason, message: String? = nil) {
+    private func fail(_ reason: MediaFailureReason, message: String? = nil, advancingQueue: Bool = true) {
+        // A producer failure may cancel an in-flight asset load. Preserve the
+        // original diagnosis when that cancellation subsequently reports back.
+        guard failure == nil else { return }
         // A stale signed source may fail during initial loading. Resolve once more,
         // still paused. Never restart established playback or retry indefinitely.
         if reason == .sourceUnavailable, let websiteURL, !retriedResolution, !hasPlayed {
@@ -512,7 +540,7 @@ final class PlaybackController: ObservableObject {
                       titleOverride: title)
             return
         }
-        if var queue, queueAttemptsRemaining > 1 {
+        if advancingQueue, var queue, queueAttemptsRemaining > 1 {
             queue.skipped.insert(queue.currentIndex)
             let failedTitle = queue.entries[queue.currentIndex].title
             let nextIndex = queue.currentIndex + queueDirection
@@ -536,7 +564,7 @@ final class PlaybackController: ObservableObject {
         mediaItem = nil
         itemObservations.removeAll()
         notifications.forEach(NotificationCenter.default.removeObserver); notifications.removeAll()
-        preparedMedia?.stop(); preparedMedia = nil
+        stopPreparedMedia()
         refresh()
     }
 
@@ -557,7 +585,9 @@ final class PlaybackController: ObservableObject {
         // item whose video tracks are still being confirmed.
         if (mediaItem == nil || loading || failure != nil) && player.currentItem != nil {
             player.isMuted = true
-            player.pause()
+            // Repeated pause requests while an already-paused EVENT item loads
+            // can interrupt AVPlayer's initial buffering before it becomes ready.
+            if player.rate != 0 || player.timeControlStatus != .paused { player.pause() }
         }
         let external = player.isExternalPlaybackActive
         if wasExternal && !external {
@@ -634,7 +664,7 @@ final class PlaybackController: ObservableObject {
                         state: index == queue.currentIndex ? .current : (queue.skipped.contains(index) ? .skipped : .pending))
                 }, truncated: queue.truncated)
         }
-        next.duration = item.flatMap { finite($0.duration.seconds) }
+        next.duration = preparedMedia?.sourceDuration ?? item.flatMap { finite($0.duration.seconds) }
         next.position = item == nil ? nil : finite(player.currentTime().seconds)
         next.seekableRanges = (item?.seekableTimeRanges ?? []).compactMap {
             let range = $0.timeRangeValue
@@ -642,7 +672,7 @@ final class PlaybackController: ObservableObject {
             return SeekRange(start: start, end: end)
         }
         let recommendedLiveOffset = item.flatMap { finite($0.recommendedTimeOffsetFromLive.seconds) }
-        next.isLive = item?.status == .readyToPlay
+        next.isLive = preparedMedia?.sourceDuration == nil && item?.status == .readyToPlay
             && (item?.duration.isIndefinite == true || recommendedLiveOffset != nil)
         if next.isLive, let position = next.position, let edge = next.seekableRanges.last?.end {
             next.liveOffset = max(0, edge - position)
@@ -693,8 +723,8 @@ final class PlaybackController: ObservableObject {
 
     /// Quit waits for cancelled jobs to reap their helpers and release temporary files.
     func shutdownAndWait() async {
-        let pending = Array(drainingLoads.values)
         shutdown()
+        let pending = Array(drainingLoads.values)
         for job in pending { await job.value }
     }
 

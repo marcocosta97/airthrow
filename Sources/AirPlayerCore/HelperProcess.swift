@@ -19,7 +19,8 @@ struct HelperExecutables {
 /// Pipes are drained without blocking or retaining unbounded extractor output.
 enum HelperProcess {
     static func run(executable: String, arguments: [String], timeout: Duration = .seconds(40),
-                    outputLimit: Int = 8 * 1024 * 1024) async throws -> Data {
+                    outputLimit: Int = 8 * 1024 * 1024,
+                    monitor: (@Sendable () throws -> Void)? = nil) async throws -> Data {
         try Task.checkCancellation()
         var output: [Int32] = [0, 0]
         var errors: [Int32] = [0, 0]
@@ -70,6 +71,7 @@ enum HelperProcess {
         }
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
+        var nextMonitor = clock.now
         var data = Data()
         var errorBytes = 0
         var buffer = [UInt8](repeating: 0, count: 16_384)
@@ -77,6 +79,10 @@ enum HelperProcess {
         while true {
             try Task.checkCancellation()
             guard clock.now < deadline else { throw ResolutionFailure.timedOut }
+            if clock.now >= nextMonitor {
+                try monitor?()
+                nextMonitor = clock.now.advanced(by: .milliseconds(250))
+            }
             for fd in [output[0], errors[0]] {
                 // Bound each pass so a noisy process cannot starve cancellation or stderr.
                 for _ in 0..<32 {

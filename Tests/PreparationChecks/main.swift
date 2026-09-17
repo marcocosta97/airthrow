@@ -11,7 +11,11 @@ struct PreparationChecks {
         do { try await body(); try check(false, "Expected a preparation failure") }
         catch let error as PreparationFailure { try check(error.reason == reason, "Wrong preparation failure") }
     }
-    static func main() async throws {
+    static func main() async {
+        do { try await run() }
+        catch { print("FAIL preparation checks: \(error)"); exit(1) }
+    }
+    static func run() async throws {
         if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--website" {
             do {
                 let source = try await SourceResolver().resolve(MediaInput.url(CommandLine.arguments[2]))
@@ -45,7 +49,7 @@ struct PreparationChecks {
             return (data, response as! HTTPURLResponse)
         }
         let source = ResolvedSource(url: URL(string: base + "/combined.mkv")!)
-        var prepared: PreparedMedia? = try await preparer.prepare(source)
+        var prepared: PreparedMedia? = try await preparer.prepare(source, mode: .completeFile)
         let endpoint = prepared!.url
         let cache = FileManager.default.temporaryDirectory.appendingPathComponent("airplayer-prepared-v1")
         let active = Set(try FileManager.default.contentsOfDirectory(atPath: cache.path))
@@ -81,11 +85,11 @@ struct PreparationChecks {
 
         let split = ResolvedSource(url: URL(string: base + "/video.mp4")!,
             audio: MediaTrack(url: URL(string: base + "/audio.m4a")!))
-        let joined = try await preparer.prepare(split)
+        let joined = try await preparer.prepare(split, mode: .completeFile)
         let (joinedData, _) = try await fetch(joined.url)
         try joinedData.write(to: directory.appendingPathComponent("joined.mp4"))
         joined.stop()
-        let multiple = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/multitrack.mkv")!))
+        let multiple = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/multitrack.mkv")!), mode: .completeFile)
         multiple.stop()
         print("PASS multi-track input selects a compatible audio stream")
         let shortLimit = MediaPreparer(environment: environment, maximumBytes: 1000)

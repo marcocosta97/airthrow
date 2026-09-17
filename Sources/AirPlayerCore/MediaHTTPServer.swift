@@ -3,15 +3,16 @@ import Network
 import SystemConfiguration
 import Darwin
 
-/// One finite file, one unguessable path, one request per connection. No proxy or directory routes.
+/// Session media under an unguessable path; no proxy or directory routes.
 @MainActor
 public final class MediaHTTPServer {
     public private(set) var url: URL?
     private let listener: NWListener
     private let host: String
     private let file: URL
-    private let size: Int64
-    private let path = "/\(UUID().uuidString)/media.mp4"
+    private let hls: Bool
+    private let prefix = "/\(UUID().uuidString)/"
+    private var path: String { prefix + (hls ? "media.m3u8" : "media.mp4") }
     private var ready: CheckedContinuation<Void, Error>?
     private var startupTimeout: Task<Void, Never>?
     private var clients: [ObjectIdentifier: Client] = [:]
@@ -28,8 +29,8 @@ public final class MediaHTTPServer {
         deinit { try? file?.close(); timeout?.cancel() }
     }
 
-    public static func start(file: URL, host: String? = nil) async throws -> MediaHTTPServer {
-        let server = try MediaHTTPServer(file: file, host: host ?? localAddress())
+    public static func start(file: URL, host: String? = nil, hls: Bool = false) async throws -> MediaHTTPServer {
+        let server = try MediaHTTPServer(file: file, host: host ?? localAddress(), hls: hls)
         try await withTaskCancellationHandler {
             try Task.checkCancellation()
             try await withCheckedThrowingContinuation { continuation in
@@ -64,12 +65,14 @@ public final class MediaHTTPServer {
         return server
     }
 
-    private init(file: URL, host: String) throws {
+    private init(file: URL, host: String, hls: Bool) throws {
         var address = in_addr()
         guard inet_pton(AF_INET, host, &address) == 1 else { throw PreparationFailure.delivery }
-        self.file = file; self.host = host
-        size = (try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.int64Value ?? 0
-        guard size > 0 else { throw PreparationFailure.failed }
+        self.file = file; self.host = host; self.hls = hls
+        if !hls {
+            let size = (try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.int64Value ?? 0
+            guard size > 0 else { throw PreparationFailure.failed }
+        }
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: .init(host), port: .any)
         do { listener = try NWListener(using: parameters) }
@@ -164,7 +167,17 @@ public final class MediaHTTPServer {
         let lines = text.components(separatedBy: "\r\n")
         let request = (lines.first ?? "").split(separator: " ")
         guard request.count == 3, ["HTTP/1.1", "HTTP/1.0"].contains(request[2]) else { reply(client, code: "400 Bad Request"); return }
-        guard request[1] == path else { reply(client, code: "404 Not Found"); return }
+        let requested = String(request[1])
+        let resource: URL
+        let contentType: String
+        if requested == path {
+            resource = file
+            contentType = hls ? "application/vnd.apple.mpegurl" : "video/mp4"
+        } else if hls, requested.hasPrefix(prefix),
+                  Self.isSegmentName(String(requested.dropFirst(prefix.count))) {
+            resource = file.deletingLastPathComponent().appendingPathComponent(String(requested.dropFirst(prefix.count)))
+            contentType = "video/mp2t"
+        } else { reply(client, code: "404 Not Found"); return }
         guard request[0] == "GET" || request[0] == "HEAD" else { reply(client, code: "405 Method Not Allowed", extra: "Allow: GET, HEAD\r\n"); return }
         var headers: [String: String] = [:]
         for line in lines.dropFirst() {
@@ -176,6 +189,17 @@ public final class MediaHTTPServer {
         guard headers["transfer-encoding"] == nil, headers["content-length"] == nil || headers["content-length"] == "0" else {
             reply(client, code: "400 Bad Request"); return
         }
+        // Open once, then stat that descriptor: an atomic playlist replacement must
+        // not mix the previous Content-Length with the new playlist body.
+        let fd = open(resource.path, O_RDONLY | O_NOFOLLOW)
+        guard fd >= 0 else { reply(client, code: "404 Not Found"); return }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        var info = stat()
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_size > 0 else {
+            try? handle.close(); reply(client, code: "404 Not Found"); return
+        }
+        client.file = handle
+        let size = Int64(info.st_size)
         var start: Int64 = 0, end = size - 1
         var partial = false
         if request[0] == "GET", let range = headers["range"], headers["if-range"] == nil {
@@ -186,15 +210,21 @@ public final class MediaHTTPServer {
         }
         do {
             if request[0] == "GET" {
-                client.file = try FileHandle(forReadingFrom: file)
                 try client.file?.seek(toOffset: UInt64(start))
                 client.remaining = end - start + 1
             }
             let code = partial ? "206 Partial Content" : "200 OK"
             let rangeHeader = partial ? "Content-Range: bytes \(start)-\(end)/\(size)\r\n" : ""
-            let response = "HTTP/1.1 \(code)\r\nContent-Type: video/mp4\r\nAccept-Ranges: bytes\r\nContent-Length: \(end - start + 1)\r\nCache-Control: no-store\r\nConnection: close\r\n\(rangeHeader)\r\n"
+            let response = "HTTP/1.1 \(code)\r\nContent-Type: \(contentType)\r\nAccept-Ranges: bytes\r\nContent-Length: \(end - start + 1)\r\nCache-Control: no-store\r\nConnection: close\r\n\(rangeHeader)\r\n"
             send(client, data: Data(response.utf8))
         } catch { reply(client, code: "500 Internal Server Error") }
+    }
+
+    nonisolated static func isSegmentName(_ name: String) -> Bool {
+        guard name.hasPrefix("segment"), name.hasSuffix(".ts") else { return false }
+        // ffmpeg's %06d widens past six digits, so the index is not width-fixed.
+        let digits = name.dropFirst(7).dropLast(3)
+        return !digits.isEmpty && digits.allSatisfy { $0.isASCII && $0.isNumber }
     }
 
     static func byteRange(_ value: String, size: Int64) -> (Int64, Int64)? {

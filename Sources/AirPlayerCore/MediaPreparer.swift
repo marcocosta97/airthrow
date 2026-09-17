@@ -18,13 +18,54 @@ public enum PreparationFailure: Error, Sendable {
 @MainActor
 public final class PreparedMedia {
     public let url: URL
+    /// Known finite source duration, even while an EVENT playlist is growing.
+    public let sourceDuration: Double?
+    public private(set) var productionFailure: PreparationFailure?
+    public private(set) var isProducing = false
+    public var onFailure: (@MainActor (PreparationFailure) -> Void)?
+    private var producer: Task<Void, Never>?
     private let server: MediaHTTPServer
     private var workspace: PreparationWorkspace?
-    fileprivate init(server: MediaHTTPServer, workspace: PreparationWorkspace) {
-        self.server = server; self.workspace = workspace; url = server.url!
+    fileprivate init(server: MediaHTTPServer, workspace: PreparationWorkspace, sourceDuration: Double? = nil) {
+        self.server = server; self.workspace = workspace; self.sourceDuration = sourceDuration; url = server.url!
     }
+
+    fileprivate func produce(executable: String, arguments: [String], workspace: PreparationWorkspace,
+                             maximumBytes: Int64, timeout: Duration, duration: Double) {
+        isProducing = true
+        producer = Task { [weak self] in
+            let activity = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled],
+                                                                 reason: "Preparing AirPlay video")
+            defer { ProcessInfo.processInfo.endActivity(activity) }
+            // The job owns a lease until the process group is terminated and reaped.
+            // Stop may release the player/server earlier, but cannot delete a writer's directory.
+            do {
+                _ = try await HelperProcess.run(executable: executable, arguments: arguments,
+                    timeout: timeout, outputLimit: 64 * 1024, monitor: {
+                        try workspace.checkSize(maximumBytes)
+                    })
+                try workspace.checkSize(maximumBytes)
+                let playlist = try HLSPlaylist(directory: workspace.directory)
+                guard playlist.complete, playlist.duration >= duration - 0.5,
+                      playlist.duration <= duration + 2 else { throw PreparationFailure.failed }
+            } catch is CancellationError {
+                // Cancellation belongs to Stop/replacement, not a playback error.
+            } catch {
+                let failure = (error as? PreparationFailure)
+                    ?? ((error as? ResolutionFailure) == .timedOut ? .limit : .failed)
+                self?.productionFailure = failure
+                self?.onFailure?(failure)
+            }
+            self?.isProducing = false
+        }
+    }
+
+    public func waitForProducer() async { await producer?.value }
+    deinit { producer?.cancel() }
     public func stop() {
+        onFailure = nil
         server.stop()
+        producer?.cancel()
         workspace = nil
     }
 }
@@ -50,6 +91,19 @@ private final class PreparationWorkspace: @unchecked Sendable {
         try? FileManager.default.removeItem(at: directory)
         close(lease)
     }
+    func checkSize(_ maximumBytes: Int64) throws {
+        let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey])
+        var bytes: Int64 = 0
+        for file in files {
+            // Atomic renames may remove a .tmp between enumeration and stat.
+            if let size = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize { bytes += Int64(size) }
+        }
+        guard bytes < maximumBytes else { throw PreparationFailure.limit }
+        let space = try FileManager.default.attributesOfFileSystem(forPath: directory.path)
+        guard let free = (space[.systemFreeSize] as? NSNumber)?.int64Value,
+              free > 64 * 1024 * 1024 else { throw PreparationFailure.limit }
+    }
+
     static func cleanAbandoned() {
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isSymbolicLinkKey]) else { return }
@@ -63,19 +117,53 @@ private final class PreparationWorkspace: @unchecked Sendable {
     }
 }
 
+/// Reads only our generated, atomically published media playlist.
+private struct HLSPlaylist {
+    let duration: Double
+    let count: Int
+    let complete: Bool
+    init(directory: URL) throws {
+        let data = try Data(contentsOf: directory.appendingPathComponent("media.m3u8"))
+        guard data.count <= 4 * 1024 * 1024, let text = String(data: data, encoding: .utf8),
+              text.hasPrefix("#EXTM3U") else { throw PreparationFailure.failed }
+        let lines = text.split(separator: "\n").map(String.init)
+        let durations = lines.filter { $0.hasPrefix("#EXTINF:") }.compactMap {
+            $0.dropFirst(8).split(separator: ",").first.flatMap { Double($0) }
+        }
+        let segments = lines.filter { !$0.hasPrefix("#") && !$0.isEmpty }
+        guard !segments.isEmpty, segments.count == durations.count,
+              durations.allSatisfy({ $0.isFinite && $0 > 0 }),
+              segments.allSatisfy({ name in
+                  MediaHTTPServer.isSegmentName(name)
+                      && ((try? FileManager.default.attributesOfItem(atPath: directory.appendingPathComponent(name).path)[.size]
+                           as? NSNumber)?.int64Value ?? 0) > 0
+              }) else { throw PreparationFailure.failed }
+        duration = durations.reduce(0, +)
+        count = segments.count
+        complete = lines.contains("#EXT-X-ENDLIST")
+    }
+}
+
+public enum PreparationMode: Sendable {
+    case progressiveHLS, completeFile
+}
+
 public struct MediaPreparer: Sendable {
     private let environment: [String: String]
     private let maximumBytes: Int64
     private let timeout: Duration
+    private let startupTimeout: Duration
     public init(environment: [String: String] = ProcessInfo.processInfo.environment) {
-        self.environment = environment; maximumBytes = 2 * 1024 * 1024 * 1024; timeout = .seconds(600)
+        self.environment = environment; maximumBytes = 2 * 1024 * 1024 * 1024; timeout = .seconds(600); startupTimeout = .seconds(30)
     }
-    init(environment: [String: String], maximumBytes: Int64, timeout: Duration = .seconds(600)) {
-        self.environment = environment; self.maximumBytes = maximumBytes; self.timeout = timeout
+    init(environment: [String: String], maximumBytes: Int64, timeout: Duration = .seconds(600),
+         startupTimeout: Duration = .seconds(30)) {
+        self.environment = environment; self.maximumBytes = maximumBytes; self.timeout = timeout; self.startupTimeout = startupTimeout
     }
     public static func cleanAbandonedFiles() { PreparationWorkspace.cleanAbandoned() }
 
-    public func prepare(_ source: ResolvedSource) async throws -> PreparedMedia {
+    public func prepare(_ source: ResolvedSource, mode: PreparationMode? = nil) async throws -> PreparedMedia {
+        let mode = mode ?? (environment["AIRPLAYER_PREPARATION_MODE"] == "complete-file" ? .completeFile : .progressiveHLS)
         let finder = HelperExecutables(environment: environment)
         guard let ffmpeg = finder.executable("ffmpeg", override: "AIRPLAYER_FFMPEG"),
               let ffprobe = finder.executable("ffprobe", override: "AIRPLAYER_FFPROBE") else {
@@ -99,8 +187,12 @@ public struct MediaPreparer: Sendable {
             guard abs(videoDuration - audioDuration) <= 2 else { throw PreparationFailure.unsupported }
             let videoBytes = Int64(videoInput.format.size ?? "") ?? 0
             let audioBytes = source.audio == nil ? 0 : (Int64(audioInput.format.size ?? "") ?? 0)
-            guard videoBytes >= 0, audioBytes >= 0, videoBytes < maximumBytes, audioBytes < maximumBytes,
-                  videoBytes + audioBytes < maximumBytes else { throw PreparationFailure.limit }
+            // MPEG-TS packetization and per-segment tables add overhead the source
+            // container did not have. Reserve headroom so a source admitted here
+            // still fits under the same prepared-media cap during progressive output.
+            let sourceLimit = mode == .progressiveHLS ? maximumBytes - maximumBytes / 10 : maximumBytes
+            guard videoBytes >= 0, audioBytes >= 0, videoBytes < sourceLimit, audioBytes < sourceLimit,
+                  videoBytes + audioBytes < sourceLimit else { throw PreparationFailure.limit }
             let workspace = try PreparationWorkspace()
             let space = try FileManager.default.attributesOfFileSystem(forPath: workspace.directory.path)
             guard let free = (space[.systemFreeSize] as? NSNumber)?.int64Value,
@@ -112,8 +204,18 @@ public struct MediaPreparer: Sendable {
                 arguments += try Self.inputOptions(headers: audio.headers) + ["-i", audio.url.absoluteString]
             }
             arguments += ["-map", "0:\(video.index)", "-map", "\(source.audio == nil ? 0 : 1):\(audio.index)",
-                          "-c", "copy", "-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn",
-                          "-movflags", "+faststart", "-fs", String(maximumBytes), "-f", "mp4", output.path]
+                          "-c", "copy", "-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn"]
+            if mode == .progressiveHLS {
+                do {
+                    return try await progressive(workspace: workspace, arguments: arguments, executable: ffmpeg,
+                                                 host: host, duration: videoDuration)
+                } catch ProgressiveStartup.useCompleteFile {
+                    // No URL has reached the player. A bounded startup failure can
+                    // safely use the existing complete-file path once.
+                    try Task.checkCancellation()
+                }
+            }
+            arguments += ["-movflags", "+faststart", "-fs", String(maximumBytes), "-f", "mp4", output.path]
             _ = try await HelperProcess.run(executable: ffmpeg, arguments: arguments, timeout: timeout,
                                             outputLimit: 64 * 1024)
             try Task.checkCancellation()
@@ -133,6 +235,51 @@ public struct MediaPreparer: Sendable {
         catch let error as PreparationFailure { throw error }
         catch ResolutionFailure.timedOut { throw PreparationFailure.limit }
         catch { throw PreparationFailure.failed }
+    }
+
+    private enum ProgressiveStartup: Error { case useCompleteFile }
+
+    @MainActor
+    private func progressive(workspace: PreparationWorkspace, arguments: [String], executable: String,
+                             host: String, duration: Double) async throws -> PreparedMedia {
+        let playlist = workspace.directory.appendingPathComponent("media.m3u8")
+        let arguments = arguments + ["-f", "hls", "-hls_segment_type", "mpegts", "-hls_time", "2",
+            "-hls_playlist_type", "event", "-hls_list_size", "0", "-hls_flags", "temp_file",
+            "-hls_segment_filename", workspace.directory.appendingPathComponent("segment%06d.ts").path,
+            playlist.path]
+        let server = try await MediaHTTPServer.start(file: playlist, host: host, hls: true)
+        let prepared = PreparedMedia(server: server, workspace: workspace, sourceDuration: duration)
+        prepared.produce(executable: executable, arguments: arguments, workspace: workspace,
+                         maximumBytes: maximumBytes, timeout: timeout, duration: duration)
+        let started = ContinuousClock.now
+        do {
+            while true {
+                try Task.checkCancellation()
+                if let failure = prepared.productionFailure { throw failure }
+                if let manifest = try? HLSPlaylist(directory: workspace.directory) {
+                    let elapsed = started.duration(to: .now)
+                    let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+                    if !prepared.isProducing || (manifest.count >= 3 && manifest.duration >= 6 && manifest.duration >= seconds) {
+                        return prepared
+                    }
+                }
+                guard prepared.isProducing, started.duration(to: .now) < startupTimeout else {
+                    throw ProgressiveStartup.useCompleteFile
+                }
+                try await Task.sleep(for: .milliseconds(100))
+            }
+        } catch {
+            prepared.stop()
+            await prepared.waitForProducer()
+            // The caller still holds the lease. Remove partial HLS before an MP4 fallback.
+            for file in try FileManager.default.contentsOfDirectory(at: workspace.directory, includingPropertiesForKeys: nil)
+                where file.lastPathComponent != "lease" {
+                try FileManager.default.removeItem(at: file)
+            }
+            if error is CancellationError { throw CancellationError() }
+            if case PreparationFailure.limit = error { throw PreparationFailure.limit }
+            throw ProgressiveStartup.useCompleteFile
+        }
     }
 
     private static func inputOptions(headers: [String: String]) throws -> [String] {
