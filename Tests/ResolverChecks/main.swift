@@ -46,6 +46,10 @@ struct ResolverChecks {
         }
         let absent = SourceResolver(environment: ["AIRPLAYER_YTDLP": "/missing/yt-dlp", "AIRPLAYER_DENO": "/missing/deno"])
         let direct = URL(string: "https://cdn.example/no-extension?x=1")!
+        let unknownVideo = try await absent.resolve(direct)
+        try check(!unknownVideo.videoKnownPresent, "A direct URL invented video evidence")
+        let unknownHLS = try await absent.resolve(URL(string: "https://cdn.example/audio.m3u8")!)
+        try check(!unknownHLS.videoKnownPresent, "An HLS extension invented video evidence")
         try check(try await absent.resolve(direct).url == direct, "Direct URL invoked a helper")
         try check(!SourceResolver.isWebsite(URL(string: "https://youtube.com.evil.example/watch?v=BaW_jenozKc")!), "Host suffix spoof accepted")
         for link in [page, URL(string: "https://youtu.be/BaW_jenozKc")!, URL(string: "https://youtube.com/shorts/BaW_jenozKc")!] {
@@ -107,6 +111,8 @@ struct ResolverChecks {
         }
         try check(native.url == masterURL && !native.needsPreparation && native.audio == nil && native.title == "HLS title",
                   "Validated master did not bypass complete-file preparation")
+        try check(native.videoKnownPresent,
+                  "Inspected HLS video evidence was lost before routed item readiness")
         let hlsOnly = try await SourceResolver.selectWithHLS(metadata([adaptiveVideo])) { _ in masterData }
         try check(hlsOnly.url == masterURL, "HLS required a progressive fallback to work")
         let invalidMasters = [
@@ -126,6 +132,7 @@ struct ResolverChecks {
             try check(!HLSMaster.hasAudioVideo(data, at: masterURL), "Invalid or silent master accepted")
             let result = try await SourceResolver.selectWithHLS(adaptiveData) { _ in data }
             try check(result.needsPreparation, "Invalid master removed the preparation fallback")
+            try check(!result.videoKnownPresent, "An invalid master supplied video evidence")
         }
         try check(!HLSMaster.hasAudioVideo(Data(repeating: 65, count: HLSMaster.maximumBytes + 1), at: masterURL),
                   "Oversized manifest was accepted")

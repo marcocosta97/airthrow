@@ -71,6 +71,8 @@ Resolver checks also cover HLS master selection before remuxing, alternate-audio
 
 Playlist controller checks use injected deterministic metadata and media URLs. They verify that the first playable item stays paused, unavailable entries are skipped, navigation resolves items lazily, and Stop clears the queue. Physical receiver acceptance still needs normal-end automatic advancement, Previous/Next while playing and paused, route loss, replacement during preparation, and a public playlist containing both direct and remuxed entries.
 
+Inspected HLS masters retain positive video evidence through source selection. A ready item on an active AirPlay route may expose no local video tracks or presentation size; this evidence lets the controller finish loading without waiting for those observations. Resolver checks ensure validated masters retain it and uninspected URLs or invalid masters do not invent it. Status diagnostics expose item/player readiness, transport state, and video confirmation to distinguish this gate from network buffering.
+
 For an optional metadata-only live smoke check, install `yt-dlp` and `deno`, record their `--version` output, and run:
 
 ```bash

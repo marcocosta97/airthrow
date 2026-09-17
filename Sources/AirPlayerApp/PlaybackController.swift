@@ -211,7 +211,10 @@ final class PlaybackController: ObservableObject {
                     self.fail(.unreadableMedia)
                     return
                 }
-                self.hasVideo = !video.isEmpty
+                // A routed HLS item can become ready without exposing local
+                // video tracks or a presentation size. Preserve the inspected
+                // master's video evidence so queue handoff does not wait forever.
+                self.hasVideo = source.videoKnownPresent || !video.isEmpty
                 self.hasAudio = detectedAudio
                 if source.title == nil, let metadataTitle { self.title = metadataTitle }
                 let item = AVPlayerItem(asset: asset)
@@ -679,6 +682,25 @@ final class PlaybackController: ObservableObject {
         }
         if let item {
             var diagnostics = PlaybackDiagnostics()
+            diagnostics.itemStatus = switch item.status {
+            case .unknown: "unknown"
+            case .readyToPlay: "ready"
+            case .failed: "failed"
+            @unknown default: "other"
+            }
+            diagnostics.playerStatus = switch player.status {
+            case .unknown: "unknown"
+            case .readyToPlay: "ready"
+            case .failed: "failed"
+            @unknown default: "other"
+            }
+            diagnostics.timeControlStatus = switch player.timeControlStatus {
+            case .paused: "paused"
+            case .waitingToPlayAtSpecifiedRate: "waiting"
+            case .playing: "playing"
+            @unknown default: "other"
+            }
+            diagnostics.videoConfirmed = hasVideo
             diagnostics.waitingReason = waitingReason(player.reasonForWaitingToPlay)
             diagnostics.bufferedRanges = item.loadedTimeRanges.compactMap {
                 let range = $0.timeRangeValue

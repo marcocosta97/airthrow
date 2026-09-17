@@ -85,6 +85,10 @@ public enum PlaybackWaitingReason: String, Codable, Sendable {
 /// Numeric and categorical playback observations only. Source URLs, request
 /// headers and AVFoundation error text are deliberately excluded.
 public struct PlaybackDiagnostics: Codable, Sendable, Equatable {
+    public var itemStatus: String?
+    public var playerStatus: String?
+    public var timeControlStatus: String?
+    public var videoConfirmed: Bool?
     public var waitingReason: PlaybackWaitingReason?
     public var bufferedRanges: [SeekRange] = []
     public var bufferEmpty: Bool?

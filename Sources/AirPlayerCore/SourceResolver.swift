@@ -29,12 +29,16 @@ public struct ResolvedSource: Sendable {
     public let audio: MediaTrack?
     public let needsPreparation: Bool
     public let delivery: MediaDelivery
+    /// Positive video evidence from an inspected presentation, not its URL or extension.
+    public let videoKnownPresent: Bool
     public var playbackPath: PlaybackPath { needsPreparation ? .remux : .direct }
     public init(url: URL, title: String? = nil, headers: [String: String] = [:], audio: MediaTrack? = nil,
-                needsPreparation: Bool = false, delivery: MediaDelivery = .unknown) {
+                needsPreparation: Bool = false, delivery: MediaDelivery = .unknown,
+                videoKnownPresent: Bool = false) {
         self.url = url; self.title = title; self.headers = headers; self.audio = audio
         self.needsPreparation = needsPreparation || audio != nil
         self.delivery = delivery
+        self.videoKnownPresent = videoKnownPresent
     }
 }
 
@@ -170,7 +174,8 @@ struct YouTubeSourceAdapter: Sendable {
                 try Task.checkCancellation()
                 if let quality = HLSMaster.quality(manifest, at: master) {
                     candidates.append(MediaCandidate(
-                        source: ResolvedSource(url: master, title: cleanTitle(info.title), delivery: .hls),
+                        source: ResolvedSource(url: master, title: cleanTitle(info.title), delivery: .hls,
+                                               videoKnownPresent: true),
                         height: quality.height, bitrate: quality.bitrate))
                 }
             } catch {
