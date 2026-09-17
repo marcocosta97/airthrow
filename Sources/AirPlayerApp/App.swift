@@ -20,7 +20,6 @@ struct AirPlayerMain {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
     private static let playlistToolbarIdentifier = NSToolbarItem.Identifier("app.airplayer.playlist")
-    private static let playlistToolbarSpacerIdentifier = NSToolbarItem.Identifier("app.airplayer.playlist-space")
     private let controller = PlaybackController()
     private let presentation = ControllerPresentation()
     private let server = CommandServer()
@@ -28,6 +27,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
     private var settingsWindow: NSWindow?
     private var statusItem: NSStatusItem?
     private var playlistToolbarItem: NSToolbarItem?
+    private var playlistToolbarButton: NSButton?
+    private var playlistToolbarWidth: NSLayoutConstraint?
     private var snapshotObservation: AnyCancellable?
     private var playlistShownInWindow = false
     private var terminating = false
@@ -68,7 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
             toolbar.displayMode = .iconOnly
             toolbar.allowsUserCustomization = false
             toolbar.autosavesConfiguration = false
-            window.toolbarStyle = .unified
+            window.toolbarStyle = .unifiedCompact
             window.toolbar = toolbar
             window.center()
             window.setFrameAutosaveName("AirPlayerController")
@@ -80,7 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, Self.playlistToolbarIdentifier, Self.playlistToolbarSpacerIdentifier]
+        [.flexibleSpace, Self.playlistToolbarIdentifier]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -89,24 +90,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
-        if identifier == Self.playlistToolbarSpacerIdentifier {
-            let item = NSToolbarItem(itemIdentifier: identifier)
-            let spacer = NSView(frame: NSRect(x: 0, y: 0, width: 270, height: 1))
-            spacer.translatesAutoresizingMaskIntoConstraints = false
-            spacer.widthAnchor.constraint(equalToConstant: 270).isActive = true
-            item.view = spacer
-            return item
-        }
         guard identifier == Self.playlistToolbarIdentifier else { return nil }
         let item = NSToolbarItem(itemIdentifier: identifier)
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        let button = NSButton(image: NSImage(systemSymbolName: "sidebar.right", accessibilityDescription: "Show playlist")!,
+                              target: self, action: #selector(togglePlaylist))
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.isBordered = false
+        button.imageScaling = .scaleProportionallyDown
+        container.addSubview(button)
+        NSLayoutConstraint.activate([
+            button.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            button.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            button.widthAnchor.constraint(equalToConstant: 40),
+            button.heightAnchor.constraint(equalToConstant: 28),
+            container.heightAnchor.constraint(equalToConstant: 32),
+        ])
+        let width = container.widthAnchor.constraint(equalToConstant: 55)
+        width.isActive = true
+        item.view = container
         item.label = "Playlist"
         item.paletteLabel = "Playlist"
-        item.image = NSImage(systemSymbolName: "sidebar.right", accessibilityDescription: "Show playlist")
-        item.target = self
-        item.action = #selector(togglePlaylist)
+        item.isBordered = false
         item.autovalidates = false
         playlistToolbarItem = item
-        updatePlaylistToolbarItem()
+        playlistToolbarButton = button
+        playlistToolbarWidth = width
+        updatePlaylistButton()
         return item
     }
 
@@ -117,35 +128,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
     }
 
     private func updatePlaylistAvailability(_ available: Bool) {
-        playlistToolbarItem?.isEnabled = available
+        playlistToolbarButton?.isEnabled = available
         if available {
             presentation.playlistVisible = true
             setPlaylistShown(true)
         } else {
             setPlaylistShown(false)
         }
-        updatePlaylistToolbarItem()
+        updatePlaylistButton()
     }
 
-    private func updatePlaylistToolbarItem() {
+    private func updatePlaylistButton() {
         let visible = presentation.playlistVisible && controller.snapshot.queue != nil
         playlistToolbarItem?.label = visible ? "Hide Playlist" : "Show Playlist"
         playlistToolbarItem?.toolTip = visible ? "Hide playlist" : "Show playlist"
-        playlistToolbarItem?.image = NSImage(systemSymbolName: "sidebar.right",
-            accessibilityDescription: visible ? "Hide playlist" : "Show playlist")
-        guard let toolbar = window?.toolbar else { return }
-        if visible {
-            if !toolbar.items.contains(where: { $0.itemIdentifier == Self.playlistToolbarSpacerIdentifier }) {
-                toolbar.insertItem(withItemIdentifier: Self.playlistToolbarSpacerIdentifier, at: toolbar.items.count)
-            }
-        } else if let index = toolbar.items.firstIndex(where: { $0.itemIdentifier == Self.playlistToolbarSpacerIdentifier }) {
-            toolbar.removeItem(at: index)
-        }
+        playlistToolbarButton?.toolTip = visible ? "Hide playlist" : "Show playlist"
+        playlistToolbarButton?.setAccessibilityLabel(visible ? "Hide playlist" : "Show playlist")
+        playlistToolbarWidth?.constant = visible ? 326 : 55
     }
 
     private func setPlaylistShown(_ shown: Bool) {
         guard shown != playlistShownInWindow, let window else {
-            updatePlaylistToolbarItem()
+            updatePlaylistButton()
             return
         }
         playlistShownInWindow = shown
@@ -154,7 +158,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
         var frame = window.frame
         frame.size.width += widthChange
         window.setFrame(frame, display: true, animate: false)
-        updatePlaylistToolbarItem()
+        updatePlaylistButton()
     }
 
     @objc private func showSettings() {
