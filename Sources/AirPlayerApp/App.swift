@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 #if SWIFT_PACKAGE
 import AirPlayerCore
@@ -17,12 +18,17 @@ struct AirPlayerMain {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
+    private static let playlistToolbarIdentifier = NSToolbarItem.Identifier("app.airplayer.playlist")
     private let controller = PlaybackController()
+    private let presentation = ControllerPresentation()
     private let server = CommandServer()
     private var window: NSWindow?
     private var settingsWindow: NSWindow?
     private var statusItem: NSStatusItem?
+    private var playlistToolbarItem: NSToolbarItem?
+    private var snapshotObservation: AnyCancellable?
+    private var playlistShownInWindow = false
     private var terminating = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -45,20 +51,90 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         MediaPreparer.cleanAbandonedFiles()
         showWindow()
+        snapshotObservation = controller.$snapshot.sink { [weak self] snapshot in
+            self?.updatePlaylistAvailability(snapshot.queue != nil)
+        }
     }
 
     @objc func showWindow() {
         if window == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 520), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 520), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
             window.title = "AirPlayer"
             window.isReleasedWhenClosed = false
-            window.contentView = NSHostingView(rootView: ControllerView(controller: controller))
+            window.contentView = NSHostingView(rootView: ControllerView(controller: controller, presentation: presentation))
+            let toolbar = NSToolbar(identifier: "AirPlayerControllerToolbar")
+            toolbar.delegate = self
+            toolbar.displayMode = .iconOnly
+            toolbar.allowsUserCustomization = false
+            toolbar.autosavesConfiguration = false
+            window.toolbarStyle = .unified
+            window.toolbar = toolbar
             window.center()
             window.setFrameAutosaveName("AirPlayerController")
+            window.setContentSize(NSSize(width: 470, height: window.contentLayoutRect.height))
             self.window = window
         }
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.flexibleSpace, Self.playlistToolbarIdentifier]
+    }
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.flexibleSpace, Self.playlistToolbarIdentifier]
+    }
+
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
+                 willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        guard identifier == Self.playlistToolbarIdentifier else { return nil }
+        let item = NSToolbarItem(itemIdentifier: identifier)
+        item.label = "Playlist"
+        item.paletteLabel = "Playlist"
+        item.image = NSImage(systemSymbolName: "sidebar.right", accessibilityDescription: "Show playlist")
+        item.target = self
+        item.action = #selector(togglePlaylist)
+        item.autovalidates = false
+        playlistToolbarItem = item
+        updatePlaylistToolbarItem()
+        return item
+    }
+
+    @objc private func togglePlaylist() {
+        guard controller.snapshot.queue != nil else { return }
+        presentation.playlistVisible.toggle()
+        setPlaylistShown(presentation.playlistVisible)
+    }
+
+    private func updatePlaylistAvailability(_ available: Bool) {
+        playlistToolbarItem?.isEnabled = available
+        if available {
+            presentation.playlistVisible = true
+            setPlaylistShown(true)
+        } else {
+            setPlaylistShown(false)
+        }
+        updatePlaylistToolbarItem()
+    }
+
+    private func updatePlaylistToolbarItem() {
+        let visible = presentation.playlistVisible && controller.snapshot.queue != nil
+        playlistToolbarItem?.label = visible ? "Hide Playlist" : "Show Playlist"
+        playlistToolbarItem?.toolTip = visible ? "Hide playlist" : "Show playlist"
+        playlistToolbarItem?.image = NSImage(systemSymbolName: "sidebar.right",
+            accessibilityDescription: visible ? "Hide playlist" : "Show playlist")
+    }
+
+    private func setPlaylistShown(_ shown: Bool) {
+        guard shown != playlistShownInWindow, let window else {
+            updatePlaylistToolbarItem()
+            return
+        }
+        playlistShownInWindow = shown
+        let height = window.contentLayoutRect.height
+        window.setContentSize(NSSize(width: shown ? 741 : 470, height: height))
+        updatePlaylistToolbarItem()
     }
 
     @objc private func showSettings() {

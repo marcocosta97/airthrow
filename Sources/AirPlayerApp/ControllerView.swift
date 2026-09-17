@@ -8,11 +8,19 @@ import AirPlayerCore
 // exports a State macro whose plugin is absent from Command Line Tools.
 private typealias ViewState<Value> = SwiftUI.State<Value>
 
+@MainActor
+final class ControllerPresentation: ObservableObject {
+    @Published var playlistVisible = true
+}
+
 struct ControllerView: View {
     @ObservedObject var controller: PlaybackController
+    @ObservedObject var presentation: ControllerPresentation
     @ViewState private var url = ""
     @ViewState private var scrub: Double = 0
     @ViewState private var scrubbing = false
+    @ViewState private var hoverTime: Double?
+    @ViewState private var hoverX: CGFloat = 0
     @FocusState private var urlFocused: Bool
 
     private var status: PlaybackSnapshot { controller.snapshot }
@@ -24,6 +32,7 @@ struct ControllerView: View {
     private var isPlaying: Bool { [.playing, .buffering].contains(status.state) }
 
     var body: some View {
+        HStack(spacing: 0) {
         VStack(alignment: .leading, spacing: 20) {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Video URL").font(.headline)
@@ -86,16 +95,39 @@ struct ControllerView: View {
                         .accessibilityLabel("No audio track detected. Try a link that includes audio.")
                 }
                 VStack(spacing: 4) {
-                    Slider(value: Binding(get: {
-                        let value = scrubbing ? scrub : (controller.pendingSeek ?? status.position ?? 0)
-                        return min(max(value, range?.start ?? 0), range?.end ?? 1)
-                    }, set: { scrub = $0 }), in: (range?.start ?? 0)...(range?.end ?? 1), onEditingChanged: { editing in
-                        scrubbing = editing
-                        if !editing { perform { try controller.seek(scrub) } }
-                    })
-                    .disabled(!canControl || range == nil)
-                    .accessibilityLabel("Playback position")
-                    .accessibilityValue(time(controller.pendingSeek ?? status.position))
+                    GeometryReader { geometry in
+                        ZStack(alignment: .topLeading) {
+                            Slider(value: Binding(get: {
+                                let value = scrubbing ? scrub : (controller.pendingSeek ?? status.position ?? 0)
+                                return min(max(value, range?.start ?? 0), range?.end ?? 1)
+                            }, set: { scrub = $0 }), in: (range?.start ?? 0)...(range?.end ?? 1), onEditingChanged: { editing in
+                                scrubbing = editing
+                                if !editing { perform { try controller.seek(scrub) } }
+                            })
+                            .padding(.top, 12)
+                            .disabled(!canControl || range == nil)
+                            .accessibilityLabel("Playback position")
+                            .accessibilityValue(time(controller.pendingSeek ?? status.position))
+                            if let hoverTime {
+                                Text(time(hoverTime))
+                                    .font(.caption2.monospacedDigit())
+                                    .padding(.horizontal, 5).padding(.vertical, 2)
+                                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
+                                    .position(x: min(max(hoverX, 24), geometry.size.width - 24), y: 7)
+                                    .allowsHitTesting(false)
+                            }
+                        }
+                        .onContinuousHover { phase in
+                            switch phase {
+                            case .active(let location):
+                                guard let range, geometry.size.width > 0 else { hoverTime = nil; return }
+                                hoverX = min(max(location.x, 0), geometry.size.width)
+                                hoverTime = range.start + (range.end - range.start) * hoverX / geometry.size.width
+                            case .ended: hoverTime = nil
+                            }
+                        }
+                    }
+                    .frame(height: 34)
                     HStack {
                         Text(livePositionLabel)
                         Spacer()
@@ -110,36 +142,6 @@ struct ControllerView: View {
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 }
                 .padding(.top, 6)
-
-                if let queue = status.queue {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text(queue.title).font(.subheadline.weight(.medium)).lineLimit(1)
-                            Spacer()
-                            Text("\(queue.currentIndex + 1) of \(queue.items.count)")
-                                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                        }
-                        ScrollViewReader { proxy in
-                            ScrollView {
-                                LazyVStack(alignment: .leading, spacing: 4) {
-                                    ForEach(Array(queue.items.enumerated()), id: \.offset) { index, item in
-                                        HStack(spacing: 6) {
-                                            Image(systemName: queueIcon(item.state))
-                                                .frame(width: 14).foregroundStyle(item.state == .current ? Color.accentColor : .secondary)
-                                            Text(item.title).lineLimit(1).foregroundStyle(item.state == .skipped ? .secondary : .primary)
-                                        }
-                                        .font(.caption)
-                                        .id(index)
-                                    }
-                                }
-                            }
-                            .frame(maxHeight: 72)
-                            .onChange(of: queue.currentIndex) { _, index in proxy.scrollTo(index, anchor: .center) }
-                        }
-                    }
-                    .padding(8)
-                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
-                }
 
                 HStack(spacing: 12) {
                     if let queue = status.queue {
@@ -198,8 +200,65 @@ struct ControllerView: View {
             }
         }
         .padding(24)
-        .frame(minWidth: 430, idealWidth: 470, maxWidth: .infinity)
+        .frame(width: 470)
+        if let queue = status.queue, presentation.playlistVisible {
+            Divider()
+            playlistSidebar(queue)
+                .frame(width: 270)
+        }
+        }
         .onAppear { urlFocused = true }
+    }
+
+    private func playlistSidebar(_ queue: PlaybackQueueSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(queue.title).font(.headline).lineLimit(2)
+                Spacer(minLength: 8)
+                Text("\(queue.currentIndex + 1)/\(queue.items.count)")
+                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 5) {
+                        ForEach(Array(queue.items.enumerated()), id: \.offset) { index, item in
+                            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                                Text("\(index + 1).")
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 24, alignment: .trailing)
+                                Group {
+                                    if item.state == .pending {
+                                        Color.clear.frame(width: 14, height: 1)
+                                    } else {
+                                        Image(systemName: queueIcon(item.state))
+                                            .foregroundStyle(item.state == .current ? Color.accentColor : .secondary)
+                                    }
+                                }
+                                .frame(width: 14)
+                                Text(item.title)
+                                    .font(.caption)
+                                    .lineLimit(2)
+                                    .multilineTextAlignment(.leading)
+                                    .foregroundStyle(item.state == .skipped ? .secondary : .primary)
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 8).padding(.vertical, 7)
+                            .background(item.state == .current ? Color.accentColor.opacity(0.12) : Color.clear,
+                                        in: RoundedRectangle(cornerRadius: 6))
+                            .id(index)
+                        }
+                    }
+                }
+                .onAppear { proxy.scrollTo(queue.currentIndex, anchor: .center) }
+                .onChange(of: queue.currentIndex) { _, index in
+                    withAnimation { proxy.scrollTo(index, anchor: .center) }
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(.quaternary.opacity(0.5))
     }
 
     private var livePositionLabel: String {
