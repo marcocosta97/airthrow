@@ -132,8 +132,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
             return
         }
         playlistShownInWindow = shown
-        let height = window.contentLayoutRect.height
-        window.setContentSize(NSSize(width: shown ? 741 : 470, height: height))
+        let targetWidth: CGFloat = shown ? 741 : 470
+        let widthChange = targetWidth - window.contentLayoutRect.width
+        var frame = window.frame
+        frame.origin.x -= widthChange
+        frame.size.width += widthChange
+        if let visibleFrame = window.screen?.visibleFrame, frame.minX < visibleFrame.minX {
+            frame.origin.x = visibleFrame.minX
+        }
+        window.setFrame(frame, display: true, animate: true)
         updatePlaylistToolbarItem()
     }
 
