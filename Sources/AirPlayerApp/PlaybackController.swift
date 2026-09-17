@@ -440,8 +440,8 @@ final class PlaybackController: ObservableObject {
     }
 
     private func beginProbeIfReady() {
-        guard probeWhenReady, mediaItem?.status == .readyToPlay, !loading else { return }
-        if player.isExternalPlaybackActive || failure != nil {
+        guard probeWhenReady, mediaItem?.status == .readyToPlay, !loading, !playWhenReady else { return }
+        if failure != nil {
             probeWhenReady = false
             return
         }
@@ -601,7 +601,8 @@ final class PlaybackController: ObservableObject {
             }
         }
         wasExternal = external
-        if probing && external {
+        if probing && external,
+           (finite(player.currentTime().seconds) ?? probePosition) >= probePosition + 0.1 {
             cancelProbe(restorePosition: true)
             notice = "Connected. Press Play when you’re ready."
         }
@@ -640,6 +641,7 @@ final class PlaybackController: ObservableObject {
         if playWhenReady, !loading, item?.status == .readyToPlay {
             playWhenReady = false
             if external && !probing {
+                probeWhenReady = false
                 hasPlayed = true
                 player.isMuted = false
                 player.play()
@@ -674,9 +676,9 @@ final class PlaybackController: ObservableObject {
             guard let start = finite(range.start.seconds), let end = finite(CMTimeRangeGetEnd(range).seconds), end > start else { return nil }
             return SeekRange(start: start, end: end)
         }
-        let recommendedLiveOffset = item.flatMap { finite($0.recommendedTimeOffsetFromLive.seconds) }
-        next.isLive = preparedMedia?.sourceDuration == nil && item?.status == .readyToPlay
-            && (item?.duration.isIndefinite == true || recommendedLiveOffset != nil)
+        next.isLive = item?.status == .readyToPlay && LivePolicy.isLive(
+            sourceDuration: preparedMedia?.sourceDuration,
+            itemDurationIndefinite: item?.duration.isIndefinite == true)
         if next.isLive, let position = next.position, let edge = next.seekableRanges.last?.end {
             next.liveOffset = max(0, edge - position)
         }

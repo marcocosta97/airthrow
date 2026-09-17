@@ -194,6 +194,14 @@ public enum QueuePolicy {
     }
 }
 
+public enum LivePolicy {
+    /// A finite AVPlayer duration is authoritative for on-demand media. Some
+    /// finite HLS presentations still expose a recommended live offset.
+    public static func isLive(sourceDuration: Double?, itemDurationIndefinite: Bool) -> Bool {
+        sourceDuration == nil && itemDurationIndefinite
+    }
+}
+
 public struct Response: Codable, Sendable {
     public let ok: Bool
     public let pending: Bool

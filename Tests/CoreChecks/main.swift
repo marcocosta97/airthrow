@@ -89,6 +89,14 @@ let tests: [(String, () throws -> Void)] = [
             QueuePolicy.shouldAdvanceAfterEnd(hasPlayed: true, externalPlaybackActive: true, isProbing: false, hasNext: false)
         ] { try check(!condition, "Playlist advanced without a genuine routed playback end") }
     }),
+    ("finite HLS is not live", {
+        try check(!LivePolicy.isLive(sourceDuration: nil, itemDurationIndefinite: false),
+                  "A finite HLS item was classified as live")
+        try check(LivePolicy.isLive(sourceDuration: nil, itemDurationIndefinite: true),
+                  "A live HLS item was classified as on-demand")
+        try check(!LivePolicy.isLive(sourceDuration: 20, itemDurationIndefinite: true),
+                  "Prepared finite media was classified as live")
+    }),
     ("wire protocol and URL privacy", {
         let request = Request(.open, url: "https://example.com/video.mp4?token=private")
         let decoded = try JSONDecoder().decode(Request.self, from: JSONEncoder().encode(request))
