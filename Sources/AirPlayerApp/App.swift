@@ -20,6 +20,7 @@ struct AirPlayerMain {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
     private static let playlistToolbarIdentifier = NSToolbarItem.Identifier("app.airplayer.playlist")
+    private static let playlistToolbarSpacerIdentifier = NSToolbarItem.Identifier("app.airplayer.playlist-space")
     private let controller = PlaybackController()
     private let presentation = ControllerPresentation()
     private let server = CommandServer()
@@ -79,7 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, Self.playlistToolbarIdentifier]
+        [.flexibleSpace, Self.playlistToolbarIdentifier, Self.playlistToolbarSpacerIdentifier]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -88,6 +89,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        if identifier == Self.playlistToolbarSpacerIdentifier {
+            let item = NSToolbarItem(itemIdentifier: identifier)
+            let spacer = NSView(frame: NSRect(x: 0, y: 0, width: 270, height: 1))
+            spacer.translatesAutoresizingMaskIntoConstraints = false
+            spacer.widthAnchor.constraint(equalToConstant: 270).isActive = true
+            item.view = spacer
+            return item
+        }
         guard identifier == Self.playlistToolbarIdentifier else { return nil }
         let item = NSToolbarItem(itemIdentifier: identifier)
         item.label = "Playlist"
@@ -124,6 +133,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
         playlistToolbarItem?.toolTip = visible ? "Hide playlist" : "Show playlist"
         playlistToolbarItem?.image = NSImage(systemSymbolName: "sidebar.right",
             accessibilityDescription: visible ? "Hide playlist" : "Show playlist")
+        guard let toolbar = window?.toolbar else { return }
+        if visible {
+            if !toolbar.items.contains(where: { $0.itemIdentifier == Self.playlistToolbarSpacerIdentifier }) {
+                toolbar.insertItem(withItemIdentifier: Self.playlistToolbarSpacerIdentifier, at: toolbar.items.count)
+            }
+        } else if let index = toolbar.items.firstIndex(where: { $0.itemIdentifier == Self.playlistToolbarSpacerIdentifier }) {
+            toolbar.removeItem(at: index)
+        }
     }
 
     private func setPlaylistShown(_ shown: Bool) {
@@ -135,12 +152,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
         let targetWidth: CGFloat = shown ? 741 : 470
         let widthChange = targetWidth - window.contentLayoutRect.width
         var frame = window.frame
-        frame.origin.x -= widthChange
         frame.size.width += widthChange
-        if let visibleFrame = window.screen?.visibleFrame, frame.minX < visibleFrame.minX {
-            frame.origin.x = visibleFrame.minX
-        }
-        window.setFrame(frame, display: true, animate: true)
+        window.setFrame(frame, display: true, animate: false)
         updatePlaylistToolbarItem()
     }
 
