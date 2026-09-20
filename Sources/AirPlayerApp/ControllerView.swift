@@ -40,7 +40,7 @@ struct ControllerView: View {
                         .focused($urlFocused)
                         .onSubmit(load)
                         .accessibilityLabel("Video URL")
-                    .help("A direct video URL, YouTube video, or public YouTube playlist")
+                        .help("A direct video URL, YouTube video, or public YouTube playlist")
                     Button("Load", action: load)
                         .disabled(url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         .help("Load this video without starting playback")
@@ -71,7 +71,9 @@ struct ControllerView: View {
             VStack(spacing: 8) {
                 HStack(spacing: 8) {
                     if busy || status.state == .buffering {
-                        ProgressView().controlSize(.small)
+                        ProgressView()
+                            .controlSize(.small)
+                            .accessibilityHidden(true)
                     }
                     Text(PlaybackPolicy.stateLabel(status)).font(.title3.weight(.semibold))
                 }
@@ -113,6 +115,7 @@ struct ControllerView: View {
                                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
                                     .position(x: min(max(hoverX, 24), geometry.size.width - 24), y: 7)
                                     .allowsHitTesting(false)
+                                    .accessibilityHidden(true)
                             }
                         }
                         .onContinuousHover { phase in
@@ -240,6 +243,7 @@ struct ControllerView: View {
                                     }
                                 }
                                 .frame(width: 14)
+                                .accessibilityHidden(true)
                                 Text(item.title)
                                     .font(.caption)
                                     .lineLimit(2)
@@ -250,6 +254,8 @@ struct ControllerView: View {
                             .padding(.horizontal, 8).padding(.vertical, 7)
                             .background(item.state == .current ? Color.accentColor.opacity(0.12) : Color.clear,
                                         in: RoundedRectangle(cornerRadius: 6))
+                            .accessibilityElement(children: .combine)
+                            .accessibilityValue(queueStateDescription(item.state))
                             .id(index)
                         }
                     }
@@ -284,6 +290,14 @@ struct ControllerView: View {
         case .current: "play.circle.fill"
         case .skipped: "exclamationmark.circle"
         case .pending: "circle"
+        }
+    }
+
+    private func queueStateDescription(_ state: QueueItemState) -> String {
+        switch state {
+        case .current: "Now playing"
+        case .skipped: "Skipped"
+        case .pending: "Not yet played"
         }
     }
 }

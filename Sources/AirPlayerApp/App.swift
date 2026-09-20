@@ -286,6 +286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate, NSM
             case .card(let title, let status):
                 let item = NSMenuItem()
                 item.view = MenuCardView(title: title, status: status)
+                item.setAccessibilityLabel("\(title). \(status)")
                 menu.addItem(item)
             case .separator:
                 menu.addItem(.separator())
@@ -293,6 +294,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate, NSM
                 let item = NSMenuItem()
                 item.view = MenuControlRow(controls: controls, target: self,
                     action: #selector(runMenuControl(_:)))
+                item.setAccessibilityLabel("Playback controls")
                 menu.addItem(item)
             case .command(let command):
                 let item = NSMenuItem(title: menuTitle(command),
