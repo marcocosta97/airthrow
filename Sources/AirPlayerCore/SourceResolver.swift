@@ -266,7 +266,8 @@ struct YouTubeSourceAdapter: Sendable {
             let headers = (info.http_headers ?? [:]).merging(format.http_headers ?? [:]) { _, value in value }
             guard headers.keys.allSatisfy({ defaultHeaders.contains($0.lowercased()) }) else { continue }
             candidates.append(MediaCandidate(source: ResolvedSource(url: url, title: title, headers: headers,
-                delivery: ["m3u8", "m3u8_native"].contains(format.protocol ?? "") ? .hls : .file),
+                delivery: ["m3u8", "m3u8_native"].contains(format.protocol ?? "") ? .hls : .file,
+                videoKnownPresent: true),
                 height: format.height, bitrate: format.tbr))
         }
         // Keep separate progressive MP4/M4A presentations alongside native ones.
@@ -290,7 +291,7 @@ struct YouTubeSourceAdapter: Sendable {
             candidates.append(MediaCandidate(source: ResolvedSource(url: videoURL, title: title,
                 headers: (info.http_headers ?? [:]).merging(video.http_headers ?? [:]) { _, rhs in rhs },
                 audio: MediaTrack(url: audioURL, headers: (info.http_headers ?? [:]).merging(audio.http_headers ?? [:]) { _, rhs in rhs }),
-                delivery: .file), height: video.height, bitrate: video.tbr))
+                delivery: .file, videoKnownPresent: true), height: video.height, bitrate: video.tbr))
         }
         return candidates
     }

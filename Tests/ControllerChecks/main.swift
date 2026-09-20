@@ -46,7 +46,7 @@ struct ControllerChecks {
         try check(controller.snapshot.state == .idle && player.currentItem == nil && !controller.snapshot.externalPlaybackActive, "Empty picker interaction claimed a connected receiver or created media")
         try controller.load(base + "/video.mp4")
         try await waitFor(.connecting)
-        try check(player.isMuted, "Deferred route negotiation was not muted")
+        try check(player.isMuted && player.rate == 0, "Deferred route negotiation started visible playback")
         try await waitFor(.awaitingReceiver, seconds: 16)
         try await Task.sleep(for: .milliseconds(200))
         try check(player.rate == 0 && player.isMuted && player.currentTime().seconds < 0.1, "Cancelled picker negotiation did not stop and restore position")

@@ -44,6 +44,7 @@ final class PlaybackController: ObservableObject {
     private var ended = false
     private var hasPlayed = false
     private var probing = false
+    private var probePrerollFinished = false
     private var hasOpenedPicker = false
     private var pickerIsOpen = false
     private var probeWhenReady = false
@@ -449,9 +450,24 @@ final class PlaybackController: ObservableObject {
         probeWhenReady = false
         probePosition = finite(player.currentTime().seconds) ?? 0
         probing = true
+        probePrerollFinished = false
         player.isMuted = true
-        player.play()
+        let id = generation
+        player.preroll(atRate: 1) { [weak self] finished in
+            Task { @MainActor in
+                guard finished, let self, self.generation == id, self.probing else { return }
+                self.probePrerollFinished = true
+                self.finishProbeIfReady()
+            }
+        }
         scheduleProbeTimeout(seconds: pickerIsOpen ? 30 : 12)
+    }
+
+    private func finishProbeIfReady() {
+        guard probing, probePrerollFinished, player.isExternalPlaybackActive else { return }
+        cancelProbe(restorePosition: true)
+        notice = "Connected. Press Play when you’re ready."
+        refresh()
     }
 
     func pickerDidClose() {
@@ -474,6 +490,8 @@ final class PlaybackController: ObservableObject {
     private func cancelProbe(restorePosition: Bool) {
         probeTask?.cancel()
         probeTask = nil
+        player.cancelPendingPrerolls()
+        probePrerollFinished = false
         guard probing else { return }
         probing = false
         player.pause()
@@ -601,11 +619,7 @@ final class PlaybackController: ObservableObject {
             }
         }
         wasExternal = external
-        if probing && external,
-           (finite(player.currentTime().seconds) ?? probePosition) >= probePosition + 0.1 {
-            cancelProbe(restorePosition: true)
-            notice = "Connected. Press Play when you’re ready."
-        }
+        if probing && external { finishProbeIfReady() }
         if !external && !probing {
             player.isMuted = true
             if player.rate != 0 { player.pause() }

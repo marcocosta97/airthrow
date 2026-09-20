@@ -68,6 +68,7 @@ struct ResolverChecks {
         try check(try SourceResolver.select(raw).url.query == "signature=secret", "Lost signed URL in memory")
         let titled = try SourceResolver.select(metadata([combined], extra: ["title": "  Example\nTitle  "]))
         try check(titled.title == "ExampleTitle", "Resolver title was not sanitized")
+        try check(titled.videoKnownPresent, "Inspected combined video lost readiness evidence")
         let videoOnly = combined.merging(["acodec": "none", "height": 2160]) { _, b in b }
         let unknown = combined.filter { $0.key != "acodec" }
         let headers = combined.merging(["http_headers": ["Referer": "secret"]]) { _, b in b }
@@ -80,7 +81,8 @@ struct ResolverChecks {
         let separateVideo = videoOnly.merging(["height": 720]) { _, rhs in rhs }
         let separateAudio = combined.merging(["vcodec": "none", "ext": "m4a", "url": "https://media.example/audio"]) { _, rhs in rhs }
         let split = try SourceResolver.select(metadata([separateVideo, separateAudio]))
-        try check(split.needsPreparation && split.audio?.url.path == "/audio", "Separate tracks were not preserved for preparation")
+        try check(split.needsPreparation && split.audio?.url.path == "/audio" && split.videoKnownPresent,
+                  "Separate tracks or their inspected video evidence were not preserved for preparation")
         try check(try !SourceResolver.select(metadata([separateVideo, separateAudio, combined])).needsPreparation,
                   "Combined source did not retain priority over preparation")
         try await expect(.preparationRequired) { _ = try SourceResolver.select(metadata([videoOnly, separateAudio])) }
@@ -132,7 +134,6 @@ struct ResolverChecks {
             try check(!HLSMaster.hasAudioVideo(data, at: masterURL), "Invalid or silent master accepted")
             let result = try await SourceResolver.selectWithHLS(adaptiveData) { _ in data }
             try check(result.needsPreparation, "Invalid master removed the preparation fallback")
-            try check(!result.videoKnownPresent, "An invalid master supplied video evidence")
         }
         try check(!HLSMaster.hasAudioVideo(Data(repeating: 65, count: HLSMaster.maximumBytes + 1), at: masterURL),
                   "Oversized manifest was accepted")
