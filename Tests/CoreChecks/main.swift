@@ -66,6 +66,15 @@ let tests: [(String, () throws -> Void)] = [
                       "file://remote.example/tmp/video.mp4", "file:///tmp/video.mp4?token=secret"] {
             try rejects { _ = try MediaInput.source(input) }
         }
+        // In-place delivery never consumes the prepared-media budget, so a
+        // receiver-compatible local file is not bounded by the preparation size
+        // limit. The sparse file costs no disk space.
+        let large = directory.appendingPathComponent("large.mp4")
+        FileManager.default.createFile(atPath: large.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: large)
+        try handle.truncate(atOffset: UInt64(3) * 1024 * 1024 * 1024)
+        try handle.close()
+        try check(MediaInput.source(large.path) == large.standardizedFileURL, "Large local file was rejected for in-place delivery")
     }),
     ("seek bounds and discontinuous live ranges", {
         let ranges = [SeekRange(start: 100, end: 120), SeekRange(start: 130, end: 150)]

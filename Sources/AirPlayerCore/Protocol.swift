@@ -55,7 +55,7 @@ public enum PlaybackPath: String, Codable, Sendable {
     public var label: String { self == .direct ? "Direct playback" : "Remuxed playback" }
     public var explanation: String {
         switch self {
-        case .direct: "Tier 1: Plays the source directly, without preparing a file on this Mac."
+        case .direct: "Tier 1: Plays the source directly — the receiver fetches a remote URL, or this Mac serves a local file in place — with no prepared copy."
         case .remux: "Tier 2: Copies audio and video into compatible media on this Mac without re-encoding. Preparation may continue during playback."
         }
     }
@@ -219,8 +219,6 @@ public struct Response: Codable, Sendable {
 }
 
 public enum MediaInput {
-    public static let maximumLocalFileBytes: Int64 = 2 * 1024 * 1024 * 1024
-
     /// Accepts the existing HTTP(S) inputs plus a local POSIX path or file URL.
     /// Local files have their own validator so the network URL rules stay strict.
     public static func source(_ input: String) throws -> URL {
@@ -287,16 +285,21 @@ public enum MediaInput {
         // Resolve a user-selected symlink once. The server later opens the
         // resulting regular file with O_NOFOLLOW for each request.
         let file = input.standardizedFileURL.resolvingSymlinksInPath()
+        // A dropped link may percent-encode control characters that a typed path
+        // cannot contain. Keep both forms equivalent after resolution.
+        guard !file.path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+            throw AppFailure(.invalidRequest, "Choose a readable local video file.")
+        }
         let attributes: [FileAttributeKey: Any]
         do { attributes = try FileManager.default.attributesOfItem(atPath: file.path) }
         catch { throw AppFailure(.invalidRequest, "The local video file does not exist or cannot be accessed.") }
+        // No size cap applies to in-place delivery: the receiver-compatible file
+        // is streamed from its original location and never occupies the prepared
+        // media budget. Remuxing still enforces the preparation size limits.
         guard attributes[.type] as? FileAttributeType == .typeRegular,
               FileManager.default.isReadableFile(atPath: file.path),
               let bytes = (attributes[.size] as? NSNumber)?.int64Value, bytes > 0 else {
             throw AppFailure(.invalidRequest, "Choose a readable, non-empty local video file.")
-        }
-        guard bytes < maximumLocalFileBytes else {
-            throw AppFailure(.invalidRequest, "Local videos must be smaller than 2 GiB.")
         }
         return file
     }
