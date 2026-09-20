@@ -215,7 +215,10 @@ final class PlaybackController: ObservableObject {
                 // A routed HLS item can become ready without exposing local
                 // video tracks or a presentation size. Preserve the inspected
                 // master's video evidence so queue handoff does not wait forever.
-                self.hasVideo = source.videoKnownPresent || !video.isEmpty
+                // Preparation returns only after ffprobe has selected a supported
+                // video stream. Once routed, AVPlayer may expose no local tracks,
+                // so retain that evidence just as we do for inspected native HLS.
+                self.hasVideo = source.needsPreparation || source.videoKnownPresent || !video.isEmpty
                 self.hasAudio = detectedAudio
                 if source.title == nil, let metadataTitle { self.title = metadataTitle }
                 let item = AVPlayerItem(asset: asset)
