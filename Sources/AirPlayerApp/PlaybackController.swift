@@ -63,6 +63,12 @@ final class PlaybackController: ObservableObject {
     private var queueDirection = 1
     private var queueAttemptsRemaining = 0
     private var playWhenReady = false
+    // A receiver chosen in the system picker sets the active route before the
+    // picker reports that it finished presenting. This short window lets that
+    // route observable publish; without one there is nothing left to negotiate.
+    private static let pickerDismissalGrace: Double = 2
+    private static let pickerOpenProbeTimeout: Double = 30
+    private static let routeProbeTimeout: Double = 12
 
     init(resolveSource: @escaping @Sendable (URL) async throws -> ResolvedSource = {
         try await SourceResolver().resolve($0)
@@ -447,6 +453,10 @@ final class PlaybackController: ObservableObject {
         hasOpenedPicker = true
         pickerIsOpen = true
         probeWhenReady = true
+        // Reopening during a negotiation restarts the picker window so a
+        // receiver chosen in this presentation is not cancelled by the previous
+        // dismissal's shorter deadline.
+        if probing { scheduleProbeTimeout(seconds: Self.pickerOpenProbeTimeout) }
         refresh()
     }
 
@@ -472,7 +482,7 @@ final class PlaybackController: ObservableObject {
                 self.finishProbeIfReady()
             }
         }
-        scheduleProbeTimeout(seconds: pickerIsOpen ? 30 : 12)
+        scheduleProbeTimeout(seconds: pickerIsOpen ? Self.pickerOpenProbeTimeout : Self.routeProbeTimeout)
     }
 
     private func finishProbeIfReady() {
@@ -485,7 +495,14 @@ final class PlaybackController: ObservableObject {
     func pickerDidClose() {
         pickerIsOpen = false
         guard probing else { return }
-        scheduleProbeTimeout(seconds: 12)
+        if player.isExternalPlaybackActive {
+            finishProbeIfReady()
+        } else {
+            // The user returned without an active route. Stop the muted
+            // negotiation promptly and surface feedback rather than leaving the
+            // controller on "Connecting to AirPlay…" until the route timeout.
+            scheduleProbeTimeout(seconds: Self.pickerDismissalGrace)
+        }
     }
 
     private func scheduleProbeTimeout(seconds: Double) {

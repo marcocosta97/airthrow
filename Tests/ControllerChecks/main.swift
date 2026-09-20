@@ -40,6 +40,21 @@ struct ControllerChecks {
         try check(player.currentItem !== firstItem && controller.snapshot.hasAudio == true, "New item did not replace the old item")
         print("PASS URL replacement keeps player and directly swaps paused items")
 
+        // Dismissing the system picker without choosing a receiver must end the
+        // muted negotiation quickly instead of pinning "Connecting to AirPlay…".
+        controller.stop()
+        try controller.load(base + "/video.mp4")
+        try await waitFor(.awaitingReceiver)
+        controller.pickerWillOpen()
+        try await waitFor(.connecting)
+        controller.pickerDidClose()
+        try await waitFor(.awaitingReceiver, seconds: 6)
+        try await Task.sleep(for: .milliseconds(200))
+        try check(player.rate == 0 && player.isMuted && controller.snapshot.state == .awaitingReceiver,
+                   "Dismissed picker left the controller negotiating")
+        try check(controller.notice?.contains("receiver") == true, "Dismissed picker gave no feedback")
+        print("PASS dismissed receiver picker stops negotiation with feedback")
+
         controller.stop()
         controller.pickerWillOpen()
         controller.pickerDidClose()
