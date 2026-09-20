@@ -44,7 +44,6 @@ final class PlaybackController: ObservableObject {
     private var ended = false
     private var hasPlayed = false
     private var probing = false
-    private var probePrerollFinished = false
     private var hasOpenedPicker = false
     private var pickerIsOpen = false
     private var probeWhenReady = false
@@ -453,13 +452,15 @@ final class PlaybackController: ObservableObject {
         probeWhenReady = false
         probePosition = finite(player.currentTime().seconds) ?? 0
         probing = true
-        probePrerollFinished = false
         player.isMuted = true
+        if player.isExternalPlaybackActive {
+            finishProbeIfReady()
+            return
+        }
         let id = generation
         player.preroll(atRate: 1) { [weak self] finished in
             Task { @MainActor in
                 guard finished, let self, self.generation == id, self.probing else { return }
-                self.probePrerollFinished = true
                 self.finishProbeIfReady()
             }
         }
@@ -467,7 +468,7 @@ final class PlaybackController: ObservableObject {
     }
 
     private func finishProbeIfReady() {
-        guard probing, probePrerollFinished, player.isExternalPlaybackActive else { return }
+        guard probing, player.isExternalPlaybackActive else { return }
         cancelProbe(restorePosition: true)
         notice = "Connected. Press Play when you’re ready."
         refresh()
@@ -494,7 +495,6 @@ final class PlaybackController: ObservableObject {
         probeTask?.cancel()
         probeTask = nil
         player.cancelPendingPrerolls()
-        probePrerollFinished = false
         guard probing else { return }
         probing = false
         player.pause()
