@@ -315,6 +315,13 @@ final class PlaybackController: ObservableObject {
                 self.refresh()
             } catch {
                 guard let self, !Task.isCancelled, self.generation == id else { return }
+                // Keep a validator's specific message instead of flattening it to
+                // the generic load failure, e.g. a local file removed after input
+                // validation.
+                if let appFailure = error as? AppFailure {
+                    self.fail(.loadFailed, message: appFailure.message)
+                    return
+                }
                 self.fail((error as? PreparationFailure)?.reason ?? (error as? ResolutionFailure)?.reason
                     ?? MediaDiagnostics.reason(for: error, fallback: .loadFailed))
             }
