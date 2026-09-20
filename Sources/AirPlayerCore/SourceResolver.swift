@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 
 public enum ResolutionFailure: Error, Sendable {
     case unavailable, failed, timedOut, tooMuchOutput, unsupportedPage, preparationRequired, protectedMedia
@@ -73,7 +74,11 @@ public struct SourceResolver: Sendable {
 
     public func candidates(for url: URL) async throws -> [MediaCandidate] {
         if Self.isWebsite(url) { return try await youtube.candidates(url) }
-        return DirectSourceAdapter.candidates(url)
+        let candidates = DirectSourceAdapter.candidates(url)
+        guard candidates.first?.source.delivery == .hls,
+              await HLSVideoEvidence.hasVideo(at: url) else { return candidates }
+        return [MediaCandidate(source: ResolvedSource(url: url, delivery: .hls,
+                                                      videoKnownPresent: true))]
     }
 
     public func resolve(_ url: URL) async throws -> ResolvedSource {
@@ -446,5 +451,44 @@ enum HLSMaster {
             result[key] = value
         }
         return result
+    }
+}
+
+/// Direct media playlists often omit codec metadata. Inspect one referenced
+/// presentation or segment so routed AVPlayer items can retain positive video
+/// evidence even when AirPlay no longer exposes their local tracks.
+enum HLSVideoEvidence {
+    static func hasVideo(at url: URL, depth: Int = 0) async -> Bool {
+        guard depth <= 2 else { return false }
+        do {
+            let data = try await HLSMaster.fetch(url)
+            if HLSMaster.hasAudioVideo(data, at: url) { return true }
+            guard let reference = reference(in: data, at: url) else { return false }
+            if reference.isPlaylist { return await hasVideo(at: reference.url, depth: depth + 1) }
+            let asset = AVURLAsset(url: reference.url)
+            return try await !asset.loadTracks(withMediaType: .video).isEmpty
+        } catch { return false }
+    }
+
+    static func reference(in data: Data, at base: URL) -> (url: URL, isPlaylist: Bool)? {
+        guard data.count <= HLSMaster.maximumBytes,
+              let text = String(data: data, encoding: .utf8) else { return nil }
+        let lines = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
+        guard lines.first == "#EXTM3U",
+              !lines.contains(where: { $0.hasPrefix("#EXT-X-KEY:") || $0.hasPrefix("#EXT-X-SESSION-KEY:") }) else {
+            return nil
+        }
+        var expectsVariant = false
+        var expectsSegment = false
+        for line in lines.dropFirst() {
+            if line.hasPrefix("#EXT-X-STREAM-INF:") { expectsVariant = true; continue }
+            if line.hasPrefix("#EXTINF:") { expectsSegment = true; continue }
+            guard !line.isEmpty, !line.hasPrefix("#"),
+                  let url = URL(string: line, relativeTo: base)?.absoluteURL,
+                  (try? MediaInput.url(url.absoluteString)) != nil else { continue }
+            if expectsVariant { return (url, true) }
+            if expectsSegment { return (url, false) }
+        }
+        return nil
     }
 }

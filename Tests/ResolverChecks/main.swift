@@ -48,7 +48,7 @@ struct ResolverChecks {
         let direct = URL(string: "https://cdn.example/no-extension?x=1")!
         let unknownVideo = try await absent.resolve(direct)
         try check(!unknownVideo.videoKnownPresent, "A direct URL invented video evidence")
-        let unknownHLS = try await absent.resolve(URL(string: "https://cdn.example/audio.m3u8")!)
+        let unknownHLS = DirectSourceAdapter.candidates(URL(string: "https://cdn.example/audio.m3u8")!).first!.source
         try check(!unknownHLS.videoKnownPresent, "An HLS extension invented video evidence")
         try check(try await absent.resolve(direct).url == direct, "Direct URL invoked a helper")
         try check(!SourceResolver.isWebsite(URL(string: "https://youtube.com.evil.example/watch?v=BaW_jenozKc")!), "Host suffix spoof accepted")
@@ -137,6 +137,10 @@ struct ResolverChecks {
         }
         try check(!HLSMaster.hasAudioVideo(Data(repeating: 65, count: HLSMaster.maximumBytes + 1), at: masterURL),
                   "Oversized manifest was accepted")
+        let mediaPlaylist = Data("#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:8,\nvideo/segment0.ts\n#EXT-X-ENDLIST\n".utf8)
+        let mediaReference = HLSVideoEvidence.reference(in: mediaPlaylist, at: masterURL)
+        try check(mediaReference?.url.absoluteString == "https://media.example/video/segment0.ts"
+                  && mediaReference?.isPlaylist == false, "Direct HLS media segment was not resolved")
         let failedMaster = try await SourceResolver.selectWithHLS(adaptiveData) { _ in throw URLError(.timedOut) }
         try check(failedMaster.needsPreparation, "Master network failure removed the fallback")
         do {
