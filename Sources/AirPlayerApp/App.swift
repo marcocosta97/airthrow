@@ -361,7 +361,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate, NSM
 
 @MainActor
 private enum MenuMetrics {
-    static let width: CGFloat = 240
+    static let width: CGFloat = 168
 }
 
 /// Compact playback context at the top of the status-item menu.
@@ -399,14 +399,15 @@ private final class MenuCardView: NSView {
 @MainActor
 private final class MenuControlRow: NSView {
     init(controls: MenuControlState, target: AnyObject, action: Selector) {
-        super.init(frame: NSRect(x: 0, y: 0, width: MenuMetrics.width, height: 36))
+        let commands = MenuModel.controlCommands(for: controls)
+        let controlsWidth = CGFloat(commands.count) * Self.buttonWidth
+        super.init(frame: NSRect(x: 0, y: 0, width: max(MenuMetrics.width, controlsWidth), height: 36))
         let stack = NSStackView()
         stack.orientation = .horizontal
         stack.distribution = .fillEqually
         stack.alignment = .centerY
         stack.spacing = 0
         stack.translatesAutoresizingMaskIntoConstraints = false
-        let commands = MenuModel.controlCommands(for: controls)
         for command in commands {
             let spec = Self.spec(for: command, controls: controls)
             let button = NSButton()
@@ -425,7 +426,7 @@ private final class MenuControlRow: NSView {
         NSLayoutConstraint.activate([
             stack.centerXAnchor.constraint(equalTo: centerXAnchor),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            stack.widthAnchor.constraint(equalToConstant: CGFloat(commands.count) * Self.buttonWidth),
+            stack.widthAnchor.constraint(equalToConstant: controlsWidth),
         ])
     }
 
