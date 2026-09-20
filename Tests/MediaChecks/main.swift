@@ -136,6 +136,12 @@ struct MediaChecks {
 
         // Repeated replacements cover the observed race between readiness and HLS track discovery.
         if let path = cases.first(where: { $0.name == "HLS with audio" })?.path {
+            try controller.load(base + "/video.mp4")
+            _ = try await settled(audio: false)
+            try controller.load(base + "/hls-no-extension")
+            let switched = try await settled(audio: true)
+            try check(switched.state == .awaitingReceiver && controller.player.rate == 0,
+                      "MP4 to extensionless HLS replacement failed or started playback")
             for index in 0..<8 {
                 let source = index.isMultiple(of: 2) ? path : "hls-no-extension"
                 try controller.load(base + "/" + source)

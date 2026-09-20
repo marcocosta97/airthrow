@@ -211,13 +211,21 @@ final class PlaybackController: ObservableObject {
                     self.fail(.unreadableMedia)
                     return
                 }
+                var videoConfirmed = source.needsPreparation || source.videoKnownPresent || !video.isEmpty
+                if !videoConfirmed {
+                    // Streaming assets can hide their tracks after an AirPlay
+                    // handoff. Inspect the presentation itself without relying
+                    // on a file extension, provider, or previously loaded item.
+                    videoConfirmed = await HLSVideoEvidence.hasVideo(at: playbackURL)
+                }
+                guard !Task.isCancelled, self.generation == id, self.failure == nil else { return }
                 // A routed HLS item can become ready without exposing local
-                // video tracks or a presentation size. Preserve the inspected
-                // master's video evidence so queue handoff does not wait forever.
+                // video tracks or a presentation size. Preserve inspected
+                // presentation evidence so queue handoff does not wait forever.
                 // Preparation returns only after ffprobe has selected a supported
                 // video stream. Once routed, AVPlayer may expose no local tracks,
                 // so retain that evidence just as we do for inspected native HLS.
-                self.hasVideo = source.needsPreparation || source.videoKnownPresent || !video.isEmpty
+                self.hasVideo = videoConfirmed
                 self.hasAudio = detectedAudio
                 if source.title == nil, let metadataTitle { self.title = metadataTitle }
                 let item = AVPlayerItem(asset: asset)

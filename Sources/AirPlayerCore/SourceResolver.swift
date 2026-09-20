@@ -74,11 +74,7 @@ public struct SourceResolver: Sendable {
 
     public func candidates(for url: URL) async throws -> [MediaCandidate] {
         if Self.isWebsite(url) { return try await youtube.candidates(url) }
-        let candidates = DirectSourceAdapter.candidates(url)
-        guard candidates.first?.source.delivery == .hls,
-              await HLSVideoEvidence.hasVideo(at: url) else { return candidates }
-        return [MediaCandidate(source: ResolvedSource(url: url, delivery: .hls,
-                                                      videoKnownPresent: true))]
+        return DirectSourceAdapter.candidates(url)
     }
 
     public func resolve(_ url: URL) async throws -> ResolvedSource {
@@ -457,8 +453,12 @@ enum HLSMaster {
 /// Direct media playlists often omit codec metadata. Inspect one referenced
 /// presentation or segment so routed AVPlayer items can retain positive video
 /// evidence even when AirPlay no longer exposes their local tracks.
-enum HLSVideoEvidence {
-    static func hasVideo(at url: URL, depth: Int = 0) async -> Bool {
+public enum HLSVideoEvidence {
+    public static func hasVideo(at url: URL) async -> Bool {
+        await hasVideo(at: url, depth: 0)
+    }
+
+    private static func hasVideo(at url: URL, depth: Int) async -> Bool {
         guard depth <= 2 else { return false }
         do {
             let data = try await HLSMaster.fetch(url)
