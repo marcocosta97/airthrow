@@ -18,7 +18,7 @@ struct AirPlayerMain {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate, NSMenuDelegate {
     private static let playlistToolbarIdentifier = NSToolbarItem.Identifier("app.airplayer.playlist")
     private let controller = PlaybackController()
     private let presentation = ControllerPresentation()
@@ -268,11 +268,190 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
         item.button?.image = NSImage(systemSymbolName: "airplay.video", accessibilityDescription: "AirPlayer")
         item.button?.toolTip = "AirPlayer"
         let menu = NSMenu()
-        let reopen = menu.addItem(withTitle: "Show AirPlayer", action: #selector(showWindow), keyEquivalent: "")
-        reopen.target = self
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "Quit AirPlayer", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
+        // Rebuild from the latest observed snapshot when the menu opens. AppKit's
+        // automatic validation would otherwise replace the model's enablement.
+        menu.autoenablesItems = false
+        menu.delegate = self
         item.menu = menu
         statusItem = item
+    }
+
+    // MARK: - Status-item menu
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === statusItem?.menu else { return }
+        menu.removeAllItems()
+        for element in MenuModel.elements(for: controller.snapshot) {
+            switch element {
+            case .card(let title, let status):
+                let item = NSMenuItem()
+                item.view = MenuCardView(title: title, status: status)
+                menu.addItem(item)
+            case .separator:
+                menu.addItem(.separator())
+            case .controls(let controls):
+                let item = NSMenuItem()
+                item.view = MenuControlRow(controls: controls, target: self,
+                    action: #selector(runMenuControl(_:)))
+                menu.addItem(item)
+            case .command(let command):
+                let item = NSMenuItem(title: menuTitle(command),
+                    action: #selector(runMenuCommand(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = command.rawValue
+                menu.addItem(item)
+            }
+        }
+    }
+
+    private func menuTitle(_ command: MenuCommand) -> String {
+        switch command {
+        case .previous: "Previous Playlist Item"
+        case .skipBackward: "Back 10 Seconds"
+        case .togglePlayback: PlaybackPolicy.isPlaying(controller.snapshot) ? "Pause" : "Play"
+        case .stop: "Stop"
+        case .skipForward: "Forward 10 Seconds"
+        case .next: "Next Playlist Item"
+        case .showController: "Show AirPlayer"
+        case .quit: "Quit AirPlayer"
+        }
+    }
+
+    @objc private func runMenuControl(_ sender: NSButton) {
+        guard let rawValue = sender.identifier?.rawValue,
+              let command = MenuCommand(rawValue: rawValue) else { return }
+        run(command)
+        statusItem?.menu?.cancelTracking()
+    }
+
+    @objc private func runMenuCommand(_ sender: NSMenuItem) {
+        guard let rawValue = sender.representedObject as? String,
+              let command = MenuCommand(rawValue: rawValue) else { return }
+        run(command)
+    }
+
+    private func run(_ command: MenuCommand) {
+        do {
+            switch command {
+            case .previous: try controller.previous()
+            case .skipBackward: try skip(by: -MenuModel.skipInterval)
+            case .togglePlayback:
+                if PlaybackPolicy.isPlaying(controller.snapshot) { controller.pause() }
+                else { try controller.play() }
+            case .stop: controller.stop()
+            case .skipForward: try skip(by: MenuModel.skipInterval)
+            case .next: try controller.next()
+            case .showController: showWindow()
+            case .quit: NSApp.terminate(nil)
+            }
+        } catch {
+            controller.displayError(error)
+        }
+    }
+
+    private func skip(by delta: Double) throws {
+        let snapshot = controller.snapshot
+        guard let range = PlaybackPolicy.activeSeekRange(snapshot) else {
+            throw AppFailure(.unsupportedOperation, "This video does not currently support seeking.")
+        }
+        let position = snapshot.position ?? range.start
+        try controller.seek(min(max(position + delta, range.start), range.end))
+    }
+}
+
+@MainActor
+private enum MenuMetrics {
+    static let width: CGFloat = 240
+}
+
+/// Compact playback context at the top of the status-item menu.
+@MainActor
+private final class MenuCardView: NSView {
+    init(title: String, status: String) {
+        super.init(frame: NSRect(x: 0, y: 0, width: MenuMetrics.width, height: 46))
+        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.lineBreakMode = .byTruncatingMiddle
+        let statusLabel = NSTextField(labelWithString: status)
+        statusLabel.font = .systemFont(ofSize: 11)
+        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.lineBreakMode = .byTruncatingTail
+        let stack = NSStackView(views: [titleLabel, statusLabel])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 1
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        let labelWidth = MenuMetrics.width - 26
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 13),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -13),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            titleLabel.widthAnchor.constraint(lessThanOrEqualToConstant: labelWidth),
+            statusLabel.widthAnchor.constraint(lessThanOrEqualToConstant: labelWidth),
+        ])
+    }
+
+    required init?(coder: NSCoder) { nil }
+}
+
+/// Inline transport controls. Playlist navigation appears only for a queue.
+@MainActor
+private final class MenuControlRow: NSView {
+    init(controls: MenuControlState, target: AnyObject, action: Selector) {
+        super.init(frame: NSRect(x: 0, y: 0, width: MenuMetrics.width, height: 36))
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.distribution = .fillEqually
+        stack.alignment = .centerY
+        stack.spacing = 0
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        let commands = MenuModel.controlCommands(for: controls)
+        for command in commands {
+            let spec = Self.spec(for: command, controls: controls)
+            let button = NSButton()
+            button.isBordered = false
+            button.imagePosition = .imageOnly
+            button.image = Self.symbol(spec.symbol)
+            button.toolTip = spec.label
+            button.setAccessibilityLabel(spec.label)
+            button.identifier = NSUserInterfaceItemIdentifier(command.rawValue)
+            button.target = target
+            button.action = action
+            button.isEnabled = spec.enabled
+            stack.addArrangedSubview(button)
+        }
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            stack.widthAnchor.constraint(equalToConstant: CGFloat(commands.count) * Self.buttonWidth),
+        ])
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    private static let buttonWidth: CGFloat = 30
+
+    private static func spec(for command: MenuCommand, controls: MenuControlState)
+        -> (symbol: String, label: String, enabled: Bool) {
+        switch command {
+        case .previous:
+            ("backward.end.fill", "Previous Playlist Item", controls.playlist?.canPrevious == true)
+        case .skipBackward: ("gobackward.10", "Back 10 Seconds", controls.canSeek)
+        case .togglePlayback:
+            (controls.isPlaying ? "pause.fill" : "play.fill",
+             controls.isPlaying ? "Pause" : "Play", controls.canToggle)
+        case .stop: ("stop.fill", "Stop", controls.canStop)
+        case .skipForward: ("goforward.10", "Forward 10 Seconds", controls.canSeek)
+        case .next:
+            ("forward.end.fill", "Next Playlist Item", controls.playlist?.canNext == true)
+        case .showController, .quit: ("", "", false)
+        }
+    }
+
+    private static func symbol(_ name: String) -> NSImage? {
+        NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 15, weight: .regular))
     }
 }

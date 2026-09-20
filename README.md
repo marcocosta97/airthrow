@@ -23,6 +23,8 @@ This creates a locally signed app, ZIP archive, and `build/airplayer`. Pass `deb
 
 Loading stays paused. AirPlayer may briefly attempt muted playback to establish the external video route. Route loss pauses and mutes playback. Closing the window keeps the app running; reopen it from the menu bar or CLI. The Mac must remain running and connected.
 
+The AirPlay icon in the menu bar shows the current item and playback state. Use it for Play/Pause, Stop, ±10-second seeking, and playlist navigation without reopening the controller. Receiver selection remains in the controller's native AirPlay picker.
+
 Live streams show their distance from the live edge and offer **Go Live** when playback falls behind. In **Settings**, choose whether a finished video remains loaded for replay or is unloaded so the receiver can return to its normal screen.
 
 The playback summary shows the selected path: **Direct playback** uses the source without preparing a local file; **Remuxed playback** copies its compressed audio/video into compatible media on the Mac. Hover over the label for details. These are processing tiers, not quality scores or confirmation of receiver playback. The same path appears in CLI status and the optional JSON `playbackPath` field (`direct` or `remux`).

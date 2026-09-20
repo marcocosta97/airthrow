@@ -261,4 +261,156 @@ public enum PlaybackPolicy {
         if playing { return .playing }
         return hasPlayed ? .paused : .ready
     }
+
+    public static func isPlaying(_ snapshot: PlaybackSnapshot) -> Bool {
+        [.playing, .buffering].contains(snapshot.state)
+    }
+
+    public static func isBusy(_ snapshot: PlaybackSnapshot) -> Bool {
+        [.loading, .connecting].contains(snapshot.state)
+    }
+
+    public static func canControl(_ snapshot: PlaybackSnapshot) -> Bool {
+        snapshot.externalPlaybackActive && !isBusy(snapshot)
+            && ![.idle, .failed].contains(snapshot.state)
+    }
+
+    /// Live playlists can expose older, discontinuous ranges before the current
+    /// window. Use the newest range for live controls and the first for finite media.
+    public static func activeSeekRange(_ snapshot: PlaybackSnapshot) -> SeekRange? {
+        snapshot.isLive ? snapshot.seekableRanges.last : snapshot.seekableRanges.first
+    }
+
+    public static func canSeek(_ snapshot: PlaybackSnapshot) -> Bool {
+        canControl(snapshot) && activeSeekRange(snapshot) != nil
+    }
+
+    public static func stateLabel(_ snapshot: PlaybackSnapshot) -> String {
+        switch snapshot.state {
+        case .idle: "Ready for your next video"
+        case .loading:
+            switch snapshot.loadingPhase {
+            case "resolving": "Finding video…"
+            case "preparing": "Preparing video…"
+            default: "Loading video…"
+            }
+        case .connecting: "Connecting to AirPlay…"
+        case .awaitingReceiver: "Ready to connect"
+        case .ready: "Ready to play"
+        case .buffering: "Buffering…"
+        case .playing: "Playing on AirPlay"
+        case .paused: "Paused"
+        case .ended: "Video ended"
+        case .failed: "Unable to play video"
+        }
+    }
+}
+
+public enum PlaybackFormat {
+    /// Unknown or invalid values use a stable placeholder in every control surface.
+    public static func time(_ seconds: Double?) -> String {
+        guard let seconds, seconds.isFinite, seconds >= 0, seconds < Double(Int.max) else { return "—:—" }
+        let value = Int(seconds)
+        if value >= 3600 {
+            return String(format: "%d:%02d:%02d", value / 3600, (value / 60) % 60, value % 60)
+        }
+        return String(format: "%d:%02d", value / 60, value % 60)
+    }
+}
+
+public enum MenuCommand: String, Sendable {
+    case previous, skipBackward, togglePlayback, stop, skipForward, next
+    case showController, quit
+}
+
+public struct MenuPlaylistControls: Equatable, Sendable {
+    public let canPrevious: Bool
+    public let canNext: Bool
+    public init(canPrevious: Bool, canNext: Bool) {
+        self.canPrevious = canPrevious
+        self.canNext = canNext
+    }
+}
+
+public struct MenuControlState: Equatable, Sendable {
+    public let isPlaying: Bool
+    public let canToggle: Bool
+    public let canStop: Bool
+    public let canSeek: Bool
+    public let playlist: MenuPlaylistControls?
+    public init(isPlaying: Bool, canToggle: Bool, canStop: Bool, canSeek: Bool,
+                playlist: MenuPlaylistControls?) {
+        self.isPlaying = isPlaying
+        self.canToggle = canToggle
+        self.canStop = canStop
+        self.canSeek = canSeek
+        self.playlist = playlist
+    }
+}
+
+/// One row of the status-item menu. AppKit renders these values but does not
+/// independently decide control availability.
+public enum MenuElement: Equatable, Sendable {
+    case card(title: String, status: String)
+    case separator
+    case controls(MenuControlState)
+    case command(MenuCommand)
+}
+
+/// Pure menu state derived from the same observed snapshot used by the window and CLI.
+public enum MenuModel {
+    public static let skipInterval: Double = 10
+
+    public static func controlCommands(for controls: MenuControlState) -> [MenuCommand] {
+        var commands: [MenuCommand] = []
+        if controls.playlist != nil { commands.append(.previous) }
+        commands += [.skipBackward, .togglePlayback, .stop, .skipForward]
+        if controls.playlist != nil { commands.append(.next) }
+        return commands
+    }
+
+    public static func elements(for snapshot: PlaybackSnapshot) -> [MenuElement] {
+        let playlist = snapshot.queue.map {
+            MenuPlaylistControls(
+                canPrevious: !PlaybackPolicy.isBusy(snapshot) && $0.currentIndex > 0,
+                canNext: !PlaybackPolicy.isBusy(snapshot) && $0.currentIndex + 1 < $0.items.count
+            )
+        }
+        let controls = MenuControlState(
+            isPlaying: PlaybackPolicy.isPlaying(snapshot),
+            canToggle: PlaybackPolicy.canControl(snapshot),
+            canStop: snapshot.state != .idle,
+            canSeek: PlaybackPolicy.canSeek(snapshot),
+            playlist: playlist
+        )
+        return [
+            .card(title: snapshot.title, status: statusText(snapshot)),
+            .separator,
+            .controls(controls),
+            .separator,
+            .command(.showController),
+            .command(.quit)
+        ]
+    }
+
+    private static func statusText(_ snapshot: PlaybackSnapshot) -> String {
+        let state = PlaybackPolicy.stateLabel(snapshot)
+        guard snapshot.externalPlaybackActive else {
+            return snapshot.state == .idle || snapshot.state == .awaitingReceiver
+                ? "AirPlay not connected"
+                : "\(state) · AirPlay not connected"
+        }
+        if snapshot.isLive {
+            let position = (snapshot.liveOffset ?? 0) > 3
+                ? "−\(PlaybackFormat.time(snapshot.liveOffset))"
+                : "Live"
+            return "\(state) · \(position)"
+        }
+        guard snapshot.position != nil || snapshot.duration != nil else {
+            return "\(state) · AirPlay connected"
+        }
+        let position = PlaybackFormat.time(snapshot.position)
+        guard let duration = snapshot.duration else { return "\(state) · \(position)" }
+        return "\(state) · \(position) / \(PlaybackFormat.time(duration))"
+    }
 }

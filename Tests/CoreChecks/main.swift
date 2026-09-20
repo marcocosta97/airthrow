@@ -97,6 +97,73 @@ let tests: [(String, () throws -> Void)] = [
         try check(!LivePolicy.isLive(sourceDuration: 20, itemDurationIndefinite: true),
                   "Prepared finite media was classified as live")
     }),
+    ("shared control policy, labels and time formatting", {
+        var snapshot = PlaybackSnapshot()
+        snapshot.state = .ready
+        try check(!PlaybackPolicy.canControl(snapshot), "Control enabled without a route")
+        snapshot.externalPlaybackActive = true
+        try check(PlaybackPolicy.canControl(snapshot) && !PlaybackPolicy.canSeek(snapshot),
+                  "Control or seek policy disagreed with the snapshot")
+        snapshot.seekableRanges = [SeekRange(start: 0, end: 10), SeekRange(start: 30, end: 50)]
+        try check(PlaybackPolicy.activeSeekRange(snapshot) == SeekRange(start: 0, end: 10),
+                  "Finite media did not use its first seek range")
+        snapshot.isLive = true
+        try check(PlaybackPolicy.activeSeekRange(snapshot) == SeekRange(start: 30, end: 50),
+                  "Live media did not use its newest seek range")
+        snapshot.state = .buffering
+        try check(PlaybackPolicy.isPlaying(snapshot) && PlaybackPolicy.canSeek(snapshot),
+                  "Buffering control state was wrong")
+        snapshot.state = .loading
+        snapshot.loadingPhase = "preparing"
+        try check(PlaybackPolicy.stateLabel(snapshot) == "Preparing video…", "Preparing label was wrong")
+        snapshot.loadingPhase = "resolving"
+        try check(PlaybackPolicy.stateLabel(snapshot) == "Finding video…", "Resolving label was wrong")
+        try check(PlaybackFormat.time(3661) == "1:01:01" && PlaybackFormat.time(nil) == "—:—",
+                  "Shared time format was wrong")
+    }),
+    ("menu model follows playback and playlist state", {
+        var snapshot = PlaybackSnapshot()
+        snapshot.title = "clip.mp4"
+        var elements = MenuModel.elements(for: snapshot)
+        try check(elements.count == 6, "Unexpected menu element count")
+        try check(elements[0] == .card(title: "clip.mp4", status: "AirPlay not connected"),
+                  "Idle menu card was wrong")
+        guard case .controls(let idle) = elements[2] else {
+            throw CheckFailure(message: "Menu control row was missing")
+        }
+        try check(idle == MenuControlState(isPlaying: false, canToggle: false, canStop: false,
+                                           canSeek: false, playlist: nil),
+                  "Idle menu controls were wrong")
+        snapshot.state = .paused
+        snapshot.externalPlaybackActive = true
+        snapshot.position = 83
+        snapshot.duration = 296
+        snapshot.seekableRanges = [SeekRange(start: 0, end: 296)]
+        snapshot.queue = PlaybackQueueSnapshot(title: "Queue", currentIndex: 1,
+            items: [QueueItemSnapshot(title: "One", state: .pending),
+                    QueueItemSnapshot(title: "Two", state: .current),
+                    QueueItemSnapshot(title: "Three", state: .pending)], truncated: false)
+        elements = MenuModel.elements(for: snapshot)
+        try check(elements[0] == .card(title: "clip.mp4", status: "Paused · 1:23 / 4:56"),
+                  "Paused menu card was wrong")
+        guard case .controls(let paused) = elements[2] else {
+            throw CheckFailure(message: "Playlist control row was missing")
+        }
+        try check(paused.playlist == MenuPlaylistControls(canPrevious: true, canNext: true),
+                  "Playlist navigation enablement was wrong")
+        try check(MenuModel.controlCommands(for: paused) ==
+                  [.previous, .skipBackward, .togglePlayback, .stop, .skipForward, .next],
+                  "Playlist control order was wrong")
+        snapshot.state = .loading
+        elements = MenuModel.elements(for: snapshot)
+        guard case .controls(let loading) = elements[2] else {
+            throw CheckFailure(message: "Loading control row was missing")
+        }
+        try check(loading.playlist == MenuPlaylistControls(canPrevious: false, canNext: false),
+                  "Playlist navigation stayed enabled while loading")
+        try check(elements[4] == .command(.showController) && elements[5] == .command(.quit),
+                  "Menu footer was wrong")
+    }),
     ("wire protocol and URL privacy", {
         let request = Request(.open, url: "https://example.com/video.mp4?token=private")
         let decoded = try JSONDecoder().decode(Request.self, from: JSONEncoder().encode(request))

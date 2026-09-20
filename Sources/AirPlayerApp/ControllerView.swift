@@ -24,12 +24,10 @@ struct ControllerView: View {
     @FocusState private var urlFocused: Bool
 
     private var status: PlaybackSnapshot { controller.snapshot }
-    private var busy: Bool { [.loading, .connecting].contains(status.state) }
-    private var range: SeekRange? { status.isLive ? status.seekableRanges.last : status.seekableRanges.first }
-    private var canControl: Bool {
-        status.externalPlaybackActive && !busy && ![.idle, .failed].contains(status.state)
-    }
-    private var isPlaying: Bool { [.playing, .buffering].contains(status.state) }
+    private var busy: Bool { PlaybackPolicy.isBusy(status) }
+    private var range: SeekRange? { PlaybackPolicy.activeSeekRange(status) }
+    private var canControl: Bool { PlaybackPolicy.canControl(status) }
+    private var isPlaying: Bool { PlaybackPolicy.isPlaying(status) }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -75,7 +73,7 @@ struct ControllerView: View {
                     if busy || status.state == .buffering {
                         ProgressView().controlSize(.small)
                     }
-                    Text(stateLabel).font(.title3.weight(.semibold))
+                    Text(PlaybackPolicy.stateLabel(status)).font(.title3.weight(.semibold))
                 }
                 Text(status.title)
                     .font(.subheadline).foregroundStyle(.secondary)
@@ -107,9 +105,9 @@ struct ControllerView: View {
                             .padding(.top, 12)
                             .disabled(!canControl || range == nil)
                             .accessibilityLabel("Playback position")
-                            .accessibilityValue(time(controller.pendingSeek ?? status.position))
+                            .accessibilityValue(PlaybackFormat.time(controller.pendingSeek ?? status.position))
                             if let hoverTime {
-                                Text(time(hoverTime))
+                                Text(PlaybackFormat.time(hoverTime))
                                     .font(.caption2.monospacedDigit())
                                     .padding(.horizontal, 5).padding(.vertical, 2)
                                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
@@ -136,7 +134,7 @@ struct ControllerView: View {
                                 .buttonStyle(.link)
                                 .disabled(!canControl)
                         } else {
-                            Text(status.isLive ? "Live" : time(status.duration))
+                            Text(status.isLive ? "Live" : PlaybackFormat.time(status.duration))
                         }
                     }
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
@@ -168,6 +166,12 @@ struct ControllerView: View {
                     Button { controller.stop() } label: { Image(systemName: "stop.fill") }
                         .disabled(status.state == .idle)
                         .help("Stop and unload video").accessibilityLabel("Stop")
+
+                    Button { perform { try controller.seek(min(range?.end ?? 0, (status.position ?? 0) + 10)) } } label: {
+                        Image(systemName: "goforward.10")
+                    }
+                    .disabled(!canControl || range == nil)
+                    .help("Forward 10 seconds").accessibilityLabel("Forward 10 seconds")
 
                     if let queue = status.queue {
                         Button { perform { try controller.next() } } label: { Image(systemName: "forward.end.fill") }
@@ -266,45 +270,20 @@ struct ControllerView: View {
             let offset = scrubbing
                 ? max(0, (range?.end ?? scrub) - scrub)
                 : (status.liveOffset ?? 0)
-            return offset > 3 ? "−\(time(offset))" : "Live"
+            return offset > 3 ? "−\(PlaybackFormat.time(offset))" : "Live"
         }
-        return time(scrubbing ? scrub : (controller.pendingSeek ?? status.position))
+        return PlaybackFormat.time(scrubbing ? scrub : (controller.pendingSeek ?? status.position))
     }
 
     private func load() { perform { try controller.load(url) }; urlFocused = false }
     private func perform(_ action: () throws -> Void) {
         do { try action() } catch { controller.displayError(error) }
     }
-    private func time(_ seconds: Double?) -> String {
-        guard let seconds, seconds.isFinite, seconds >= 0, seconds < Double(Int.max) else { return "—:—" }
-        let value = Int(seconds)
-        if value >= 3600 { return String(format: "%d:%02d:%02d", value / 3600, (value / 60) % 60, value % 60) }
-        return String(format: "%d:%02d", value / 60, value % 60)
-    }
     private func queueIcon(_ state: QueueItemState) -> String {
         switch state {
         case .current: "play.circle.fill"
         case .skipped: "exclamationmark.circle"
         case .pending: "circle"
-        }
-    }
-    private var stateLabel: String {
-        switch status.state {
-        case .idle: "Ready for your next video"
-        case .loading:
-            switch status.loadingPhase {
-            case "resolving": "Finding video…"
-            case "preparing": "Preparing video…"
-            default: "Loading video…"
-            }
-        case .connecting: "Connecting to AirPlay…"
-        case .awaitingReceiver: "Ready to connect"
-        case .ready: "Ready to play"
-        case .buffering: "Buffering…"
-        case .playing: "Playing on AirPlay"
-        case .paused: "Paused"
-        case .ended: "Video ended"
-        case .failed: "Unable to play video"
         }
     }
 }
