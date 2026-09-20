@@ -4,8 +4,8 @@ cd "$(dirname "$0")/.."
 configuration="${1:-${CONFIGURATION:-release}}"
 build_dir="${AIRPLAYER_BUILD_DIR:-build}"
 mkdir -p "$build_dir"
-swift build -c "$configuration" --disable-sandbox --build-system native
-bin_dir="$(swift build -c "$configuration" --show-bin-path --disable-sandbox --build-system native)"
+swift build -c "$configuration" --disable-sandbox
+bin_dir="$(swift build -c "$configuration" --show-bin-path --disable-sandbox)"
 staging_dir="$(mktemp -d "${TMPDIR:-/tmp}/airplayer-build.XXXXXX")"
 trap 'rm -rf "$staging_dir"' EXIT
 app="$staging_dir/AirPlayer.app"

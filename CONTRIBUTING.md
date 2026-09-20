@@ -17,7 +17,7 @@ The additive protocol-v1 `playbackPath` reports the chosen plan (`direct` or `re
 ## Core checks
 
 ```bash
-swift build --disable-sandbox --build-system native
+swift build --disable-sandbox
 .build/debug/CoreChecks
 ```
 
