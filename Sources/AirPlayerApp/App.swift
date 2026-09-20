@@ -32,6 +32,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate, NSM
     private var snapshotObservation: AnyCancellable?
     private var playlistShownInWindow = false
     private var terminating = false
+    private var didFinishLaunching = false
+    private var pendingOpenURLs: [URL] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         makeMenu()
@@ -56,6 +58,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate, NSM
         snapshotObservation = controller.$snapshot.sink { [weak self] snapshot in
             self?.updatePlaylistAvailability(snapshot.queue != nil)
         }
+        didFinishLaunching = true
+        openPendingFiles()
+    }
+
+    /// Files opened from Finder, the Dock, or `open -a` load into the shared
+    /// session. A cold launch buffers them until the controller is ready.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        pendingOpenURLs.append(contentsOf: urls.filter(\.isFileURL))
+        if didFinishLaunching { openPendingFiles() }
+    }
+
+    private func openPendingFiles() {
+        guard !pendingOpenURLs.isEmpty else { return }
+        let files = pendingOpenURLs
+        pendingOpenURLs.removeAll()
+        guard let file = files.first else { return }
+        do { try controller.load(file.path) }
+        catch { controller.displayError(error) }
+        showWindow()
     }
 
     @objc func showWindow() {

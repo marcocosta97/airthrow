@@ -10,6 +10,17 @@
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>CFBundleVersion</key><string>1</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>CFBundleDocumentTypes</key><array>
+        <dict>
+            <key>CFBundleTypeName</key><string>Video</string>
+            <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>CFBundleTypeExtensions</key><array>
+                <string>mp4</string><string>m4v</string><string>mov</string>
+                <string>mkv</string><string>webm</string>
+            </array>
+        </dict>
+    </array>
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSLocalNetworkUsageDescription</key><string>AirPlayer connects to the AirPlay video receiver you choose on your local network.</string>
