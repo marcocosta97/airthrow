@@ -1,6 +1,6 @@
 # AirPlayer
 
-A small native macOS controller for playing video URLs on Apple TV and other video-capable AirPlay receivers. Built with Swift, AVPlayer, and Apple's system AirPlay picker, with a companion command-line tool.
+A small native macOS controller for playing video URLs and local video files on Apple TV and other video-capable AirPlay receivers. Built with Swift, AVPlayer, and Apple's system AirPlay picker, with a companion command-line tool.
 
 Early version: receiver compatibility, audio playback, and physical remote behavior still need hardware validation. The app has no local video view.
 
@@ -17,7 +17,7 @@ This creates a locally signed app, ZIP archive, and `build/airplayer`. Pass `deb
 
 ## Play a video
 
-1. Choose a video-capable receiver using **AirPlay**, and paste a direct video URL, YouTube video link, or public YouTube playlist and click **Load**. Either order works.
+1. Choose a video-capable receiver using **AirPlay**, then paste a direct video URL, YouTube link, public YouTube playlist, or local file path and click **Load**. You can also choose a local file or drop a video file or web link onto the source area. Either order works.
 2. Press **Play** when the video and external route are ready.
 3. Use Pause, Stop, or the available timeline. Load another URL to change videos.
 
@@ -47,10 +47,17 @@ Some videos offer incompatible codecs, fragmented delivery, or custom request he
 
 The app finds helpers in standard Homebrew locations even when launched from Finder. For development, set `AIRPLAYER_YTDLP`, `AIRPLAYER_DENO`, `AIRPLAYER_FFMPEG`, and `AIRPLAYER_FFPROBE` to absolute executable paths **in the app's launch environment**. Setting them only on a CLI command does not change an already-running app. Keep yt-dlp and its JavaScript support current; see [yt-dlp's runtime requirements](https://github.com/yt-dlp/yt-dlp/wiki/EJS). Helpers are not bundled yet.
 
+## Local files (experimental)
+
+Choose a local video with the folder button, drop it on the source area, paste its path or `file:` URL, or pass its path to `airplayer open`. The picker enables MP4, M4V, MOV, MKV, and WebM files. Relative CLI paths and an initial `~` are expanded before the request reaches the shared session. AirPlayer resolves symlinks to a readable regular file and rejects directories, empty files, remote `file:` hosts, files of 2 GiB or more, and readable durations over four hours.
+
+MP4, MOV, and unknown containers first use zero-copy delivery: AirPlayer serves the selected file in place over the same private LAN endpoint used for prepared media. MKV and WebM enter the existing FFmpeg stream-copy path immediately; an initially unreadable local container gets the same bounded remux fallback. No local file is copied merely to make it reachable, and Stop never deletes the selected file. The Mac and receiver must be mutually reachable, and receiver playback remains subject to hardware validation. Local HLS folders/playlists, transcoding, directory browsing, and local playlists are not supported.
+
 ## Command line
 
 ```bash
 ./build/airplayer open 'https://example.com/movie.m3u8'
+./build/airplayer open '/Users/me/Movies/movie.mp4'
 ./build/airplayer play
 ./build/airplayer pause
 ./build/airplayer seek 120
@@ -78,9 +85,9 @@ The CLI is also bundled at `AirPlayer.app/Contents/MacOS/airplayer`. Set `AIRPLA
 
 ## Supported sources and limitations
 
-- Direct HTTP/HTTPS video supported by AVFoundation and the receiver; MP4 and HLS are the initial formats. Other extensions are accepted too; file extension alone does not establish compatibility. Native loading does not prove receiver playback.
+- Direct HTTP/HTTPS video supported by AVFoundation and the receiver; MP4 and HLS are the initial formats. Local MP4/MOV files use in-place LAN delivery, while compatible H.264/AAC in local MKV/WebM can be remuxed. Other extensions get one native attempt; file extension alone does not establish compatibility. Native loading does not prove receiver playback.
 - Direct sources need their own audio track or HLS audio rendition. The app warns about detected video-only sources. Website extraction can combine compatible separate tracks; there is no manual two-URL input.
-- Website extraction is limited to the experimental YouTube path above. After a native format failure, the app can also remux suitable H.264/AAC in MKV into HLS, with complete MP4 preparation as a fallback. Transcoding, custom headers/cookies, DRM integrations, and local-file input are not implemented.
+- Website extraction is limited to the experimental YouTube path above. After a native format failure, the app can also remux suitable H.264/AAC in MKV into HLS, with complete MP4 preparation as a fallback. Transcoding, custom headers/cookies, and DRM integrations are not implemented.
 - Audio-only AirPlay speakers cannot display video. Television/receiver controls own volume.
 - Apple TV Remote integration uses public Now Playing and remote-command APIs; actual receiver behavior remains subject to hardware testing.
 
@@ -90,6 +97,6 @@ Preparation currently accepts finite media up to four hours, with H.264 SDR vide
 
 Prepared media is served on the Mac’s active Wi-Fi/Ethernet IPv4 address and an ephemeral port, through a random session URL. The Mac and receiver need network connectivity to one another; allow AirPlayer through the macOS firewall/local-network prompt if shown. Network changes may require loading again. Multi-interface setups can set `AIRPLAYER_MEDIA_HOST` to the Mac’s receiver-reachable IPv4 address in the app’s environment. Do not use `127.0.0.1` for a receiver. Prepared files are removed on Stop, replacement, failure, and Quit; abandoned preparation files are cleaned on the next launch.
 
-The app stores no media history or pairing credentials of its own. Media URLs stay in memory and are omitted from status and errors; shell history is managed by your shell. macOS manages pairing and may save window geometry.
+The app stores no media history or pairing credentials of its own. Media URLs and local paths stay in memory and are omitted from status and errors; shell history is managed by your shell. macOS manages pairing and may save window geometry.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for tests, project layout, and packaging details.

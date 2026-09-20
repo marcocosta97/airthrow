@@ -50,6 +50,23 @@ let tests: [(String, () throws -> Void)] = [
             try rejects { _ = try MediaInput.url(input) }
         }
     }),
+    ("local file validation", {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ap-local-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("example video.mp4")
+        try Data("media".utf8).write(to: file)
+        let symlink = directory.appendingPathComponent("linked.mov")
+        try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: file)
+        try check(MediaInput.source(file.path) == file.standardizedFileURL, "Absolute local path changed")
+        try check(MediaInput.source(file.absoluteString) == file.standardizedFileURL, "File URL changed")
+        try check(MediaInput.source(symlink.path) == file.standardizedFileURL, "Local symlink was not resolved")
+        try check(MediaInput.source("https://example.com/video.mp4").scheme == "https", "HTTP source stopped working")
+        for input in [directory.path, directory.appendingPathComponent("missing.mp4").path,
+                      "file://remote.example/tmp/video.mp4", "file:///tmp/video.mp4?token=secret"] {
+            try rejects { _ = try MediaInput.source(input) }
+        }
+    }),
     ("seek bounds and discontinuous live ranges", {
         let ranges = [SeekRange(start: 100, end: 120), SeekRange(start: 130, end: 150)]
         try MediaInput.validateSeek(100, ranges: ranges)

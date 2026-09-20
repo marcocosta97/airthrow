@@ -13,7 +13,7 @@ struct AirPlayerCLI {
             AirPlayer — control the native AirPlay video session
 
             Usage:
-              airplayer open URL        Load a video or public YouTube playlist, paused
+              airplayer open SOURCE     Load a URL, YouTube playlist, or local file, paused
               airplayer play            Start/resume on the selected video receiver
               airplayer pause           Pause the current session
               airplayer seek SECONDS    Seek to an absolute position
@@ -38,9 +38,11 @@ struct AirPlayerCLI {
             var request = Request(command)
             switch command {
             case .open:
-                guard arguments.count == 2 else { throw AppFailure(.invalidRequest, "Usage: airplayer open 'https://…'") }
-                _ = try MediaInput.url(arguments[1])
-                request.url = arguments[1]
+                guard arguments.count == 2 else { throw AppFailure(.invalidRequest, "Usage: airplayer open URL_OR_PATH") }
+                let source = try MediaInput.source(arguments[1])
+                // The app has a different working directory. Resolve relative
+                // paths in the invoking shell before sending the request.
+                request.url = source.isFileURL ? source.path : arguments[1]
             case .seek:
                 guard arguments.count == 2, let seconds = Double(arguments[1]), seconds.isFinite, seconds >= 0 else {
                     throw AppFailure(.invalidRequest, "Usage: airplayer seek SECONDS (finite and nonnegative)")

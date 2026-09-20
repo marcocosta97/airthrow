@@ -83,6 +83,27 @@ struct PreparationChecks {
         catch is URLError {}
         print("PASS remux, GET/HEAD, open/closed/suffix ranges, invalid ranges, token route and server shutdown")
 
+        let localFile = directory.appendingPathComponent("combined.mp4")
+        let localSource = try await SourceResolver().resolve(MediaInput.localFile(localFile))
+        var localDelivery: PreparedMedia? = try await preparer.prepare(localSource)
+        let localEndpoint = localDelivery!.url
+        let (localBytes, localResponse) = try await fetch(localEndpoint)
+        try check(localBytes == Data(contentsOf: localFile), "In-place local delivery changed the selected file")
+        try check(localResponse.value(forHTTPHeaderField: "Content-Type") == "video/mp4",
+                  "Local delivery used the wrong media type")
+        localDelivery?.stop(); localDelivery = nil
+        try check(FileManager.default.fileExists(atPath: localFile.path), "Stopping delivery deleted the user's file")
+        do { _ = try await fetch(localEndpoint); try check(false, "Stopped local server still accepted requests") }
+        catch is URLError {}
+        print("PASS zero-copy local-file delivery, media type, shutdown and source preservation")
+
+        let localRemuxSource = try await SourceResolver().resolve(directory.appendingPathComponent("combined.mkv"))
+        let localRemux = try await preparer.prepare(localRemuxSource, mode: .completeFile)
+        let (localRemuxBytes, _) = try await fetch(localRemux.url)
+        try localRemuxBytes.write(to: directory.appendingPathComponent("local-remuxed.mp4"))
+        localRemux.stop()
+        print("PASS local MKV inspection and stream-copy remux")
+
         let split = ResolvedSource(url: URL(string: base + "/video.mp4")!,
             audio: MediaTrack(url: URL(string: base + "/audio.m4a")!))
         let joined = try await preparer.prepare(split, mode: .completeFile)
@@ -150,6 +171,15 @@ struct PreparationChecks {
             }
             try check(false, "Controller did not finish preparing")
         }
+        try controller.load(localFile.path)
+        try await settled()
+        try check(controller.snapshot.state == .awaitingReceiver && controller.snapshot.playbackPath == .direct,
+                  "Local MP4 did not load paused through direct delivery")
+        try check(controller.snapshot.title == "combined.mp4", "Local file title exposed more than its filename")
+        let localServed = (controller.player.currentItem!.asset as! AVURLAsset).url
+        let localStatus = String(decoding: try JSONEncoder().encode(controller.snapshot), as: UTF8.self)
+        try check(!localStatus.contains(directory.path) && !localStatus.contains(localServed.path),
+                  "Local status exposed a filesystem or session path")
         try controller.load(base + "/combined.mkv?signature=do-not-log")
         try await settled()
         try check(controller.snapshot.state == .awaitingReceiver && controller.snapshot.hasAudio == true,
@@ -166,7 +196,7 @@ struct PreparationChecks {
         do { _ = try await fetch(served); try check(false, "Replacement retained the old server") }
         catch is URLError {}
         controller.stop()
-        print("PASS controller native-first fallback, paused readiness, privacy and replacement cleanup")
+        print("PASS controller local-file privacy, native-first fallback, paused readiness and replacement cleanup")
         await controller.shutdownAndWait()
 
         // The source adapter must not change format-failure policy. A website

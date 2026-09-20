@@ -11,8 +11,10 @@ public final class MediaHTTPServer {
     private let host: String
     private let file: URL
     private let hls: Bool
+    private let mediaName: String
+    private let mediaContentType: String
     private let prefix = "/\(UUID().uuidString)/"
-    private var path: String { prefix + (hls ? "media.m3u8" : "media.mp4") }
+    private var path: String { prefix + mediaName }
     private var ready: CheckedContinuation<Void, Error>?
     private var startupTimeout: Task<Void, Never>?
     private var clients: [ObjectIdentifier: Client] = [:]
@@ -69,6 +71,15 @@ public final class MediaHTTPServer {
         var address = in_addr()
         guard inet_pton(AF_INET, host, &address) == 1 else { throw PreparationFailure.delivery }
         self.file = file; self.host = host; self.hls = hls
+        let ext = file.pathExtension.lowercased()
+        if hls {
+            mediaName = "media.m3u8"
+            mediaContentType = "application/vnd.apple.mpegurl"
+        } else {
+            let safeExtensions = ["mp4", "m4v", "mov", "mkv", "webm"]
+            mediaName = safeExtensions.contains(ext) ? "media.\(ext)" : "media"
+            mediaContentType = Self.contentType(forExtension: ext)
+        }
         if !hls {
             let size = (try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.int64Value ?? 0
             guard size > 0 else { throw PreparationFailure.failed }
@@ -172,7 +183,7 @@ public final class MediaHTTPServer {
         let contentType: String
         if requested == path {
             resource = file
-            contentType = hls ? "application/vnd.apple.mpegurl" : "video/mp4"
+            contentType = mediaContentType
         } else if hls, requested.hasPrefix(prefix),
                   Self.isSegmentName(String(requested.dropFirst(prefix.count))) {
             resource = file.deletingLastPathComponent().appendingPathComponent(String(requested.dropFirst(prefix.count)))
@@ -225,6 +236,16 @@ public final class MediaHTTPServer {
         // ffmpeg's %06d widens past six digits, so the index is not width-fixed.
         let digits = name.dropFirst(7).dropLast(3)
         return !digits.isEmpty && digits.allSatisfy { $0.isASCII && $0.isNumber }
+    }
+
+    nonisolated static func contentType(forExtension ext: String) -> String {
+        switch ext {
+        case "mp4", "m4v": "video/mp4"
+        case "mov": "video/quicktime"
+        case "mkv": "video/x-matroska"
+        case "webm": "video/webm"
+        default: "application/octet-stream"
+        }
     }
 
     static func byteRange(_ value: String, size: Int64) -> (Int64, Int64)? {

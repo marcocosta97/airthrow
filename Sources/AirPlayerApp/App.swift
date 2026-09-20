@@ -196,7 +196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate, NSM
         do {
             switch request.command {
             case .open:
-                guard let url = request.url else { throw AppFailure(.invalidRequest, "The open command requires a video URL.") }
+                guard let url = request.url else { throw AppFailure(.invalidRequest, "The open command requires a video URL or local file path.") }
                 try controller.load(url)
                 if !controller.snapshot.externalPlaybackActive { showWindow() }
                 return Response(message: controller.snapshot.loadingPhase == "resolving"

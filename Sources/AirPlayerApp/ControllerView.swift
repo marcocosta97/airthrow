@@ -1,5 +1,7 @@
 import SwiftUI
 import AVKit
+import AppKit
+import UniformTypeIdentifiers
 #if SWIFT_PACKAGE
 import AirPlayerCore
 #endif
@@ -21,6 +23,7 @@ struct ControllerView: View {
     @ViewState private var scrubbing = false
     @ViewState private var hoverTime: Double?
     @ViewState private var hoverX: CGFloat = 0
+    @ViewState private var dropTargeted = false
     @FocusState private var urlFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -31,22 +34,27 @@ struct ControllerView: View {
     private var isPlaying: Bool { PlaybackPolicy.isPlaying(status) }
 
     var body: some View {
+        ZStack {
         HStack(spacing: 0) {
         VStack(alignment: .leading, spacing: 20) {
             VStack(alignment: .leading, spacing: 8) {
-                Text("Video URL").font(.headline)
+                Text("Video source").font(.headline)
                 HStack(spacing: 8) {
-                    TextField("https://example.com/video.m3u8", text: $url)
+                    TextField("URL or /path/to/video.mp4", text: $url)
                         .textFieldStyle(.roundedBorder)
                         .focused($urlFocused)
                         .onSubmit(load)
-                        .accessibilityLabel("Video URL")
-                        .help("A direct video URL, YouTube video, or public YouTube playlist")
+                        .accessibilityLabel("Video source")
+                        .accessibilityHint("Enter a URL or local file path. You can also drop a video file or link here.")
+                        .help("A direct video URL, YouTube video or playlist, or local video file")
+                    Button(action: chooseFile) { Image(systemName: "folder") }
+                        .help("Choose a local video file")
+                        .accessibilityLabel("Choose local video file")
                     Button("Load", action: load)
                         .disabled(url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         .help("Load this video without starting playback")
                 }
-                Text("Direct video, YouTube video, or public playlist")
+                Text("Direct URL, YouTube, public playlist, or local file")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
@@ -215,7 +223,39 @@ struct ControllerView: View {
                 .frame(width: 270)
         }
         }
-        .onAppear { urlFocused = true }
+        if dropTargeted {
+            VStack(spacing: 10) {
+                Image(systemName: "arrow.down.doc.fill")
+                    .font(.system(size: 30))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(Color.accentColor)
+                Text("Drop to load").font(.headline)
+                Text("Video file or web link")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [7, 5]))
+                    .padding(8)
+            }
+            .padding(8)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+            .transition(.opacity)
+        }
+        }
+        .contentShape(Rectangle())
+        .dropDestination(for: URL.self) { sources, _ in
+            acceptDrop(sources)
+        } isTargeted: {
+            if $0 { urlFocused = false }
+            dropTargeted = $0
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: dropTargeted)
+        .onAppear { if !dropTargeted { urlFocused = true } }
     }
 
     private func playlistSidebar(_ queue: PlaybackQueueSnapshot) -> some View {
@@ -283,6 +323,31 @@ struct ControllerView: View {
     }
 
     private func load() { perform { try controller.load(url) }; urlFocused = false }
+    private func chooseFile() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a Video"
+        panel.prompt = "Choose"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowsOtherFileTypes = false
+        panel.allowedContentTypes = ["mp4", "m4v", "mov", "mkv", "webm"].compactMap {
+            UTType(filenameExtension: $0)
+        }
+        guard panel.runModal() == .OK, let file = panel.url else { return }
+        url = file.path
+        load()
+    }
+    private func acceptDrop(_ sources: [URL]) -> Bool {
+        for source in sources {
+            let value = source.isFileURL ? source.path : source.absoluteString
+            guard (try? MediaInput.source(value)) != nil else { continue }
+            url = value
+            load()
+            return true
+        }
+        return false
+    }
     private func perform(_ action: () throws -> Void) {
         do { try action() } catch { controller.displayError(error) }
     }

@@ -29,15 +29,20 @@ public struct ResolvedSource: Sendable {
     public let headers: [String: String]
     public let audio: MediaTrack?
     public let needsPreparation: Bool
+    /// The source must be exposed through AirPlayer's LAN server before AVPlayer
+    /// can hand it to a receiver. This is independent of whether tracks are remuxed.
+    public let needsDelivery: Bool
     public let delivery: MediaDelivery
     /// Positive video evidence from an inspected presentation, not its URL or extension.
     public let videoKnownPresent: Bool
     public var playbackPath: PlaybackPath { needsPreparation ? .remux : .direct }
+    public var needsPreparationPipeline: Bool { needsPreparation || needsDelivery }
     public init(url: URL, title: String? = nil, headers: [String: String] = [:], audio: MediaTrack? = nil,
-                needsPreparation: Bool = false, delivery: MediaDelivery = .unknown,
+                needsPreparation: Bool = false, needsDelivery: Bool = false, delivery: MediaDelivery = .unknown,
                 videoKnownPresent: Bool = false) {
         self.url = url; self.title = title; self.headers = headers; self.audio = audio
         self.needsPreparation = needsPreparation || audio != nil
+        self.needsDelivery = needsDelivery
         self.delivery = delivery
         self.videoKnownPresent = videoKnownPresent
     }
@@ -73,6 +78,7 @@ public struct SourceResolver: Sendable {
     }
 
     public func candidates(for url: URL) async throws -> [MediaCandidate] {
+        if url.isFileURL { return try LocalSourceAdapter.candidates(url) }
         if Self.isWebsite(url) { return try await youtube.candidates(url) }
         return DirectSourceAdapter.candidates(url)
     }

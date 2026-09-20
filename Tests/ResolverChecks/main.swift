@@ -45,6 +45,18 @@ struct ResolverChecks {
             return path.path
         }
         let absent = SourceResolver(environment: ["AIRPLAYER_YTDLP": "/missing/yt-dlp", "AIRPLAYER_DENO": "/missing/deno"])
+        let localMP4 = temp.appendingPathComponent("local video.mp4")
+        let localMKV = temp.appendingPathComponent("local.mkv")
+        let localHLS = temp.appendingPathComponent("local.m3u8")
+        for file in [localMP4, localMKV, localHLS] { try Data("fixture".utf8).write(to: file) }
+        let directLocal = try await absent.resolve(localMP4)
+        try check(directLocal.needsDelivery && !directLocal.needsPreparation
+                  && directLocal.playbackPath == .direct && directLocal.title == "local video.mp4",
+                  "Compatible local container did not select in-place delivery")
+        let remuxLocal = try await absent.resolve(localMKV)
+        try check(remuxLocal.needsDelivery && remuxLocal.needsPreparation && remuxLocal.playbackPath == .remux,
+                  "Unsupported local container did not select remuxing")
+        try await expect(.preparationRequired) { _ = try await absent.resolve(localHLS) }
         let direct = URL(string: "https://cdn.example/no-extension?x=1")!
         let unknownVideo = try await absent.resolve(direct)
         try check(!unknownVideo.videoKnownPresent, "A direct URL invented video evidence")
@@ -63,7 +75,7 @@ struct ResolverChecks {
                   "YouTube Mix was accepted")
         try await expect(.unsupportedPage) { _ = try await absent.resolve(URL(string: "https://youtube.com/playlist?list=x")!) }
         try await expect(.unavailable) { _ = try await absent.resolve(page) }
-        print("PASS direct bypass, exact hosts, video-only normalization and missing helpers")
+        print("PASS local delivery selection, direct bypass, exact hosts, video-only normalization and missing helpers")
 
         try check(try SourceResolver.select(raw).url.query == "signature=secret", "Lost signed URL in memory")
         let titled = try SourceResolver.select(metadata([combined], extra: ["title": "  Example\nTitle  "]))

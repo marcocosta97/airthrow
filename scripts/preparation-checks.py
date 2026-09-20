@@ -103,7 +103,7 @@ try:
                                      '-show_entries', 'packet=stream_index,data_hash', '-of', 'json', path]).stdout)
             return {index: [p['data_hash'] for p in result['packets'] if p['stream_index'] == index] for index in [0, 1]}
         expected = packets(OUT / 'combined.mp4')
-        for name in ['remuxed.mp4', 'joined.mp4']:
+        for name in ['remuxed.mp4', 'joined.mp4', 'local-remuxed.mp4']:
             assert packets(OUT / name) == expected, f'{name}: compressed media changed'
         print('PASS identical compressed video/audio packet hashes after remux and join')
     progressive = OUT / 'ProgressiveChecks'

@@ -98,7 +98,7 @@ final class PlaybackController: ObservableObject {
     }
 
     func load(_ input: String) throws {
-        let url = try MediaInput.url(input)
+        let url = try MediaInput.source(input)
         if SourceResolver.playlistPage(url) != nil {
             startPlaylistLoad(url)
         } else {
@@ -148,7 +148,7 @@ final class PlaybackController: ObservableObject {
         resolving = fallback == nil && SourceResolver.isWebsite(url)
         websiteURL = SourceResolver.isWebsite(url) ? url : nil
         retriedResolution = retry
-        title = titleOverride ?? url.host ?? "Video"
+        title = titleOverride ?? (url.isFileURL ? url.lastPathComponent : (url.host ?? "Video"))
         playWhenReady = autoplay
         if !preservingQueue { notice = nil }
         refresh()
@@ -164,7 +164,7 @@ final class PlaybackController: ObservableObject {
                 if let sourceTitle = source.title { self.title = sourceTitle }
                 self.resolving = false
                 var playbackURL = source.url
-                if source.needsPreparation {
+                if source.needsPreparationPipeline {
                     guard let prepareSource = self.prepareSource else { throw PreparationFailure.unsupported }
                     self.preparing = true
                     self.timeoutTask?.cancel()

@@ -219,6 +219,27 @@ public struct Response: Codable, Sendable {
 }
 
 public enum MediaInput {
+    public static let maximumLocalFileBytes: Int64 = 2 * 1024 * 1024 * 1024
+
+    /// Accepts the existing HTTP(S) inputs plus a local POSIX path or file URL.
+    /// Local files have their own validator so the network URL rules stay strict.
+    public static func source(_ input: String) throws -> URL {
+        let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, value.utf8.count <= 16_384,
+              !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+            throw AppFailure(.invalidRequest, "Enter an HTTP or HTTPS video URL, or choose a readable local video file.")
+        }
+        if value.hasPrefix("/") || value.hasPrefix("~") || value.hasPrefix(".") {
+            return try localFile(value)
+        }
+        if let scheme = URLComponents(string: value)?.scheme?.lowercased() {
+            if ["http", "https"].contains(scheme) { return try url(value) }
+            if scheme == "file" { return try localFile(value) }
+            throw AppFailure(.invalidRequest, "Enter an HTTP or HTTPS video URL, or choose a readable local video file.")
+        }
+        return try localFile(value)
+    }
+
     public static func url(_ input: String) throws -> URL {
         let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty, value.utf8.count <= 16_384,
@@ -231,6 +252,53 @@ public enum MediaInput {
             throw AppFailure(.invalidRequest, "Enter an HTTP or HTTPS video URL without embedded credentials.")
         }
         return url
+    }
+
+    public static func localFile(_ input: String) throws -> URL {
+        let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, value.utf8.count <= 16_384,
+              !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+            throw AppFailure(.invalidRequest, "Choose a readable local video file.")
+        }
+        let file: URL
+        if URLComponents(string: value)?.scheme?.lowercased() == "file" {
+            guard let components = URLComponents(string: value),
+                  components.user == nil, components.password == nil,
+                  components.query == nil, components.fragment == nil,
+                  components.host == nil || components.host?.isEmpty == true || components.host == "localhost",
+                  let parsed = components.url, parsed.isFileURL, !parsed.path.isEmpty else {
+                throw AppFailure(.invalidRequest, "Choose a local file URL without a remote host, query, or fragment.")
+            }
+            file = parsed
+        } else {
+            let expanded = (value as NSString).expandingTildeInPath
+            if expanded.hasPrefix("/") {
+                file = URL(fileURLWithPath: expanded)
+            } else {
+                let base = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+                file = URL(fileURLWithPath: expanded, relativeTo: base)
+            }
+        }
+        return try localFile(file)
+    }
+
+    public static func localFile(_ input: URL) throws -> URL {
+        guard input.isFileURL else { throw AppFailure(.invalidRequest, "Choose a readable local video file.") }
+        // Resolve a user-selected symlink once. The server later opens the
+        // resulting regular file with O_NOFOLLOW for each request.
+        let file = input.standardizedFileURL.resolvingSymlinksInPath()
+        let attributes: [FileAttributeKey: Any]
+        do { attributes = try FileManager.default.attributesOfItem(atPath: file.path) }
+        catch { throw AppFailure(.invalidRequest, "The local video file does not exist or cannot be accessed.") }
+        guard attributes[.type] as? FileAttributeType == .typeRegular,
+              FileManager.default.isReadableFile(atPath: file.path),
+              let bytes = (attributes[.size] as? NSNumber)?.int64Value, bytes > 0 else {
+            throw AppFailure(.invalidRequest, "Choose a readable, non-empty local video file.")
+        }
+        guard bytes < maximumLocalFileBytes else {
+            throw AppFailure(.invalidRequest, "Local videos must be smaller than 2 GiB.")
+        }
+        return file
     }
 
     public static func validateSeek(_ seconds: Double, ranges: [SeekRange]) throws {

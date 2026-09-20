@@ -40,7 +40,23 @@ public enum MediaSelector {
     public static func remuxFallback(for source: ResolvedSource, reason: MediaFailureReason) -> ResolvedSource? {
         guard reason == .unreadableMedia, !source.needsPreparation, source.delivery != .hls else { return nil }
         return ResolvedSource(url: source.url, title: source.title, headers: source.headers,
-                              audio: source.audio, needsPreparation: true, delivery: source.delivery)
+                              audio: source.audio, needsPreparation: true, needsDelivery: source.needsDelivery,
+                              delivery: source.delivery)
+    }
+}
+
+enum LocalSourceAdapter {
+    static func candidates(_ input: URL) throws -> [MediaCandidate] {
+        let url = try MediaInput.localFile(input)
+        let ext = url.pathExtension.lowercased()
+        guard ext != "m3u8" else { throw ResolutionFailure.preparationRequired }
+        // MP4/MOV and unknown containers get one native attempt through the LAN
+        // server. Containers AVPlayer normally cannot read go straight to the
+        // existing stream-copy inspection/remux path.
+        let needsRemux = ["mkv", "webm"].contains(ext)
+        return [MediaCandidate(source: ResolvedSource(
+            url: url, title: url.lastPathComponent, needsPreparation: needsRemux,
+            needsDelivery: true, delivery: .file))]
     }
 }
 

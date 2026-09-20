@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 import Darwin
 
 public enum PreparationFailure: Error, Sendable {
@@ -26,7 +27,7 @@ public final class PreparedMedia {
     private var producer: Task<Void, Never>?
     private let server: MediaHTTPServer
     private var workspace: PreparationWorkspace?
-    fileprivate init(server: MediaHTTPServer, workspace: PreparationWorkspace, sourceDuration: Double? = nil) {
+    fileprivate init(server: MediaHTTPServer, workspace: PreparationWorkspace? = nil, sourceDuration: Double? = nil) {
         self.server = server; self.workspace = workspace; self.sourceDuration = sourceDuration; url = server.url!
     }
 
@@ -164,15 +165,26 @@ public struct MediaPreparer: Sendable {
 
     public func prepare(_ source: ResolvedSource, mode: PreparationMode? = nil) async throws -> PreparedMedia {
         let mode = mode ?? (environment["AIRPLAYER_PREPARATION_MODE"] == "complete-file" ? .completeFile : .progressiveHLS)
-        let finder = HelperExecutables(environment: environment)
-        guard let ffmpeg = finder.executable("ffmpeg", override: "AIRPLAYER_FFMPEG"),
-              let ffprobe = finder.executable("ffprobe", override: "AIRPLAYER_FFPROBE") else {
-            throw PreparationFailure.unavailable
-        }
         try Task.checkCancellation()
         // Resolve a LAN address before downloading. Loopback requires an explicit test override.
         let host = try environment["AIRPLAYER_MEDIA_HOST"] ?? MediaHTTPServer.localAddress()
         do {
+            if source.url.isFileURL && !source.needsPreparation {
+                let file = try MediaInput.localFile(source.url)
+                let asset = AVURLAsset(url: file)
+                let loadedDuration = try? await asset.load(.duration)
+                let duration = loadedDuration.flatMap { $0.seconds.isFinite && $0.seconds > 0 ? $0.seconds : nil }
+                if let duration, duration > 4 * 60 * 60 { throw PreparationFailure.limit }
+                let server = try await MediaHTTPServer.start(file: file, host: host)
+                do { try Task.checkCancellation() }
+                catch { await server.stop(); throw error }
+                return await PreparedMedia(server: server, sourceDuration: duration)
+            }
+            let finder = HelperExecutables(environment: environment)
+            guard let ffmpeg = finder.executable("ffmpeg", override: "AIRPLAYER_FFMPEG"),
+                  let ffprobe = finder.executable("ffprobe", override: "AIRPLAYER_FFPROBE") else {
+                throw PreparationFailure.unavailable
+            }
             let videoInput = try await probe(source.url, headers: source.headers, executable: ffprobe)
             let audioInput: Probe
             if let audio = source.audio {
@@ -199,9 +211,9 @@ public struct MediaPreparer: Sendable {
                   free > maximumBytes + 64 * 1024 * 1024 else { throw PreparationFailure.limit }
             let output = workspace.directory.appendingPathComponent("media.mp4")
             var arguments = ["-hide_banner", "-loglevel", "error", "-nostdin", "-n"]
-                + (try Self.inputOptions(headers: source.headers)) + ["-i", source.url.absoluteString]
+                + (try Self.inputArguments(url: source.url, headers: source.headers))
             if let audio = source.audio {
-                arguments += try Self.inputOptions(headers: audio.headers) + ["-i", audio.url.absoluteString]
+                arguments += try Self.inputArguments(url: audio.url, headers: audio.headers)
             }
             arguments += ["-map", "0:\(video.index)", "-map", "\(source.audio == nil ? 0 : 1):\(audio.index)",
                           "-c", "copy", "-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn"]
@@ -296,12 +308,26 @@ public struct MediaPreparer: Sendable {
         return options
     }
 
+    private static func inputArguments(url: URL, headers: [String: String]) throws -> [String] {
+        if url.isFileURL {
+            guard headers.isEmpty else { throw PreparationFailure.unsupported }
+            _ = try MediaInput.localFile(url)
+            return ["-protocol_whitelist", "file", "-format_whitelist", "mov,matroska,webm",
+                    "-probesize", "5000000", "-analyzeduration", "5000000", "-i", url.path]
+        }
+        return try inputOptions(headers: headers) + ["-i", url.absoluteString]
+    }
+
     private func probe(_ url: URL, headers: [String: String], executable: String, local: Bool = false) async throws -> Probe {
-        if !local { _ = try MediaInput.url(url.absoluteString) }
-        let options = local ? ["-protocol_whitelist", "file", "-format_whitelist", "mov"] : try Self.inputOptions(headers: headers)
+        let isLocal = local || url.isFileURL
+        if isLocal { _ = try MediaInput.localFile(url) }
+        else { _ = try MediaInput.url(url.absoluteString) }
+        let options = isLocal
+            ? ["-protocol_whitelist", "file", "-format_whitelist", "mov,matroska,webm"]
+            : try Self.inputOptions(headers: headers)
         let arguments = ["-v", "error"] + options + ["-show_entries",
             "format=duration,size:stream=index,codec_type,codec_name,codec_tag_string,pix_fmt,width,height,profile,channels,sample_rate,color_transfer,avg_frame_rate,r_frame_rate:stream_disposition=attached_pic",
-            "-of", "json", "-i", local ? url.path : url.absoluteString]
+            "-of", "json", "-i", isLocal ? url.path : url.absoluteString]
         let data = try await HelperProcess.run(executable: executable, arguments: arguments)
         return try JSONDecoder().decode(Probe.self, from: data)
     }
