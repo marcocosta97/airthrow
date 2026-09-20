@@ -22,6 +22,7 @@ struct ControllerView: View {
     @ViewState private var hoverTime: Double?
     @ViewState private var hoverX: CGFloat = 0
     @FocusState private var urlFocused: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var status: PlaybackSnapshot { controller.snapshot }
     private var busy: Bool { PlaybackPolicy.isBusy(status) }
@@ -262,7 +263,7 @@ struct ControllerView: View {
                 }
                 .onAppear { proxy.scrollTo(queue.currentIndex, anchor: .center) }
                 .onChange(of: queue.currentIndex) { _, index in
-                    withAnimation { proxy.scrollTo(index, anchor: .center) }
+                    withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(index, anchor: .center) }
                 }
             }
         }

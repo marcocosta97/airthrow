@@ -60,7 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate, NSM
 
     @objc func showWindow() {
         if window == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 520), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 520), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
             window.title = "AirPlayer"
             window.isReleasedWhenClosed = false
             window.contentView = NSHostingView(rootView: ControllerView(controller: controller, presentation: presentation))
@@ -372,10 +372,10 @@ private final class MenuCardView: NSView {
     init(title: String, status: String) {
         super.init(frame: NSRect(x: 0, y: 0, width: MenuMetrics.width, height: 46))
         let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.font = .preferredFont(forTextStyle: .headline)
         titleLabel.lineBreakMode = .byTruncatingMiddle
         let statusLabel = NSTextField(labelWithString: status)
-        statusLabel.font = .systemFont(ofSize: 11)
+        statusLabel.font = .preferredFont(forTextStyle: .subheadline)
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.lineBreakMode = .byTruncatingTail
         let stack = NSStackView(views: [titleLabel, statusLabel])
@@ -455,6 +455,6 @@ private final class MenuControlRow: NSView {
 
     private static func symbol(_ name: String) -> NSImage? {
         NSImage(systemSymbolName: name, accessibilityDescription: nil)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 15, weight: .regular))
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(textStyle: .title3, scale: .medium))
     }
 }
