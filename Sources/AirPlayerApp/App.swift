@@ -18,19 +18,22 @@ struct AirPlayerMain {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate, NSMenuDelegate {
-    private static let playlistToolbarIdentifier = NSToolbarItem.Identifier("app.airplayer.playlist")
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
+    private static let controllerHeight: CGFloat = 414
     private let controller = PlaybackController()
     private let presentation = ControllerPresentation()
     private let server = CommandServer()
     private var window: NSWindow?
     private var settingsWindow: NSWindow?
+    private var splitViewController: NSSplitViewController?
+    private var inspectorItem: NSSplitViewItem?
     private var statusItem: NSStatusItem?
-    private var playlistToolbarItem: NSToolbarItem?
-    private var playlistToolbarButton: NSButton?
-    private var playlistToolbarWidth: NSLayoutConstraint?
+    private var presentationObservation: AnyCancellable?
     private var snapshotObservation: AnyCancellable?
-    private var playlistShownInWindow = false
+    private var menuObservation: AnyCancellable?
+    private var menuIsOpen = false
+    private var menuCardView: MenuCardView?
+    private var menuControlRow: MenuControlRow?
     private var terminating = false
     private var didFinishLaunching = false
     private var pendingOpenURLs: [URL] = []
@@ -55,9 +58,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate, NSM
         }
         MediaPreparer.cleanAbandonedFiles()
         showWindow()
-        snapshotObservation = controller.$snapshot.sink { [weak self] snapshot in
-            self?.updatePlaylistAvailability(snapshot.queue != nil)
+        snapshotObservation = controller.$snapshot
+            .map { $0.queue != nil }
+            .removeDuplicates()
+            .sink { [weak self] available in
+                self?.updatePlaylistAvailability(available)
         }
+        menuObservation = controller.$snapshot
+            .sink { [weak self] snapshot in
+                self?.refreshOpenMenu(snapshot)
+        }
+        presentationObservation = presentation.$playlistVisible
+            .removeDuplicates()
+            .sink { [weak self] visible in
+                self?.setInspector(collapsed: !visible)
+            }
         didFinishLaunching = true
         openPendingFiles()
     }
@@ -81,105 +96,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate, NSM
 
     @objc func showWindow() {
         if window == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 520), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: ControllerMetrics.width, height: Self.controllerHeight), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
             window.title = "AirPlayer"
+            window.backgroundColor = SurfaceColor.window
+            window.titlebarAppearsTransparent = true
+            window.titlebarSeparatorStyle = .none
             window.isReleasedWhenClosed = false
-            window.contentView = NSHostingView(rootView: ControllerView(controller: controller, presentation: presentation))
-            let toolbar = NSToolbar(identifier: "AirPlayerControllerToolbar")
-            toolbar.delegate = self
-            toolbar.displayMode = .iconOnly
-            toolbar.allowsUserCustomization = false
-            toolbar.autosavesConfiguration = false
-            window.toolbarStyle = .unifiedCompact
-            window.toolbar = toolbar
+            window.delegate = self
+
+            let mainHosting = NSHostingController(rootView: ControllerView(controller: controller, presentation: presentation))
+            mainHosting.sizingOptions = []
+            mainHosting.preferredContentSize = NSSize(width: ControllerMetrics.width, height: Self.controllerHeight)
+            let playlistHosting = NSHostingController(rootView: PlaylistPanel(controller: controller))
+            playlistHosting.sizingOptions = []
+
+            let split = NSSplitViewController()
+            let contentItem = NSSplitViewItem(viewController: mainHosting)
+            contentItem.minimumThickness = ControllerMetrics.minWidth
+            contentItem.canCollapse = false
+            let inspectorItem = NSSplitViewItem(inspectorWithViewController: playlistHosting)
+            inspectorItem.minimumThickness = ControllerMetrics.playlistWidth
+            inspectorItem.maximumThickness = ControllerMetrics.playlistMaximumWidth
+            inspectorItem.isCollapsed = true
+            // Keep the controller at its size and let the window take on the
+            // inspector's width, matching the native inspector behavior.
+            inspectorItem.collapseBehavior = .preferResizingSplitViewWithFixedSiblings
+            split.addSplitViewItem(contentItem)
+            split.addSplitViewItem(inspectorItem)
+            splitViewController = split
+            self.inspectorItem = inspectorItem
+
+            window.contentViewController = split
             window.center()
-            window.setFrameAutosaveName("AirPlayerController")
-            window.setContentSize(NSSize(width: 470, height: window.contentLayoutRect.height))
+            window.standardWindowButton(.zoomButton)?.isEnabled = false
             self.window = window
         }
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
     }
 
-    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, Self.playlistToolbarIdentifier]
-    }
-
-    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, Self.playlistToolbarIdentifier]
-    }
-
-    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
-                 willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
-        guard identifier == Self.playlistToolbarIdentifier else { return nil }
-        let item = NSToolbarItem(itemIdentifier: identifier)
-        let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-        let button = NSButton(image: NSImage(systemSymbolName: "sidebar.right", accessibilityDescription: "Show playlist")!,
-                              target: self, action: #selector(togglePlaylist))
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.isBordered = false
-        button.imageScaling = .scaleProportionallyDown
-        container.addSubview(button)
-        NSLayoutConstraint.activate([
-            button.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            button.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            button.widthAnchor.constraint(equalToConstant: 40),
-            button.heightAnchor.constraint(equalToConstant: 28),
-            container.heightAnchor.constraint(equalToConstant: 32),
-        ])
-        let width = container.widthAnchor.constraint(equalToConstant: 55)
-        width.isActive = true
-        item.view = container
-        item.label = "Playlist"
-        item.paletteLabel = "Playlist"
-        item.isBordered = false
-        item.autovalidates = false
-        playlistToolbarItem = item
-        playlistToolbarButton = button
-        playlistToolbarWidth = width
-        updatePlaylistButton()
-        return item
-    }
-
-    @objc private func togglePlaylist() {
-        guard controller.snapshot.queue != nil else { return }
-        presentation.playlistVisible.toggle()
-        setPlaylistShown(presentation.playlistVisible)
+    /// Horizontal resizing only: the proposed width is honored, the height is
+    /// pinned so the controller keeps its designed vertical layout.
+    func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
+        let inspectorOpen = !(inspectorItem?.isCollapsed ?? true)
+        let minimum = ControllerMetrics.minWidth + (inspectorOpen ? ControllerMetrics.playlistWidth : 0)
+        return NSSize(width: max(frameSize.width, minimum), height: sender.frame.height)
     }
 
     private func updatePlaylistAvailability(_ available: Bool) {
-        playlistToolbarButton?.isEnabled = available
-        if available {
-            presentation.playlistVisible = true
-            setPlaylistShown(true)
-        } else {
-            setPlaylistShown(false)
-        }
-        updatePlaylistButton()
+        presentation.playlistVisible = available
     }
 
-    private func updatePlaylistButton() {
-        let visible = presentation.playlistVisible && controller.snapshot.queue != nil
-        playlistToolbarItem?.label = visible ? "Hide Playlist" : "Show Playlist"
-        playlistToolbarItem?.toolTip = visible ? "Hide playlist" : "Show playlist"
-        playlistToolbarButton?.toolTip = visible ? "Hide playlist" : "Show playlist"
-        playlistToolbarButton?.setAccessibilityLabel(visible ? "Hide playlist" : "Show playlist")
-        playlistToolbarWidth?.constant = visible ? 326 : 55
-    }
-
-    private func setPlaylistShown(_ shown: Bool) {
-        guard shown != playlistShownInWindow, let window else {
-            updatePlaylistButton()
-            return
+    /// AppKit animates the inspector item's collapse; because the split view
+    /// controller owns the window's content, the window frame and the panel move
+    /// in one coordinated animation instead of two competing ones.
+    private func setInspector(collapsed: Bool) {
+        guard let inspectorItem, inspectorItem.isCollapsed != collapsed else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = ControllerMetrics.animationDuration
+            inspectorItem.animator().isCollapsed = collapsed
         }
-        playlistShownInWindow = shown
-        let targetWidth: CGFloat = shown ? 741 : 470
-        let widthChange = targetWidth - window.contentLayoutRect.width
-        var frame = window.frame
-        frame.size.width += widthChange
-        window.setFrame(frame, display: true, animate: false)
-        updatePlaylistButton()
     }
 
     @objc private func showSettings() {
@@ -271,7 +247,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate, NSM
         show.target = self
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide AirPlayer", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
-        appMenu.addItem(withTitle: "Quit AirPlayer", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenuItem.submenu = appMenu
         main.addItem(appMenuItem)
         let editItem = NSMenuItem()
@@ -306,23 +282,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate, NSM
             switch element {
             case .card(let title, let status):
                 let item = NSMenuItem()
-                item.view = MenuCardView(title: title, status: status)
+                let card = MenuCardView(title: title, status: status)
+                item.view = card
                 item.setAccessibilityLabel("\(title). \(status)")
                 menu.addItem(item)
+                menuCardView = card
             case .separator:
                 menu.addItem(.separator())
             case .controls(let controls):
                 let item = NSMenuItem()
-                item.view = MenuControlRow(controls: controls, target: self,
+                let row = MenuControlRow(controls: controls, target: self,
                     action: #selector(runMenuControl(_:)))
+                item.view = row
                 item.setAccessibilityLabel("Playback controls")
                 menu.addItem(item)
+                menuControlRow = row
             case .command(let command):
                 let item = NSMenuItem(title: menuTitle(command),
                     action: #selector(runMenuCommand(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = command.rawValue
                 menu.addItem(item)
+            }
+        }
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        guard menu === statusItem?.menu else { return }
+        menuIsOpen = true
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        guard menu === statusItem?.menu else { return }
+        menuIsOpen = false
+        menuCardView = nil
+        menuControlRow = nil
+    }
+
+    /// Keeps the already-open menu's card and controls in step with playback,
+    /// instead of leaving stale glyphs until the menu is reopened.
+    private func refreshOpenMenu(_ snapshot: PlaybackSnapshot) {
+        guard menuIsOpen else { return }
+        for element in MenuModel.elements(for: snapshot) {
+            switch element {
+            case .card(let title, let status):
+                menuCardView?.update(title: title, status: status)
+            case .controls(let controls):
+                menuControlRow?.update(controls: controls)
+            default:
+                break
             }
         }
     }
@@ -336,7 +344,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate, NSM
         case .skipForward: "Forward 10 Seconds"
         case .next: "Next Playlist Item"
         case .showController: "Show AirPlayer"
-        case .quit: "Quit AirPlayer"
+        case .quit: "Quit"
         }
     }
 
@@ -344,7 +352,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate, NSM
         guard let rawValue = sender.identifier?.rawValue,
               let command = MenuCommand(rawValue: rawValue) else { return }
         run(command)
-        statusItem?.menu?.cancelTracking()
     }
 
     @objc private func runMenuCommand(_ sender: NSMenuItem) {
@@ -390,12 +397,15 @@ private enum MenuMetrics {
 /// Compact playback context at the top of the status-item menu.
 @MainActor
 private final class MenuCardView: NSView {
+    private let titleLabel: NSTextField
+    private let statusLabel: NSTextField
+
     init(title: String, status: String) {
+        titleLabel = NSTextField(labelWithString: title)
+        statusLabel = NSTextField(labelWithString: status)
         super.init(frame: NSRect(x: 0, y: 0, width: MenuMetrics.width, height: 46))
-        let titleLabel = NSTextField(labelWithString: title)
         titleLabel.font = .preferredFont(forTextStyle: .headline)
         titleLabel.lineBreakMode = .byTruncatingMiddle
-        let statusLabel = NSTextField(labelWithString: status)
         statusLabel.font = .preferredFont(forTextStyle: .subheadline)
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.lineBreakMode = .byTruncatingTail
@@ -416,11 +426,18 @@ private final class MenuCardView: NSView {
     }
 
     required init?(coder: NSCoder) { nil }
+
+    func update(title: String, status: String) {
+        titleLabel.stringValue = title
+        statusLabel.stringValue = status
+    }
 }
 
 /// Inline transport controls. Playlist navigation appears only for a queue.
 @MainActor
 private final class MenuControlRow: NSView {
+    private var buttons: [MenuCommand: MenuControlButton] = [:]
+
     init(controls: MenuControlState, target: AnyObject, action: Selector) {
         let commands = MenuModel.controlCommands(for: controls)
         let controlsWidth = CGFloat(commands.count) * Self.buttonWidth
@@ -433,7 +450,7 @@ private final class MenuControlRow: NSView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         for command in commands {
             let spec = Self.spec(for: command, controls: controls)
-            let button = NSButton()
+            let button = MenuControlButton()
             button.isBordered = false
             button.imagePosition = .imageOnly
             button.image = Self.symbol(spec.symbol)
@@ -443,6 +460,7 @@ private final class MenuControlRow: NSView {
             button.target = target
             button.action = action
             button.isEnabled = spec.enabled
+            buttons[command] = button
             stack.addArrangedSubview(button)
         }
         addSubview(stack)
@@ -454,6 +472,19 @@ private final class MenuControlRow: NSView {
     }
 
     required init?(coder: NSCoder) { nil }
+
+    /// Re-applies the current state to the existing buttons so an open menu
+    /// tracks playback without being torn down and rebuilt.
+    func update(controls: MenuControlState) {
+        for (command, button) in buttons {
+            let spec = Self.spec(for: command, controls: controls)
+            button.image = Self.symbol(spec.symbol)
+            button.toolTip = spec.label
+            button.setAccessibilityLabel(spec.label)
+            button.isEnabled = spec.enabled
+            if !spec.enabled { button.contentTintColor = nil }
+        }
+    }
 
     private static let buttonWidth: CGFloat = 30
 
@@ -478,4 +509,27 @@ private final class MenuControlRow: NSView {
         NSImage(systemSymbolName: name, accessibilityDescription: nil)?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(textStyle: .title3, scale: .medium))
     }
+}
+
+/// Borderless menu button that paints a subtle rounded highlight while the
+/// pointer is over it, so the passive-looking glyphs read as targets.
+@MainActor
+private final class MenuControlButton: NSButton {
+    private var hoverArea: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        hoverArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        guard isEnabled else { return }
+        contentTintColor = .controlAccentColor
+    }
+
+    override func mouseExited(with event: NSEvent) { contentTintColor = nil }
 }
