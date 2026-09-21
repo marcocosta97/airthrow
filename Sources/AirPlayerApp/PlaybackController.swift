@@ -34,6 +34,7 @@ final class PlaybackController: ObservableObject {
     private var resolving = false
     private var preparing = false
     private var selectedSource: ResolvedSource?
+    private var selectedQuality: String?
     private var originalSourceURL: URL?
     private var sourceCandidates: [MediaCandidate] = []
     private var sourceChoice: String?
@@ -41,6 +42,7 @@ final class PlaybackController: ObservableObject {
     private var sourceOptionsGeneration = UUID()
     private var actualPlaybackPath: PlaybackPath?
     @Published private(set) var allowVideoConversion: Bool
+    @Published private(set) var preferQuality: Bool
     private var preparedMedia: PreparedMedia?
     private let prepareSource: (@Sendable (ResolvedSource) async throws -> PreparedMedia)?
     private var websiteURL: URL?
@@ -70,6 +72,7 @@ final class PlaybackController: ObservableObject {
     private var queueDirection = 1
     private var queueAttemptsRemaining = 0
     private var playWhenReady = false
+    private var pendingInitialSeek = false
     // A receiver chosen in the system picker sets the active route before the
     // picker reports that it finished presenting. This short window lets that
     // route observable publish; without one there is nothing left to negotiate.
@@ -80,8 +83,9 @@ final class PlaybackController: ObservableObject {
     init(resolveSource: (@Sendable (URL) async throws -> ResolvedSource)? = nil,
          resolveCandidates: (@Sendable (URL) async throws -> [MediaCandidate])? = nil,
          allowVideoConversion: Bool? = nil,
+         preferQuality: Bool? = nil,
          resolvePlaylist: @escaping @Sendable (URL) async throws -> ResolvedPlaylist = {
-        try await SourceResolver().resolvePlaylist($0)
+        try await SourceResolver(cookies: YouTubeCookiePreference.current()).resolvePlaylist($0)
     }, prepareSource: (@Sendable (ResolvedSource) async throws -> PreparedMedia)? = {
         try await MediaPreparer().prepare($0)
     }, afterPlaybackBehavior: @escaping @MainActor () -> AfterPlaybackBehavior = {
@@ -91,8 +95,9 @@ final class PlaybackController: ObservableObject {
         if let resolveCandidates { self.resolveCandidates = resolveCandidates }
         else if let resolveSource {
             self.resolveCandidates = { [MediaCandidate(source: try await resolveSource($0))] }
-        } else { self.resolveCandidates = { try await SourceResolver().candidates(for: $0) } }
+        } else { self.resolveCandidates = { try await SourceResolver(cookies: YouTubeCookiePreference.current()).candidates(for: $0) } }
         self.allowVideoConversion = allowVideoConversion ?? UserDefaults.standard.bool(forKey: "allowVideoConversion")
+        self.preferQuality = preferQuality ?? UserDefaults.standard.bool(forKey: "preferHigherQuality")
         self.resolvePlaylist = resolvePlaylist
         self.prepareSource = prepareSource
         self.afterPlaybackBehavior = afterPlaybackBehavior
@@ -138,6 +143,12 @@ final class PlaybackController: ObservableObject {
         refresh()
     }
 
+    func setPreferQuality(_ enabled: Bool) {
+        preferQuality = enabled
+        UserDefaults.standard.set(enabled, forKey: "preferHigherQuality")
+        refresh()
+    }
+
     /// Choices reload paused using freshly resolved URLs and preserve the player/queue.
     /// An ID from an earlier source can never choose a different current item.
     func selectSource(_ optionID: String) throws {
@@ -165,12 +176,29 @@ final class PlaybackController: ObservableObject {
 
     private func sourceOptionID(_ index: Int) -> String { "\(sourceOptionsGeneration.uuidString)-\(index)" }
 
+    /// Short quality label for a candidate, e.g. "720p60". Frame rate only
+    /// appears above 30 so ordinary presentations stay "720p".
+    private static func qualityLabel(_ candidate: MediaCandidate) -> String? {
+        guard let height = candidate.height else { return nil }
+        var label = "\(Int(min(height, 100_000)))p"
+        if let frameRate = candidate.frameRate, frameRate > 30 { label += "\(Int(frameRate))" }
+        return label
+    }
+
+    /// Match the selected source back to its candidate to recover its quality.
+    private static func qualityLabel(for source: ResolvedSource, in candidates: [MediaCandidate]) -> String? {
+        guard let candidate = candidates.first(where: {
+            $0.source.url == source.url && $0.source.audio?.url == source.audio?.url
+        }) else { return nil }
+        return qualityLabel(candidate)
+    }
+
     private var sourceOptions: [SourceOptionSnapshot]? {
         guard !sourceCandidates.isEmpty else { return nil }
         return sourceCandidates.enumerated().map { index, candidate in
             let quality: String
-            if let height = candidate.height {
-                quality = "\(Int(min(height, 100_000)))p" + (candidate.source.delivery == .hls ? " maximum (adaptive)" : "")
+            if let base = Self.qualityLabel(candidate) {
+                quality = base + (candidate.source.delivery == .hls ? " maximum (adaptive)" : "")
             } else { quality = "Quality unknown" }
             return SourceOptionSnapshot(id: sourceOptionID(index), quality: quality,
                 audio: candidate.audioDescription, playbackPath: candidate.source.playbackPath,
@@ -260,10 +288,14 @@ final class PlaybackController: ObservableObject {
                             throw AppFailure(.unsupportedOperation, "This source cannot be identified uniquely. Choose Automatic.")
                         }
                     }
-                    source = try MediaSelector.select(candidates, policy: policy, sourceID: sourceChoice)
+                    source = try MediaSelector.select(candidates, policy: policy, sourceID: sourceChoice,
+                                                      preferQuality: self.preferQuality)
                 }
                 guard let self, !Task.isCancelled, self.generation == id else { return }
                 self.selectedSource = source
+                // Works for the remux fallback too: it reuses the original
+                // candidates, so the fallback keeps the source's quality label.
+                self.selectedQuality = Self.qualityLabel(for: source, in: self.sourceCandidates)
                 if let sourceTitle = source.title { self.title = sourceTitle }
                 self.resolving = false
                 var playbackURL = source.url
@@ -338,6 +370,9 @@ final class PlaybackController: ObservableObject {
                 if self.preparedMedia?.sourceDuration != nil {
                     item.canUseNetworkResourcesForLiveStreamingWhilePaused = true
                 }
+                // A growing EVENT playlist can open at its live edge; seek the
+                // prepared item back to the start once it is ready.
+                self.pendingInitialSeek = self.preparedMedia != nil
                 self.itemObservations = [
                     item.observe(\.status, options: [.new]) { [weak self] _, _ in
                         Task { @MainActor in
@@ -665,6 +700,7 @@ final class PlaybackController: ObservableObject {
         stopPreparedMedia()
         loading = false; resolving = false; preparing = false; websiteURL = nil; retriedResolution = false
         selectedSource = nil
+        selectedQuality = nil
         originalSourceURL = nil
         sourceCandidates = []
         sourceChoice = nil
@@ -673,6 +709,7 @@ final class PlaybackController: ObservableObject {
         actualPlaybackPath = nil
         ended = false; hasPlayed = false; failure = nil; failureReason = nil
         playWhenReady = false
+        pendingInitialSeek = false
         hasAudio = nil
         hasVideo = false
         wasExternal = player.isExternalPlaybackActive
@@ -695,7 +732,12 @@ final class PlaybackController: ObservableObject {
             return
         }
         if !hasPlayed, prepareSource != nil, let selectedSource,
-           let fallback = MediaSelector.remuxFallback(for: selectedSource, reason: reason) {
+           let remuxFallback = MediaSelector.remuxFallback(for: selectedSource, reason: reason) {
+            // Prefer the best available remux presentation over remuxing the
+            // failed native URL, so a fallback is not stuck at the low-quality
+            // direct stream.
+            let fallback = MediaSelector.bestRemuxFallback(from: sourceCandidates, policy: conversionPolicy)
+                ?? remuxFallback
             startLoad(originalSourceURL ?? selectedSource.url, retry: retriedResolution, fallback: fallback,
                       preservingQueue: queue != nil, autoplay: playWhenReady,
                       titleOverride: title, sourceChoice: sourceChoice, changingSource: changingSource)
@@ -791,6 +833,12 @@ final class PlaybackController: ObservableObject {
             // With incomplete track information, stay loading until observation
             // supplies video evidence or the existing bounded load timeout expires.
         }
+        // A growing EVENT playlist can open at its live edge; return a prepared
+        // item to the beginning before any negotiation or playback.
+        if pendingInitialSeek, let item, item.status == .readyToPlay, !loading {
+            pendingInitialSeek = false
+            if (finite(player.currentTime().seconds) ?? 0) > 0.5 { player.seek(to: .zero) }
+        }
         beginProbeIfReady()
         if playWhenReady, !loading, item?.status == .readyToPlay {
             playWhenReady = false
@@ -816,6 +864,7 @@ final class PlaybackController: ObservableObject {
         next.loadingPhase = resolving ? "resolving" : (preparing ? "preparing" : nil)
         next.playbackPath = failure == nil
             ? (actualPlaybackPath ?? (preparing ? selectedSource?.plannedPath : selectedSource?.playbackPath)) : nil
+        next.quality = failure == nil ? selectedQuality : nil
         next.sources = sourceOptions
         if let sourceChoice, let index = sourceCandidates.firstIndex(where: { $0.id == sourceChoice }) {
             next.selectedSourceID = sourceOptionID(index)
@@ -830,7 +879,12 @@ final class PlaybackController: ObservableObject {
                 }, truncated: queue.truncated)
         }
         next.duration = preparedMedia?.sourceDuration ?? item.flatMap { finite($0.duration.seconds) }
-        next.position = item == nil ? nil : finite(player.currentTime().seconds)
+        // While a new item loads, a retained previous item can still report its
+        // old position; hide it so the timeline starts at the beginning. During
+        // the muted route probe, report the pre-probe position so the timeline
+        // does not visibly scrub.
+        next.position = (item == nil || loading || resolving || preparing) ? nil
+            : (probing ? probePosition : finite(player.currentTime().seconds))
         next.seekableRanges = (item?.seekableTimeRanges ?? []).compactMap {
             let range = $0.timeRangeValue
             guard let start = finite(range.start.seconds), let end = finite(CMTimeRangeGetEnd(range).seconds), end > start else { return nil }
@@ -1004,6 +1058,42 @@ final class PlaybackController: ObservableObject {
         } else if !needsActivity, let activity {
             ProcessInfo.processInfo.endActivity(activity)
             self.activity = nil
+        }
+    }
+}
+
+/// Bridges the Settings cookie choice to the resolver. An `AIRPLAYER_*`
+/// environment override wins over the saved preference so power users and the
+/// CLI can force a source without touching the UI.
+enum YouTubeCookiePreference {
+    static let modeKey = "youtubeCookiesMode"
+    static let browserKey = "youtubeCookiesBrowser"
+    static let filePathKey = "youtubeCookiesFilePath"
+    static let defaultBrowser = "safari"
+    static var browsers: [String] { YouTubeCookies.supportedBrowsers }
+
+    static func installedBrowsers(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [String] {
+        YouTubeCookies.installedBrowsers(home: home)
+    }
+
+    static func current(environment: [String: String] = ProcessInfo.processInfo.environment,
+                        defaults: UserDefaults = .standard) -> YouTubeCookies {
+        let override = YouTubeCookies.fromEnvironment(environment)
+        if override != .none { return override }
+        return fromDefaults(defaults)
+    }
+
+    static func fromDefaults(_ defaults: UserDefaults = .standard) -> YouTubeCookies {
+        switch defaults.string(forKey: modeKey) {
+        case "browser":
+            let browser = (defaults.string(forKey: browserKey) ?? defaultBrowser).lowercased()
+            guard browsers.contains(browser) else { return .none }
+            return .browser(browser)
+        case "file":
+            guard let path = defaults.string(forKey: filePathKey), path.hasPrefix("/") else { return .none }
+            return .file(URL(fileURLWithPath: path))
+        default:
+            return .none
         }
     }
 }

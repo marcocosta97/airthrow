@@ -2,7 +2,7 @@ import Foundation
 import AVFoundation
 
 public enum ResolutionFailure: Error, Sendable {
-    case unavailable, failed, timedOut, tooMuchOutput, unsupportedPage, preparationRequired, protectedMedia
+    case unavailable, failed, timedOut, tooMuchOutput, unsupportedPage, preparationRequired, protectedMedia, signInRequired
 
     public var reason: MediaFailureReason {
         switch self {
@@ -12,6 +12,7 @@ public enum ResolutionFailure: Error, Sendable {
         case .unsupportedPage: .unsupportedWebsite
         case .preparationRequired: .preparationRequired
         case .protectedMedia: .protectedMedia
+        case .signInRequired: .signInRequired
         }
     }
 }
@@ -90,8 +91,9 @@ public struct ResolvedPlaylist: Sendable, Equatable {
 public struct SourceResolver: Sendable {
     public static let maximumPlaylistEntries = YouTubeSourceAdapter.maximumPlaylistEntries
     private let youtube: YouTubeSourceAdapter
-    public init(environment: [String: String] = ProcessInfo.processInfo.environment) {
-        youtube = YouTubeSourceAdapter(environment: environment)
+    public init(environment: [String: String] = ProcessInfo.processInfo.environment,
+                cookies: YouTubeCookies? = nil) {
+        youtube = YouTubeSourceAdapter(environment: environment, cookies: cookies)
     }
 
     public func candidates(for url: URL) async throws -> [MediaCandidate] {
@@ -103,10 +105,10 @@ public struct SourceResolver: Sendable {
     /// Backwards compatible: the default policy is `.avoidVideo` and no explicit
     /// source id, so existing callers keep automatic selection.
     public func resolve(_ url: URL, policy: ConversionPolicy = .avoidVideo,
-                        sourceID: String? = nil) async throws -> ResolvedSource {
+                        sourceID: String? = nil, preferQuality: Bool = false) async throws -> ResolvedSource {
         let candidates = try await candidates(for: url)
         try Task.checkCancellation()
-        return try MediaSelector.select(candidates, policy: policy, sourceID: sourceID)
+        return try MediaSelector.select(candidates, policy: policy, sourceID: sourceID, preferQuality: preferQuality)
     }
 
     public func resolvePlaylist(_ url: URL) async throws -> ResolvedPlaylist {
@@ -121,8 +123,11 @@ public struct SourceResolver: Sendable {
 struct YouTubeSourceAdapter: Sendable {
     public static let maximumPlaylistEntries = 100
     private let environment: [String: String]
-    public init(environment: [String: String] = ProcessInfo.processInfo.environment) {
+    private let cookies: YouTubeCookies
+    public init(environment: [String: String] = ProcessInfo.processInfo.environment,
+                cookies: YouTubeCookies? = nil) {
         self.environment = environment
+        self.cookies = cookies ?? YouTubeCookies.fromEnvironment(environment)
     }
 
     public static func isWebsite(_ url: URL) -> Bool {
@@ -161,6 +166,13 @@ struct YouTubeSourceAdapter: Sendable {
         return URL(string: "https://www.youtube.com/watch?v=\(id)")!
     }
 
+    /// Recognize YouTube's sign-in/bot challenge from bounded stderr. The text
+    /// is never surfaced; it only selects a clearer failure reason.
+    static func isSignInChallenge(_ stderr: Data) -> Bool {
+        guard let text = String(data: stderr, encoding: .utf8)?.lowercased() else { return false }
+        return text.contains("sign in to confirm") || text.contains("not a bot")
+    }
+
     func candidates(_ url: URL) async throws -> [MediaCandidate] {
         let page = try Self.videoPage(url)
         let finder = HelperExecutables(environment: environment)
@@ -168,13 +180,20 @@ struct YouTubeSourceAdapter: Sendable {
               let deno = finder.executable("deno", override: "AIRPLAYER_DENO") else {
             throw ResolutionFailure.unavailable
         }
-        let arguments = ["--ignore-config", "--no-plugin-dirs", "--no-cache-dir", "--no-remote-components",
+        let scratch = cookies.materialize()
+        defer { scratch.cleanup() }
+        var arguments = ["--ignore-config", "--no-plugin-dirs", "--no-cache-dir", "--no-remote-components",
                          "--no-js-runtimes", "--js-runtimes", "deno:\(deno)",
                          "--no-playlist", "--playlist-items", "1", "--simulate", "--dump-single-json",
                          "--no-warnings", "--socket-timeout", "10",
-                         "--retries", "0", "--extractor-retries", "0", "--", page.absoluteString]
-        let data = try await HelperProcess.run(executable: helper, arguments: arguments)
-        return try await Self.candidatesWithHLS(data)
+                         "--retries", "0", "--extractor-retries", "0"]
+        if let path = scratch.path { arguments.append(contentsOf: ["--cookies", path]) }
+        arguments.append(contentsOf: ["--", page.absoluteString])
+        let result = try await HelperProcess.runCapturingStderr(executable: helper, arguments: arguments)
+        guard result.succeeded else {
+            throw Self.isSignInChallenge(result.stderr) ? ResolutionFailure.signInRequired : ResolutionFailure.failed
+        }
+        return try await Self.candidatesWithHLS(result.output)
     }
 
     /// yt-dlp flattens alternate-audio HLS into video-only and audio-only
@@ -229,13 +248,20 @@ struct YouTubeSourceAdapter: Sendable {
               let deno = finder.executable("deno", override: "AIRPLAYER_DENO") else {
             throw ResolutionFailure.unavailable
         }
-        let arguments = ["--ignore-config", "--no-plugin-dirs", "--no-cache-dir", "--no-remote-components",
+        let scratch = cookies.materialize()
+        defer { scratch.cleanup() }
+        var arguments = ["--ignore-config", "--no-plugin-dirs", "--no-cache-dir", "--no-remote-components",
                          "--no-js-runtimes", "--js-runtimes", "deno:\(deno)",
                          "--flat-playlist", "--playlist-end", String(Self.maximumPlaylistEntries + 1),
                          "--simulate", "--dump-single-json", "--no-warnings", "--socket-timeout", "10",
-                         "--retries", "0", "--extractor-retries", "0", "--", page.absoluteString]
-        let data = try await HelperProcess.run(executable: helper, arguments: arguments)
-        return try Self.selectPlaylist(data)
+                         "--retries", "0", "--extractor-retries", "0"]
+        if let path = scratch.path { arguments.append(contentsOf: ["--cookies", path]) }
+        arguments.append(contentsOf: ["--", page.absoluteString])
+        let result = try await HelperProcess.runCapturingStderr(executable: helper, arguments: arguments)
+        guard result.succeeded else {
+            throw Self.isSignInChallenge(result.stderr) ? ResolutionFailure.signInRequired : ResolutionFailure.failed
+        }
+        return try Self.selectPlaylist(result.output)
     }
 
     static func selectPlaylist(_ data: Data) throws -> ResolvedPlaylist {
@@ -316,6 +342,7 @@ struct YouTubeSourceAdapter: Sendable {
                                            videoKnownPresent: true),
                     id: formatIdentifier(format, role: "direct"),
                     height: format.height, bitrate: format.tbr,
+                    frameRate: format.fps,
                     audioDescription: audioDescription(format))
             }
             .sorted(by: costFirst)
@@ -334,6 +361,7 @@ struct YouTubeSourceAdapter: Sendable {
                                            videoKnownPresent: true, plannedPath: combinedPlan(format)),
                     id: formatIdentifier(format, role: "convert"),
                     height: format.height, bitrate: format.tbr,
+                    frameRate: format.fps,
                     audioDescription: audioDescription(format),
                     unavailableReason: preparationLimitReason(format))
             }
@@ -370,6 +398,7 @@ struct YouTubeSourceAdapter: Sendable {
                                            plannedPath: pairedPlan(video, audio: audio)),
                     id: pairIdentifier(video, audio),
                     height: video.height, bitrate: video.tbr,
+                    frameRate: video.fps,
                     audioDescription: audioDescription(audio),
                     unavailableReason: preparationLimitReason(video)))
             }

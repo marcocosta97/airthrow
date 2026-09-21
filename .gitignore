@@ -11,3 +11,6 @@ __pycache__/
 AGENTS.override.md
 .impeccable/
 .vscode/
+
+# Exported YouTube cookies are session credentials; never commit them
+cookies.txt

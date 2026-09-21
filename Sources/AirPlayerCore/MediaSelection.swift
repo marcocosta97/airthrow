@@ -19,18 +19,22 @@ public struct MediaCandidate: Sendable {
     public let source: ResolvedSource
     public let height: Double?
     public let bitrate: Double?
+    /// Frame rate when the adapter knows it, used to tell same-height
+    /// presentations (for example 720p30 and 720p60) apart in the chooser.
+    public let frameRate: Double?
     /// Language and/or codec of the chosen audio track when the adapter knows it.
     public let audioDescription: String?
     /// A reason this presentation can never be used, regardless of policy.
     public let unavailableReason: String?
 
     public init(source: ResolvedSource, id: String = "", height: Double? = nil, bitrate: Double? = nil,
-                audioDescription: String? = nil, unavailableReason: String? = nil) {
+                frameRate: Double? = nil, audioDescription: String? = nil, unavailableReason: String? = nil) {
         let usableHeight = height.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
         let usableBitrate = bitrate.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
         self.source = source
         self.height = usableHeight
         self.bitrate = usableBitrate
+        self.frameRate = frameRate.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
         self.audioDescription = audioDescription
         self.unavailableReason = unavailableReason
         self.id = id.isEmpty
@@ -113,7 +117,7 @@ public struct MediaCandidate: Sendable {
 /// only place that ranks them. No URLs or provider names influence priority.
 public enum MediaSelector {
     public static func select(_ candidates: [MediaCandidate], policy: ConversionPolicy = .avoidVideo,
-                              sourceID: String? = nil) throws -> ResolvedSource {
+                              sourceID: String? = nil, preferQuality: Bool = false) throws -> ResolvedSource {
         // An explicit choice must resolve to exactly one presentation, or fail.
         // It never silently downgrades, nor guesses between duplicate identities.
         if let sourceID {
@@ -128,13 +132,21 @@ public enum MediaSelector {
         }
         guard let best = candidates
             .filter({ $0.unavailableReason(for: policy) == nil })
-            .max(by: rankedBelow) else { throw ResolutionFailure.preparationRequired }
+            .max(by: { rankedBelow($0, $1, preferQuality: preferQuality) }) else { throw ResolutionFailure.preparationRequired }
         return best.source.withConversionPolicy(policy)
     }
 
     /// Lower processing tiers win first; quality, HLS adaptation and bitrate
     /// break ties within a tier. Returns true when `left` ranks below `right`.
-    static func rankedBelow(_ left: MediaCandidate, _ right: MediaCandidate) -> Bool {
+    /// With `preferQuality`, known resolution and frame rate win before the
+    /// processing tier, so a higher-quality remux beats a lower-quality direct
+    /// source. Unavailable (policy-excluded) presentations are filtered first.
+    static func rankedBelow(_ left: MediaCandidate, _ right: MediaCandidate,
+                            preferQuality: Bool = false) -> Bool {
+        if preferQuality {
+            if left.height != right.height { return (left.height ?? 0) < (right.height ?? 0) }
+            if left.frameRate != right.frameRate { return (left.frameRate ?? 0) < (right.frameRate ?? 0) }
+        }
         let leftTier = left.source.playbackPath.tier
         let rightTier = right.source.playbackPath.tier
         if leftTier != rightTier { return leftTier > rightTier }
@@ -154,6 +166,18 @@ public enum MediaSelector {
                               audio: source.audio, needsPreparation: true, needsDelivery: source.needsDelivery,
                               delivery: source.delivery, videoKnownPresent: source.videoKnownPresent,
                               conversionPolicy: source.conversionPolicy)
+    }
+
+    /// When a native presentation fails and the source must be remuxed, prefer
+    /// the best available remux presentation over remuxing the failed native
+    /// URL. A fallback should still yield the highest quality the extractor
+    /// offered rather than the low-resolution direct stream.
+    public static func bestRemuxFallback(from candidates: [MediaCandidate],
+                                         policy: ConversionPolicy) -> ResolvedSource? {
+        guard let best = candidates
+            .filter({ $0.source.playbackPath == .remux && $0.unavailableReason(for: policy) == nil })
+            .max(by: { rankedBelow($0, $1, preferQuality: true) }) else { return nil }
+        return best.source.withConversionPolicy(policy)
     }
 }
 

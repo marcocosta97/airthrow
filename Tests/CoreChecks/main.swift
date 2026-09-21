@@ -136,6 +136,13 @@ let tests: [(String, () throws -> Void)] = [
         snapshot.isLive = true
         try check(PlaybackPolicy.activeSeekRange(snapshot) == SeekRange(start: 30, end: 50),
                   "Live media did not use its newest seek range")
+        var finite = PlaybackSnapshot()
+        finite.duration = 100
+        try check(PlaybackPolicy.activeSeekRange(finite) == SeekRange(start: 0, end: 100),
+                  "A known finite duration did not define a stable timeline")
+        finite.seekableRanges = [SeekRange(start: 0, end: 10)]
+        try check(PlaybackPolicy.activeSeekRange(finite) == SeekRange(start: 0, end: 100),
+                  "A partial seek range overrode the known finite duration")
         snapshot.state = .buffering
         try check(PlaybackPolicy.isPlaying(snapshot) && PlaybackPolicy.canSeek(snapshot),
                   "Buffering control state was wrong")

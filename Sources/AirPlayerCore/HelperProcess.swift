@@ -18,9 +18,32 @@ struct HelperExecutables {
 /// A private process group lets cancellation also stop the helper's JS runtime.
 /// Pipes are drained without blocking or retaining unbounded extractor output.
 enum HelperProcess {
+    struct Result: Sendable {
+        let output: Data
+        /// A bounded prefix of the helper's stderr, for classifying failures.
+        /// It is never logged or placed in status; callers must not surface it.
+        let stderr: Data
+        let succeeded: Bool
+    }
+
     static func run(executable: String, arguments: [String], timeout: Duration = .seconds(40),
                     outputLimit: Int = 8 * 1024 * 1024,
                     monitor: (@Sendable () throws -> Void)? = nil) async throws -> Data {
+        let result = try await execute(executable: executable, arguments: arguments, timeout: timeout,
+                                       outputLimit: outputLimit, monitor: monitor)
+        guard result.succeeded else { throw ResolutionFailure.failed }
+        return result.output
+    }
+
+    static func runCapturingStderr(executable: String, arguments: [String], timeout: Duration = .seconds(40),
+                                   outputLimit: Int = 8 * 1024 * 1024,
+                                   monitor: (@Sendable () throws -> Void)? = nil) async throws -> Result {
+        try await execute(executable: executable, arguments: arguments, timeout: timeout,
+                          outputLimit: outputLimit, monitor: monitor)
+    }
+
+    private static func execute(executable: String, arguments: [String], timeout: Duration,
+                                outputLimit: Int, monitor: (@Sendable () throws -> Void)?) async throws -> Result {
         try Task.checkCancellation()
         var output: [Int32] = [0, 0]
         var errors: [Int32] = [0, 0]
@@ -73,6 +96,7 @@ enum HelperProcess {
         let deadline = clock.now.advanced(by: timeout)
         var nextMonitor = clock.now
         var data = Data()
+        var stderrData = Data()
         var errorBytes = 0
         var buffer = [UInt8](repeating: 0, count: 16_384)
         var status: Int32 = 0
@@ -96,14 +120,16 @@ enum HelperProcess {
                         data.append(contentsOf: buffer.prefix(count))
                     } else {
                         errorBytes += count
+                        if stderrData.count < 8192 {
+                            stderrData.append(contentsOf: buffer.prefix(min(count, 8192 - stderrData.count)))
+                        }
                         guard errorBytes <= 256 * 1024 else { throw ResolutionFailure.tooMuchOutput }
                     }
                 }
             }
             // One more drain after exit collects bytes written immediately before termination.
             if reaped {
-                guard status == 0 else { throw ResolutionFailure.failed }
-                return data
+                return Result(output: data, stderr: stderrData, succeeded: status == 0)
             }
             let result = waitpid(pid, &status, WNOHANG)
             if result == pid { reaped = true }

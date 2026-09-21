@@ -73,7 +73,7 @@ For manual receiver checks, append `--serve --bind YOUR_MAC_LAN_IP` to keep the 
 Deterministic checks use fake helper executables and metadata; no installed yt-dlp, external site, or receiver is needed:
 
 ```bash
-swiftc -swift-version 6 -parse-as-library Sources/AirPlayerCore/Protocol.swift Sources/AirPlayerCore/MediaSelection.swift Sources/AirPlayerCore/SourceResolver.swift Sources/AirPlayerCore/HelperProcess.swift Tests/ResolverChecks/main.swift -o .build/ResolverChecks
+swiftc -swift-version 6 -parse-as-library Sources/AirPlayerCore/Protocol.swift Sources/AirPlayerCore/MediaSelection.swift Sources/AirPlayerCore/SourceResolver.swift Sources/AirPlayerCore/HelperProcess.swift Sources/AirPlayerCore/YouTubeCookies.swift Tests/ResolverChecks/main.swift -o .build/ResolverChecks
 .build/ResolverChecks
 ```
 
@@ -93,7 +93,7 @@ For an optional metadata-only live smoke check, install `yt-dlp` and `deno`, rec
 
 This uses the same resolver as the app and prints a redacted result. Live-site results may change independently of AirPlayer. Validate UI and CLI loading and receiver picture/sound separately. The result distinguishes a combined source from separate tracks selected for preparation. It is metadata-only and is not a playback pass.
 
-The subprocess runs in its own process group with a 40-second deadline, 8 MiB JSON limit, and 256 KiB discarded stderr limit. Stop/replacement kills the group and reaps the helper. Arguments disable user configuration, plugins, cache, and remote component installation; no browser cookies or authentication are imported. JavaScript/EJS support must already be installed. Default yt-dlp browser headers are retained in memory; direct playback does not forward them, while FFmpeg/ffprobe receive them for separate HTTP tracks. Other headers remain ineligible. Even candidates with only default headers can fail if a site requires them at fetch time.
+The subprocess runs in its own process group with a 40-second deadline, 8 MiB JSON limit, and 256 KiB discarded stderr limit. Stop/replacement kills the group and reaps the helper. Arguments disable user configuration, plugins, cache, and remote component installation. When YouTube cookies are configured, AirPlayer reads the browser store or the supplied cookies file itself, keeps only `youtube.com`/`youtu.be`/`youtube-nocookie.com` records, writes them to a private `0600` temporary Netscape file, and passes that file to yt-dlp; the scratch directory is removed once the helper exits. No other site's cookies are imported, and cookie values never enter status, logs, or identifiers. JavaScript/EJS support must already be installed. Default yt-dlp browser headers are retained in memory; direct playback does not forward them, while FFmpeg/ffprobe receive them for separate HTTP tracks. Other headers remain ineligible. Even candidates with only default headers can fail if a site requires them at fetch time.
 
 ## Preparation and HTTP delivery checks
 

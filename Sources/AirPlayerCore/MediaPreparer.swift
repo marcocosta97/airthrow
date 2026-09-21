@@ -259,11 +259,22 @@ public struct MediaPreparer: Sendable {
                     }
                 }
                 // -n never overwrites, so clear a partial output from a prior attempt.
-                try? FileManager.default.removeItem(at: output)
-                _ = try await HelperProcess.run(executable: ffmpeg,
-                                                arguments: arguments + ["-movflags", "+faststart", "-fs",
-                                                                        String(maximumBytes), "-f", "mp4", output.path],
-                                                timeout: timeout, outputLimit: 64 * 1024)
+                var attempt = 0
+                while true {
+                    try? FileManager.default.removeItem(at: output)
+                    do {
+                        _ = try await HelperProcess.run(executable: ffmpeg,
+                                                        arguments: arguments + ["-movflags", "+faststart", "-fs",
+                                                                                String(maximumBytes), "-f", "mp4", output.path],
+                                                        timeout: timeout, outputLimit: 64 * 1024)
+                        break
+                    } catch let error as ResolutionFailure {
+                        // Retry a transient remote failure, not a rejected source.
+                        guard case .failed = error, attempt < 2 else { throw error }
+                        attempt += 1
+                        try await Task.sleep(for: .milliseconds(600 * attempt))
+                    }
+                }
                 try Task.checkCancellation()
                 let size = (try FileManager.default.attributesOfItem(atPath: output.path)[.size] as? NSNumber)?.int64Value ?? 0
                 guard size > 0, size < maximumBytes else { throw PreparationFailure.limit }
@@ -537,9 +548,27 @@ public struct MediaPreparer: Sendable {
         let arguments = ["-v", "error"] + options + ["-show_entries",
             "format=duration,size:stream=index,codec_type,codec_name,codec_tag_string,pix_fmt,width,height,profile,channels,sample_rate,color_transfer,color_primaries,color_space,avg_frame_rate,r_frame_rate:stream_disposition=attached_pic:stream_side_data",
             "-of", "json", "-i", isLocal ? url.path : url.absoluteString]
-        let data = try await HelperProcess.run(executable: executable, arguments: arguments,
-                                               timeout: .seconds(mpegts ? 8 : 40))
+        let data = try await runProbe(executable: executable, arguments: arguments,
+                                      timeout: .seconds(mpegts ? 8 : 40), retry: !isLocal)
         return try JSONDecoder().decode(Probe.self, from: data)
+    }
+
+    /// A remote media URL can answer with a transient 403 (throttling or a
+    /// flagged address) before succeeding on a fresh connection. Retry only
+    /// immediate failures on remote inputs; local files and our own segments
+    /// never retry.
+    private func runProbe(executable: String, arguments: [String], timeout: Duration,
+                          retry: Bool) async throws -> Data {
+        var attempt = 0
+        while true {
+            do {
+                return try await HelperProcess.run(executable: executable, arguments: arguments, timeout: timeout)
+            } catch let error as ResolutionFailure {
+                guard retry, case .failed = error, attempt < 2 else { throw error }
+                attempt += 1
+                try await Task.sleep(for: .milliseconds(600 * attempt))
+            }
+        }
     }
 
     private struct Probe: Decodable {

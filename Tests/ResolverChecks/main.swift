@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import CommonCrypto
 
 @main
 @MainActor
@@ -13,6 +14,76 @@ struct ResolverChecks {
     }
     static func metadata(_ formats: [[String: Any]], extra: [String: Any] = [:]) throws -> Data {
         try JSONSerialization.data(withJSONObject: ["_type": "video", "formats": formats].merging(extra) { _, rhs in rhs })
+    }
+    nonisolated static func littleEndian(_ value: UInt32) -> Data {
+        var number = value.littleEndian
+        return withUnsafeBytes(of: &number) { Data($0) }
+    }
+    nonisolated static func bigEndian(_ value: UInt32) -> Data {
+        var number = value.bigEndian
+        return withUnsafeBytes(of: &number) { Data($0) }
+    }
+    /// Build a minimal, valid `Cookies.binarycookies` file holding one YouTube
+    /// cookie and one unrelated cookie so the scoping filter can be verified.
+    nonisolated static func safariFixture() -> Data {
+        func record(domain: String, name: String, value: String, secure: Bool) -> Data {
+            let domainBytes = Data(domain.utf8) + Data([0])
+            let nameBytes = Data(name.utf8) + Data([0])
+            let pathBytes = Data("/".utf8) + Data([0])
+            let valueBytes = Data(value.utf8) + Data([0])
+            let header = 56
+            let domainOffset = header
+            let nameOffset = domainOffset + domainBytes.count
+            let pathOffset = nameOffset + nameBytes.count
+            let valueOffset = pathOffset + pathBytes.count
+            let size = valueOffset + valueBytes.count
+            var bytes = Data()
+            bytes.append(contentsOf: littleEndian(UInt32(size)))
+            bytes.append(contentsOf: littleEndian(0))
+            bytes.append(contentsOf: littleEndian(secure ? 1 : 0))
+            bytes.append(contentsOf: littleEndian(0))
+            bytes.append(contentsOf: littleEndian(UInt32(domainOffset)))
+            bytes.append(contentsOf: littleEndian(UInt32(nameOffset)))
+            bytes.append(contentsOf: littleEndian(UInt32(pathOffset)))
+            bytes.append(contentsOf: littleEndian(UInt32(valueOffset)))
+            bytes.append(Data(repeating: 0, count: 8))
+            var macTime = (1_704_067_200.0 - 978_307_200.0).bitPattern.littleEndian
+            bytes.append(withUnsafeBytes(of: &macTime) { Data($0) })
+            bytes.append(Data(repeating: 0, count: 8))
+            bytes.append(domainBytes); bytes.append(nameBytes); bytes.append(pathBytes); bytes.append(valueBytes)
+            return bytes
+        }
+        let records = [record(domain: ".youtube.com", name: "SID", value: "secret", secure: true),
+                       record(domain: ".example.com", name: "OTHER", value: "x", secure: false)]
+        var page = Data([0x00, 0x00, 0x01, 0x00])
+        page.append(contentsOf: littleEndian(UInt32(records.count)))
+        let offsetsStart = 8 + records.count * 4
+        var offset = offsetsStart
+        var offsets: [Int] = []
+        for record in records { offsets.append(offset); offset += record.count }
+        for value in offsets { page.append(contentsOf: littleEndian(UInt32(value))) }
+        for record in records { page.append(record) }
+        var file = Data("cook".utf8)
+        file.append(contentsOf: bigEndian(1))
+        file.append(contentsOf: bigEndian(UInt32(page.count)))
+        file.append(page)
+        return file
+    }
+    nonisolated static func aesEncrypt(_ data: Data, key: [UInt8]) -> Data {
+        let iv = [UInt8](repeating: 0x20, count: 16)
+        var output = [UInt8](repeating: 0, count: data.count + kCCBlockSizeAES128)
+        var moved = 0
+        let status = key.withUnsafeBufferPointer { keyBuffer in
+            output.withUnsafeMutableBufferPointer { out in
+                data.withUnsafeBytes { input in
+                    CCCrypt(CCOperation(kCCEncrypt), CCAlgorithm(kCCAlgorithmAES),
+                            CCOptions(kCCOptionPKCS7Padding), keyBuffer.baseAddress, key.count, iv,
+                            input.baseAddress, data.count, out.baseAddress, out.count, &moved)
+                }
+            }
+        }
+        precondition(status == kCCSuccess, "fixture encryption failed")
+        return Data(output.prefix(moved))
     }
     static func main() async throws {
         if CommandLine.arguments.count == 3 {
@@ -81,6 +152,21 @@ struct ResolverChecks {
         let titled = try SourceResolver.select(metadata([combined], extra: ["title": "  Example\nTitle  "]))
         try check(titled.title == "ExampleTitle", "Resolver title was not sanitized")
         try check(titled.videoKnownPresent, "Inspected combined video lost readiness evidence")
+        let sixtyFPS = try SourceResolver.candidates(metadata([combined.merging(["fps": 60, "height": 720]) { _, b in b }])).first
+        try check(sixtyFPS?.frameRate == 60 && sixtyFPS?.height == 720,
+                  "Frame rate was not carried into the candidate")
+        let directLow = combined.merging(["height": 360]) { _, b in b }
+        let videoOnly720 = combined.merging(["acodec": "none", "height": 720]) { _, b in b }
+        let audioOnly = ["url": "https://media.example/audio?signature=secret", "protocol": "https",
+                         "vcodec": "none", "acodec": "mp4a.40.2", "ext": "m4a"]
+        let preferenceCandidates = try SourceResolver.candidates(metadata([directLow, videoOnly720, audioOnly]))
+        let defaultPick = try MediaSelector.select(preferenceCandidates, policy: .avoidVideo)
+        try check(defaultPick.playbackPath == .direct, "Default selection did not prefer the direct source")
+        let qualityPick = try MediaSelector.select(preferenceCandidates, policy: .avoidVideo, preferQuality: true)
+        try check(qualityPick.playbackPath == .remux, "Prefer-quality selection did not choose the higher-resolution remux")
+        let bestFallback = MediaSelector.bestRemuxFallback(from: preferenceCandidates, policy: .avoidVideo)
+        try check(bestFallback?.playbackPath == .remux && bestFallback?.audio != nil,
+                  "Best remux fallback did not choose the paired higher-resolution remux")
         let videoOnly = combined.merging(["acodec": "none", "height": 2160]) { _, b in b }
         let unknown = combined.filter { $0.key != "acodec" }
         let headers = combined.merging(["http_headers": ["Referer": "secret"]]) { _, b in b }
@@ -469,6 +555,118 @@ struct ResolverChecks {
                   "Playlist helper was not bounded to flat metadata extraction")
         print("PASS dedicated playlist parsing, ordering, unavailable entries, Mix rejection and queue limit")
 
+        try check(YouTubeCookies.fromEnvironment(["AIRPLAYER_YTDLP_COOKIES": "/tmp/x.txt"]) == .file(URL(fileURLWithPath: "/tmp/x.txt")),
+                  "Cookie file override was not parsed")
+        try check(YouTubeCookies.fromEnvironment(["AIRPLAYER_YTDLP_COOKIES_FROM_BROWSER": "Safari"]) == .browser("safari"),
+                  "Browser override was not normalized")
+        try check(YouTubeCookies.fromEnvironment(["AIRPLAYER_YTDLP_COOKIES_FROM_BROWSER": "not-a-browser"]) == .none,
+                  "Unknown browser override was accepted")
+        try check(YouTubeCookies.fromEnvironment(["AIRPLAYER_YTDLP_COOKIES": "/tmp/x.txt",
+                                                  "AIRPLAYER_YTDLP_COOKIES_FROM_BROWSER": "chrome"]) == .file(URL(fileURLWithPath: "/tmp/x.txt")),
+                  "File override did not take precedence")
+        try check(YouTubeCookies.fromEnvironment([:]) == .none, "Missing overrides enabled cookies")
+        for domain in [".youtube.com", "youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", ".youtube-nocookie.com"] {
+            try check(YouTubeCookieScope.includes(domain), "YouTube domain was rejected: \(domain)")
+        }
+        for domain in ["notyoutube.com", "google.com", "youtube.com.evil.example", "evil-youtube.com", ""] {
+            try check(!YouTubeCookieScope.includes(domain), "Foreign domain was accepted: \(domain)")
+        }
+        let netscape = """
+        # Netscape HTTP Cookie File
+        #HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tsecret
+        .google.com\tTRUE\t/\tFALSE\t123\tGMAIL\tmail
+        notyoutube.com\tTRUE\t/\tFALSE\t0\tEVIL\tx
+        """
+        let parsedNetscape = NetscapeCookies.parse(netscape)
+        try check(parsedNetscape.count == 3, "Netscape file was not parsed")
+        let scopedNetscape = NetscapeCookies.youtube(parsedNetscape)
+        try check(scopedNetscape.count == 1 && scopedNetscape[0].name == "SID" && scopedNetscape[0].httpOnly,
+                  "Netscape scope filter was not applied")
+        let serialized = NetscapeCookies.serialize(scopedNetscape)
+        try check(serialized.contains("#HttpOnly_.youtube.com") && serialized.contains("secret"),
+                  "Netscape serialization lost HttpOnly or value")
+        let parsedSafari = SafariCookies.parse(safariFixture())
+        try check(parsedSafari?.count == 2, "Safari binary container was not parsed")
+        let scopedSafari = NetscapeCookies.youtube(parsedSafari ?? [])
+        try check(scopedSafari.count == 1 && scopedSafari[0].name == "SID" && scopedSafari[0].secure,
+                  "Safari scope filter was not applied")
+        guard let chromiumKey = ChromiumCookies.deriveKey(password: Array("test-password".utf8)) else {
+            throw NSError(domain: "ResolverChecks", code: 1, userInfo: [NSLocalizedDescriptionKey: "Key derivation failed"])
+        }
+        let v10 = Data("v10".utf8)
+        try check(ChromiumCookies.decrypt(v10 + aesEncrypt(Data("hello".utf8), key: chromiumKey),
+                                          key: chromiumKey, metaVersion: 0) == "hello",
+                  "Chromium AES round trip failed")
+        let hashed = Data(repeating: 0xAB, count: 32) + Data("value".utf8)
+        try check(ChromiumCookies.decrypt(v10 + aesEncrypt(hashed, key: chromiumKey),
+                                          key: chromiumKey, metaVersion: 24) == "value",
+                  "Chromium meta v24 hash prefix was not stripped")
+        let emptyHome = temp.appendingPathComponent("home")
+        try FileManager.default.createDirectory(at: emptyHome, withIntermediateDirectories: true)
+        try check(YouTubeCookies.browser("whale").probe(home: emptyHome) == .notInstalled,
+                  "A missing browser was not reported as not installed")
+        try check(YouTubeCookies.browser("safari").probe(home: emptyHome) == .noSession,
+                  "A missing Safari store was not reported as no session")
+        try check(YouTubeCookies.installedBrowsers(home: emptyHome).contains("safari"),
+                  "Safari was not offered as an installed browser")
+        try check(!YouTubeCookies.installedBrowsers(home: emptyHome).contains("whale"),
+                  "An uninstalled browser was offered")
+        let probeFile = temp.appendingPathComponent("probe.txt")
+        try ".youtube.com\tTRUE\t/\tTRUE\t0\tLOGIN_INFO\tx\n".write(to: probeFile, atomically: true, encoding: .utf8)
+        try check(YouTubeCookies.file(probeFile).probe(home: emptyHome) == .loaded(1),
+                  "Cookie file probe did not count YouTube cookies")
+        let foreignFile = temp.appendingPathComponent("foreign.txt")
+        try ".example.com\tTRUE\t/\tTRUE\t0\tX\ty\n".write(to: foreignFile, atomically: true, encoding: .utf8)
+        try check(YouTubeCookies.file(foreignFile).probe(home: emptyHome) == .noSession,
+                  "Cookie file probe accepted a foreign cookie")
+        let anonymousFile = temp.appendingPathComponent("anonymous.txt")
+        try ".youtube.com\tTRUE\t/\tTRUE\t0\tVISITOR_INFO1_LIVE\tx\n".write(to: anonymousFile, atomically: true, encoding: .utf8)
+        try check(YouTubeCookies.file(anonymousFile).probe(home: emptyHome) == .noSession,
+                  "Anonymous YouTube cookies were treated as a signed-in session")
+        let psidFile = temp.appendingPathComponent("psid.txt")
+        try ".youtube.com\tTRUE\t/\tTRUE\t0\t__Secure-3PSID\tx\n".write(to: psidFile, atomically: true, encoding: .utf8)
+        try check(YouTubeCookies.file(psidFile).probe(home: emptyHome) == .noSession,
+                  "PSID without LOGIN_INFO was treated as a signed-in session")
+        try check(YouTubeCookies.file(temp.appendingPathComponent("missing.txt")).probe(home: emptyHome) == .unavailable,
+                  "A missing cookie file was not reported")
+        print("PASS cookie overrides, YouTube-only scoping, Netscape/Safari parsing, Chromium AES and status probing")
+
+        let cookiesFile = temp.appendingPathComponent("cookies.txt")
+        try """
+        # Netscape HTTP Cookie File
+        .youtube.com\tTRUE\t/\tTRUE\t0\tSID\tsecretvalue
+        .google.com\tTRUE\t/\tTRUE\t0\tGMAIL\tgooglevalue
+        """.write(to: cookiesFile, atomically: true, encoding: .utf8)
+        let cookieHelper = try helper("cookied", """
+        prev=""
+        for a in "$@"; do
+          if [ "$prev" = "--cookies" ]; then cp "$a" '\(temp.path)/materialized'; fi
+          prev="$a"
+        done
+        printf '%s\\n' "$@" > '\(temp.path)/cookie-args'
+        cat <<'JSON'
+        \(String(decoding: raw, as: UTF8.self))
+        JSON
+        """)
+        let cookieResolver = SourceResolver(environment: ["AIRPLAYER_YTDLP": cookieHelper, "AIRPLAYER_DENO": "/usr/bin/true"],
+                                            cookies: .file(cookiesFile))
+        _ = try await cookieResolver.resolve(page)
+        let cookieArgs = try String(contentsOf: temp.appendingPathComponent("cookie-args"), encoding: .utf8)
+        try check(cookieArgs.contains("--cookies"), "Cookie file was not passed to the helper")
+        let materialized = try String(contentsOf: temp.appendingPathComponent("materialized"), encoding: .utf8)
+        try check(materialized.contains(".youtube.com") && materialized.contains("\tSID\tsecretvalue"),
+                  "YouTube cookie was not materialized")
+        try check(!materialized.contains("google.com") && !materialized.contains("GMAIL"),
+                  "A non-YouTube cookie reached the helper")
+        let argumentLines = cookieArgs.split(separator: "\n").map(String.init)
+        if let index = argumentLines.firstIndex(of: "--cookies"), index + 1 < argumentLines.count {
+            try check(!FileManager.default.fileExists(atPath: argumentLines[index + 1]),
+                      "The temporary cookie file outlived the helper")
+        } else {
+            try check(false, "Cookie path was not adjacent to its flag")
+        }
+        print("PASS cookie materialization, YouTube-only handoff and scratch cleanup")
+
         let good = try helper("good", "printf '%s\\n' \"$@\" > '\(temp.path)/args'\ncat <<'JSON'\n\(String(decoding: raw, as: UTF8.self))\nJSON\n")
         let resolver = SourceResolver(environment: ["AIRPLAYER_YTDLP": good, "AIRPLAYER_DENO": "/usr/bin/true"])
         _ = try await resolver.resolve(page)
@@ -476,7 +674,16 @@ struct ResolverChecks {
         for flag in ["--ignore-config", "--no-plugin-dirs", "--no-cache-dir", "--simulate", "--dump-single-json", "--no-remote-components"] {
             try check(args.contains(flag), "Helper isolation flag missing")
         }
+        try check(!args.contains("--cookies"), "Cookies were passed without a configured source")
         try check(!args.contains("list=ignored"), "Playlist context reached the helper")
+        try check(YouTubeSourceAdapter.isSignInChallenge(Data("ERROR: [youtube] x: Sign in to confirm you’re not a bot.".utf8)),
+                  "Sign-in challenge was not recognized")
+        try check(!YouTubeSourceAdapter.isSignInChallenge(Data("ERROR: unable to download".utf8)),
+                  "Unrelated helper output was treated as a sign-in challenge")
+        let signInHelper = try helper("signin", "echo 'ERROR: [youtube] x: Sign in to confirm you’re not a bot.' >&2; exit 1\n")
+        let signInResolver = SourceResolver(environment: ["AIRPLAYER_YTDLP": signInHelper, "AIRPLAYER_DENO": "/usr/bin/true"])
+        try await expect(.signInRequired) { _ = try await signInResolver.resolve(page) }
+        print("PASS sign-in challenge classification")
         let bad = try helper("bad", "echo 'secret signed URL' >&2; exit 1\n")
         try await expect(.failed) { _ = try await HelperProcess.run(executable: bad, arguments: []) }
         let noisy = try helper("noisy", "while :; do echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done\n")

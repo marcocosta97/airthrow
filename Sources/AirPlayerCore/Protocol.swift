@@ -148,6 +148,7 @@ public enum MediaFailureReason: String, Codable, Sendable {
 
     case resolverUnavailable = "resolver_unavailable", resolutionFailed = "resolution_failed"
     case resolutionTimedOut = "resolution_timed_out", unsupportedWebsite = "unsupported_website"
+    case signInRequired = "sign_in_required"
     case preparationRequired = "preparation_required"
     case preparerUnavailable = "preparer_unavailable", preparationFailed = "preparation_failed"
     case preparationLimit = "preparation_limit", deliveryUnavailable = "delivery_unavailable"
@@ -158,6 +159,7 @@ public enum MediaFailureReason: String, Codable, Sendable {
         case .resolutionFailed: "Could not find a playable video. The page may require sign-in, be unavailable, or need an updated yt-dlp installation."
         case .resolutionTimedOut: "Finding the video timed out. Check the connection and try again."
         case .unsupportedWebsite: "Choose a public, on-demand YouTube video or dedicated public playlist. Live streams, Mixes and sign-in are not supported."
+        case .signInRequired: "YouTube asked for sign-in verification. Add or refresh cookies in Settings → YouTube access, then load again. A cookies file is a snapshot and can expire; a browser source stays current."
         case .preparationRequired: "This source cannot use the current preparation settings. Allow video conversion for supported SDR sources, or choose another source. HDR, protected media and some delivery methods are unsupported."
         case .preparerUnavailable: "Preparing this video needs FFmpeg and ffprobe. Install FFmpeg with Homebrew, then load the link again."
         case .preparationFailed: "Could not prepare the video. Check the source, connection and available disk space, then load it again."
@@ -193,6 +195,9 @@ public struct PlaybackSnapshot: Codable, Sendable, Equatable {
     public var loadingPhase: String?
     /// Selected processing path, not evidence that playback has started.
     public var playbackPath: PlaybackPath?
+    /// Quality label of the selected presentation (for example "720p60"),
+    /// when the adapter knows it. Never contains URLs or provider identifiers.
+    public var quality: String?
     /// Additive, privacy-safe observations for troubleshooting and future policy.
     public var diagnostics: PlaybackDiagnostics?
     /// Present while a playlist owns the shared playback session.
@@ -378,9 +383,16 @@ public enum PlaybackPolicy {
     }
 
     /// Live playlists can expose older, discontinuous ranges before the current
-    /// window. Use the newest range for live controls and the first for finite media.
+    /// window. Use the newest range for live controls. For on-demand media a
+    /// known finite duration gives a stable full-length timeline; the seekable
+    /// range appears late and grows while buffering, which would otherwise make
+    /// the position thumb jump around (or pin to the end while it is empty).
     public static func activeSeekRange(_ snapshot: PlaybackSnapshot) -> SeekRange? {
-        snapshot.isLive ? snapshot.seekableRanges.last : snapshot.seekableRanges.first
+        if snapshot.isLive { return snapshot.seekableRanges.last }
+        if let duration = snapshot.duration, duration.isFinite, duration > 0 {
+            return SeekRange(start: 0, end: duration)
+        }
+        return snapshot.seekableRanges.first
     }
 
     public static func canSeek(_ snapshot: PlaybackSnapshot) -> Bool {

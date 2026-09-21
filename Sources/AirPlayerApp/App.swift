@@ -20,8 +20,9 @@ struct AirPlayerMain {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate, NSToolbarDelegate {
     // Content needs ~395pt; the unified toolbar adds a 52pt top safe-area inset.
-    private static let controllerHeight: CGFloat = 452
+    private static let controllerHeight: CGFloat = 438
     private let controller = PlaybackController()
+    private let cookieStatus = CookieStatusModel()
     private let presentation = ControllerPresentation()
     private let server = CommandServer()
     private var window: NSWindow?
@@ -197,11 +198,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     @objc private func showSettings() {
         if settingsWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 280),
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 560),
                                   styleMask: [.titled, .closable], backing: .buffered, defer: false)
             window.title = "AirPlayer Settings"
             window.isReleasedWhenClosed = false
-            window.contentView = NSHostingView(rootView: SettingsView(controller: controller))
+            window.contentView = NSHostingView(rootView: SettingsView(controller: controller, cookieStatus: cookieStatus))
             window.center()
             settingsWindow = window
         }

@@ -122,7 +122,7 @@ struct ControllerView: View {
                     }
                 }
 
-                section("Playback", height: 202) {
+                section("Playback") {
                     VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 8) {
                         if busy || status.state == .buffering {
@@ -135,15 +135,20 @@ struct ControllerView: View {
                     }
                     if status.state != .idle {
                         Text(status.title)
-                            .font(.subheadline).foregroundStyle(.secondary)
-                            .lineLimit(1).truncationMode(.middle)
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .multilineTextAlignment(.center)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .center)
                             .textSelection(.enabled)
                     }
                     if let path = status.playbackPath {
-                        Text(path.label)
+                        let detail = [path.label, status.quality].compactMap { $0 }.joined(separator: " · ")
+                        Text(detail)
                             .font(.caption).foregroundStyle(.secondary)
                             .help(path.explanation)
-                            .accessibilityLabel("Playback path: \(path.label)")
+                            .accessibilityLabel("Playback: \(detail)")
                             .accessibilityHint(path.explanation)
                     }
                     if status.hasAudio == false {
@@ -152,7 +157,6 @@ struct ControllerView: View {
                             .fixedSize(horizontal: false, vertical: true)
                             .accessibilityLabel("No audio track detected. Try a link that includes audio.")
                     }
-                    Spacer(minLength: 0)
                     VStack(spacing: 4) {
                         GeometryReader { geometry in
                             ZStack(alignment: .topLeading) {
@@ -163,7 +167,7 @@ struct ControllerView: View {
                                     scrubbing = editing
                                     if !editing { perform { try controller.seek(scrub) } }
                                 })
-                                .padding(.top, 12)
+                                .padding(.top, 8)
                                 .disabled(!canControl || range == nil)
                                 .accessibilityLabel("Playback position")
                                 .accessibilityValue(PlaybackFormat.time(controller.pendingSeek ?? status.position))
@@ -201,7 +205,6 @@ struct ControllerView: View {
                         }
                         .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                     }
-                    .padding(.top, 6)
 
                     HStack(spacing: 12) {
                         if let queue = status.queue {
@@ -244,27 +247,34 @@ struct ControllerView: View {
                     .controlSize(.regular)
                     .frame(maxWidth: .infinity)
                     .padding(.top, 8)
+                    .padding(.bottom, 8)
                     }
                     .frame(maxWidth: .infinity)
                 }
 
-                if let message = status.error ?? controller.notice {
-                    HStack(alignment: .top, spacing: 8) {
-                        Image(systemName: status.error == nil ? "info.circle" : "exclamationmark.triangle")
-                        Text(message).fixedSize(horizontal: false, vertical: true)
-                        Spacer(minLength: 0)
-                        if status.error == nil {
-                            Button { controller.clearNotice() } label: { Image(systemName: "xmark") }
-                                .buttonStyle(.plain).accessibilityLabel("Dismiss message")
+                Group {
+                    if let message = status.error ?? controller.notice {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: status.error == nil ? "info.circle" : "exclamationmark.triangle")
+                            Text(message)
+                                .lineLimit(4)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 0)
+                            if status.error == nil {
+                                Button { controller.clearNotice() } label: { Image(systemName: "xmark") }
+                                    .buttonStyle(.plain).accessibilityLabel("Dismiss message")
+                            }
                         }
+                        .font(.callout)
+                        .foregroundStyle(status.error == nil ? Color.secondary : Color.primary)
+                    } else {
+                        Text(status.state == .idle ? "Load a video, then press Play when your receiver is ready." : "Playback continues when you close this window.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
-                    .font(.callout)
-                    .foregroundStyle(status.error == nil ? Color.secondary : Color.primary)
-
-                } else {
-                    Text(status.state == .idle ? "Load a video, then press Play when your receiver is ready." : "Playback continues when you close this window.")
-                        .font(.caption).foregroundStyle(.secondary)
                 }
+                // A fixed height keeps the sections above from shifting when a
+                // multi-line error or notice replaces the single-line caption.
+                .frame(maxWidth: .infinity, minHeight: 50, maxHeight: 50, alignment: .topLeading)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
