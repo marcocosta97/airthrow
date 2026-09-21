@@ -52,7 +52,6 @@ final class ControllerPresentation: ObservableObject {
 
 struct ControllerView: View {
     @ObservedObject var controller: PlaybackController
-    @ObservedObject var presentation: ControllerPresentation
     @ViewState private var url = ""
     @ViewState private var scrub: Double = 0
     @ViewState private var scrubbing = false
@@ -71,7 +70,7 @@ struct ControllerView: View {
     var body: some View {
         ZStack {
             VStack(alignment: .leading, spacing: 10) {
-                section("Source", showsSidebarToggle: true) {
+                section("Source") {
                     VStack(alignment: .leading, spacing: 12) {
                         VStack(alignment: .leading, spacing: 6) {
                             HStack(spacing: 8) {
@@ -293,20 +292,12 @@ struct ControllerView: View {
     private func section<Content: View>(
         _ title: String,
         height: CGFloat? = nil,
-        showsSidebarToggle: Bool = false,
         @ViewBuilder content: () -> Content
     ) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                Text(title)
-                    .font(.headline)
-                Spacer()
-                if showsSidebarToggle {
-                    sidebarToggleButton
-                }
-            }
-            .padding(.leading, 8)
-            .padding(.trailing, 4)
+            Text(title)
+                .font(.headline)
+                .padding(.leading, 8)
             content()
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
@@ -317,31 +308,6 @@ struct ControllerView: View {
                     in: RoundedRectangle(cornerRadius: 12, style: .continuous)
                 )
         }
-    }
-
-    @ViewBuilder
-    private var sidebarToggleButton: some View {
-        if #available(macOS 26.0, *) {
-            sidebarButton
-                .buttonStyle(.glass)
-        } else {
-            sidebarButton
-                .buttonStyle(.bordered)
-        }
-    }
-
-    private var sidebarButton: some View {
-        Button {
-            // The AppDelegate mirrors this into the native split-view item,
-            // which animates the window and the inspector together.
-            presentation.playlistVisible.toggle()
-        } label: {
-            Image(systemName: "sidebar.right")
-        }
-        .controlSize(.small)
-        .buttonBorderShape(.roundedRectangle(radius: 8))
-        .help(presentation.playlistVisible ? "Hide playlist" : "Show playlist")
-        .accessibilityLabel(presentation.playlistVisible ? "Hide Playlist" : "Show Playlist")
     }
 
     private var livePositionLabel: String {

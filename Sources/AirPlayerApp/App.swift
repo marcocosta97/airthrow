@@ -18,7 +18,7 @@ struct AirPlayerMain {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate, NSToolbarDelegate {
     private static let controllerHeight: CGFloat = 414
     private let controller = PlaybackController()
     private let presentation = ControllerPresentation()
@@ -27,6 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var settingsWindow: NSWindow?
     private var splitViewController: NSSplitViewController?
     private var inspectorItem: NSSplitViewItem?
+    private var inspectorObservation: NSKeyValueObservation?
     private var statusItem: NSStatusItem?
     private var presentationObservation: AnyCancellable?
     private var snapshotObservation: AnyCancellable?
@@ -104,7 +105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             window.isReleasedWhenClosed = false
             window.delegate = self
 
-            let mainHosting = NSHostingController(rootView: ControllerView(controller: controller, presentation: presentation))
+            let mainHosting = NSHostingController(rootView: ControllerView(controller: controller))
             mainHosting.sizingOptions = []
             mainHosting.preferredContentSize = NSSize(width: ControllerMetrics.width, height: Self.controllerHeight)
             let playlistHosting = NSHostingController(rootView: PlaylistPanel(controller: controller))
@@ -125,6 +126,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             split.addSplitViewItem(inspectorItem)
             splitViewController = split
             self.inspectorItem = inspectorItem
+            // Keep the app's intent in step with the native toolbar toggle.
+            inspectorObservation = inspectorItem.observe(\.isCollapsed, options: [.new]) { [weak self] _, change in
+                guard let collapsed = change.newValue else { return }
+                Task { @MainActor [weak self] in
+                    self?.presentation.playlistVisible = !collapsed
+                }
+            }
+
+            let toolbar = NSToolbar(identifier: "AirPlayerToolbar")
+            toolbar.delegate = self
+            toolbar.displayMode = .iconOnly
+            toolbar.allowsUserCustomization = false
+            window.toolbar = toolbar
+            window.toolbarStyle = .unified
 
             window.contentViewController = split
             window.center()
@@ -133,6 +148,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+    }
+
+    // MARK: - Toolbar
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.flexibleSpace, .toggleInspector]
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.flexibleSpace, .toggleInspector]
+    }
+
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
+                 willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        guard itemIdentifier == .toggleInspector else { return nil }
+        let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+        item.label = "Playlist"
+        item.paletteLabel = "Playlist"
+        item.toolTip = "Show or hide the playlist"
+        item.action = #selector(NSSplitViewController.toggleInspector(_:))
+        return item
     }
 
     /// Horizontal resizing only: the proposed width is honored, the height is
