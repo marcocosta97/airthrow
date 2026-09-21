@@ -2,7 +2,7 @@ import AppKit
 import Combine
 import SwiftUI
 #if SWIFT_PACKAGE
-import AirPlayerCore
+import AirThrowCore
 #endif
 
 /// Cookie-source check state for the Settings window. Held by the app delegate
@@ -175,9 +175,9 @@ struct SettingsView: View {
     private var permissionMessage: String {
         switch effectiveBrowser {
         case "safari":
-            "Cannot read Safari cookies. Grant AirPlayer Full Disk Access in System Settings → Privacy & Security → Full Disk Access, then reopen Settings."
+            "Cannot read Safari cookies. Grant AirThrow Full Disk Access in System Settings → Privacy & Security → Full Disk Access, then reopen Settings."
         default:
-            "Keychain access was denied. Allow AirPlayer to read the browser's stored key, then reopen Settings."
+            "Keychain access was denied. Allow AirThrow to read the browser's stored key, then reopen Settings."
         }
     }
 

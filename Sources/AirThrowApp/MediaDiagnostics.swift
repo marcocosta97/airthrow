@@ -1,7 +1,7 @@
 import Foundation
 import AVFoundation
 #if SWIFT_PACKAGE
-import AirPlayerCore
+import AirThrowCore
 #endif
 
 /// Expose only fixed messages/codes. NSError descriptions and userInfo can contain signed URLs.

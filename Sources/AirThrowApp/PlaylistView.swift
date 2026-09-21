@@ -1,6 +1,6 @@
 import SwiftUI
 #if SWIFT_PACKAGE
-import AirPlayerCore
+import AirThrowCore
 #endif
 
 /// The trailing inspector's content. Hosted by the AppKit split-view controller

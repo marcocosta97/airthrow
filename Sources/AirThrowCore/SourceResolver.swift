@@ -30,7 +30,7 @@ public struct ResolvedSource: Sendable {
     public let headers: [String: String]
     public let audio: MediaTrack?
     public let needsPreparation: Bool
-    /// The source must be exposed through AirPlayer's LAN server before AVPlayer
+    /// The source must be exposed through AirThrow's LAN server before AVPlayer
     /// can hand it to a receiver. This is independent of whether tracks are remuxed.
     public let needsDelivery: Bool
     public let delivery: MediaDelivery
@@ -176,8 +176,8 @@ struct YouTubeSourceAdapter: Sendable {
     func candidates(_ url: URL) async throws -> [MediaCandidate] {
         let page = try Self.videoPage(url)
         let finder = HelperExecutables(environment: environment)
-        guard let helper = finder.executable("yt-dlp", override: "AIRPLAYER_YTDLP"),
-              let deno = finder.executable("deno", override: "AIRPLAYER_DENO") else {
+        guard let helper = finder.executable("yt-dlp", override: "AIRTHROW_YTDLP"),
+              let deno = finder.executable("deno", override: "AIRTHROW_DENO") else {
             throw ResolutionFailure.unavailable
         }
         let scratch = cookies.materialize()
@@ -244,8 +244,8 @@ struct YouTubeSourceAdapter: Sendable {
     public func resolvePlaylist(_ url: URL) async throws -> ResolvedPlaylist {
         guard let page = Self.playlistPage(url) else { throw ResolutionFailure.unsupportedPage }
         let finder = HelperExecutables(environment: environment)
-        guard let helper = finder.executable("yt-dlp", override: "AIRPLAYER_YTDLP"),
-              let deno = finder.executable("deno", override: "AIRPLAYER_DENO") else {
+        guard let helper = finder.executable("yt-dlp", override: "AIRTHROW_YTDLP"),
+              let deno = finder.executable("deno", override: "AIRTHROW_DENO") else {
             throw ResolutionFailure.unavailable
         }
         let scratch = cookies.materialize()

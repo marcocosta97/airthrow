@@ -3,7 +3,7 @@ import AVKit
 import AppKit
 import UniformTypeIdentifiers
 #if SWIFT_PACKAGE
-import AirPlayerCore
+import AirThrowCore
 #endif
 
 // Explicit alias selects the longstanding property wrapper when an SDK also

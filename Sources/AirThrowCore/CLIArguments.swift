@@ -33,33 +33,33 @@ public enum CLIArguments {
         let json = arguments.contains("--json")
         arguments.removeAll { $0 == "--json" }
         guard let first = arguments.first, let command = Command(rawValue: first) else {
-            throw AppFailure(.invalidRequest, "Unknown command. Run airplayer --help.")
+            throw AppFailure(.invalidRequest, "Unknown command. Run athrow --help.")
         }
         var request = Request(command)
         switch command {
         case .open:
-            guard arguments.count == 2 else { throw AppFailure(.invalidRequest, "Usage: airplayer open URL_OR_PATH") }
+            guard arguments.count == 2 else { throw AppFailure(.invalidRequest, "Usage: athrow open URL_OR_PATH") }
             let source = try MediaInput.source(arguments[1])
             // The app has a different working directory. Resolve relative paths
             // in the invoking shell before sending the request.
             request.url = source.isFileURL ? source.path : arguments[1]
         case .seek:
             guard arguments.count == 2, let seconds = Double(arguments[1]), seconds.isFinite, seconds >= 0 else {
-                throw AppFailure(.invalidRequest, "Usage: airplayer seek SECONDS (finite and nonnegative)")
+                throw AppFailure(.invalidRequest, "Usage: athrow seek SECONDS (finite and nonnegative)")
             }
             request.seconds = seconds
         case .source:
             guard arguments.count == 2, !arguments[1].isEmpty, arguments[1].utf8.count <= sourceIDLimit else {
-                throw AppFailure(.invalidRequest, "Usage: airplayer source ID_OR_automatic")
+                throw AppFailure(.invalidRequest, "Usage: athrow source ID_OR_automatic")
             }
             request.sourceID = arguments[1]
         case .conversion:
             guard arguments.count == 2, ["allow-video", "avoid-video"].contains(arguments[1]) else {
-                throw AppFailure(.invalidRequest, "Usage: airplayer conversion allow-video|avoid-video")
+                throw AppFailure(.invalidRequest, "Usage: athrow conversion allow-video|avoid-video")
             }
             request.allowVideoConversion = arguments[1] == "allow-video"
         default:
-            guard arguments.count == 1 else { throw AppFailure(.invalidRequest, "Unexpected arguments. Run airplayer --help.") }
+            guard arguments.count == 1 else { throw AppFailure(.invalidRequest, "Unexpected arguments. Run athrow --help.") }
         }
         return .run(Parsed(command: command, request: request, json: json, showsSources: command == .sources))
     }

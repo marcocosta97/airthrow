@@ -175,9 +175,9 @@ base = f'http://{args.bind}:{server.server_port}'
 try:
     binary = out / 'MediaChecks'
     run(['swiftc', '-swift-version', '6', '-parse-as-library',
-         *sorted((ROOT / 'Sources/AirPlayerCore').glob('*.swift')),
-         ROOT / 'Sources/AirPlayerApp/MediaDiagnostics.swift',
-         ROOT / 'Sources/AirPlayerApp/PlaybackController.swift',
+         *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
+         ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift',
+         ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
          ROOT / 'Tests/MediaChecks/main.swift', '-o', binary])
     result = run([binary, base, out / 'fixtures.json'], timeout=360)
     report = dict(macOS=platform.mac_ver()[0], machine=platform.machine(),

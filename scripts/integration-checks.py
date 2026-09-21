@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise a running AirPlayer with a loopback-only synthetic media server."""
+"""Exercise a running AirThrow with a loopback-only synthetic media server."""
 import http.server
 import json
 import pathlib

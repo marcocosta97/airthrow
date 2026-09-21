@@ -3,7 +3,7 @@ import AVFoundation
 import MediaPlayer
 import Combine
 #if SWIFT_PACKAGE
-import AirPlayerCore
+import AirThrowCore
 #endif
 
 @MainActor
@@ -1062,7 +1062,7 @@ final class PlaybackController: ObservableObject {
     }
 }
 
-/// Bridges the Settings cookie choice to the resolver. An `AIRPLAYER_*`
+/// Bridges the Settings cookie choice to the resolver. An `AIRTHROW_*`
 /// environment override wins over the saved preference so power users and the
 /// CLI can force a source without touching the UI.
 enum YouTubeCookiePreference {

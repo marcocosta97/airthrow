@@ -28,10 +28,10 @@ files = {}
 for path in sorted((root / 'Sources').rglob('*.swift')):
     relative = str(path.relative_to(root))
     files[relative] = add(relative, dict(isa='PBXFileReference', lastKnownFileType='sourcecode.swift', path=relative, sourceTree='<group>'))
-icon = add('Icon', dict(isa='PBXFileReference', lastKnownFileType='image.icns', path='Resources/AirPlayer.icns', sourceTree='<group>'))
+icon = add('Icon', dict(isa='PBXFileReference', lastKnownFileType='image.icns', path='Resources/AirThrow.icns', sourceTree='<group>'))
 plist = add('Info', dict(isa='PBXFileReference', lastKnownFileType='text.plist.xml', path='Resources/Info.plist', sourceTree='<group>'))
-app_product = add('AppProduct', dict(isa='PBXFileReference', explicitFileType='wrapper.application', path='AirPlayer.app', sourceTree='BUILT_PRODUCTS_DIR'))
-cli_product = add('CLIProduct', dict(isa='PBXFileReference', explicitFileType='compiled.mach-o.executable', path='airplayer', sourceTree='BUILT_PRODUCTS_DIR'))
+app_product = add('AppProduct', dict(isa='PBXFileReference', explicitFileType='wrapper.application', path='AirThrow.app', sourceTree='BUILT_PRODUCTS_DIR'))
+cli_product = add('CLIProduct', dict(isa='PBXFileReference', explicitFileType='compiled.mach-o.executable', path='athrow', sourceTree='BUILT_PRODUCTS_DIR'))
 products = add('Products', dict(isa='PBXGroup', children=[app_product, cli_product], name='Products', sourceTree='<group>'))
 main_group = add('MainGroup', dict(isa='PBXGroup', children=list(files.values()) + [plist, icon, products], sourceTree='<group>'))
 
@@ -48,8 +48,8 @@ def config_list(name, extra):
     return add(name + 'Configurations', dict(isa='XCConfigurationList', buildConfigurations=ids, defaultConfigurationIsVisible='0', defaultConfigurationName='Release'))
 
 project_configs = config_list('Project', {})
-app_configs = config_list('App', dict(PRODUCT_NAME='AirPlayer', PRODUCT_MODULE_NAME='AirPlayerApp', EXECUTABLE_NAME='AirPlayerApp', INFOPLIST_FILE='Resources/Info.plist', PRODUCT_BUNDLE_IDENTIFIER='app.airplayer.mac', CODE_SIGN_STYLE='Automatic', ENABLE_HARDENED_RUNTIME='YES', COMBINE_HIDPI_IMAGES='YES', ENABLE_USER_SCRIPT_SANDBOXING='NO'))
-cli_configs = config_list('CLI', dict(PRODUCT_NAME='airplayer', PRODUCT_MODULE_NAME='AirPlayerCLI', CODE_SIGN_STYLE='Automatic', ENABLE_HARDENED_RUNTIME='YES', SKIP_INSTALL='YES'))
+app_configs = config_list('App', dict(PRODUCT_NAME='AirThrow', PRODUCT_MODULE_NAME='AirThrowApp', EXECUTABLE_NAME='AirThrowApp', INFOPLIST_FILE='Resources/Info.plist', PRODUCT_BUNDLE_IDENTIFIER='app.airthrow.mac', CODE_SIGN_STYLE='Automatic', ENABLE_HARDENED_RUNTIME='YES', COMBINE_HIDPI_IMAGES='YES', ENABLE_USER_SCRIPT_SANDBOXING='NO'))
+cli_configs = config_list('CLI', dict(PRODUCT_NAME='athrow', PRODUCT_MODULE_NAME='AirThrowCLI', CODE_SIGN_STYLE='Automatic', ENABLE_HARDENED_RUNTIME='YES', SKIP_INSTALL='YES'))
 
 def source_phase(name, folders):
     builds = []
@@ -59,33 +59,33 @@ def source_phase(name, folders):
     return add(name + 'Sources', dict(isa='PBXSourcesBuildPhase', buildActionMask='2147483647', files=builds, runOnlyForDeploymentPostprocessing='0'))
 
 cli_target = ref('CLITarget')
-proxy = add('CLIProxy', dict(isa='PBXContainerItemProxy', containerPortal=ref('Project'), proxyType='1', remoteGlobalIDString=cli_target, remoteInfo='airplayer'))
+proxy = add('CLIProxy', dict(isa='PBXContainerItemProxy', containerPortal=ref('Project'), proxyType='1', remoteGlobalIDString=cli_target, remoteInfo='athrow'))
 dependency = add('CLIDependency', dict(isa='PBXTargetDependency', target=cli_target, targetProxy=proxy))
 embedded = add('EmbeddedCLI', dict(isa='PBXBuildFile', fileRef=cli_product, settings=dict(ATTRIBUTES=['CodeSignOnCopy'])))
 copy = add('CopyCLI', dict(isa='PBXCopyFilesBuildPhase', buildActionMask='2147483647', dstPath='', dstSubfolderSpec='6', files=[embedded], name='Embed CLI', runOnlyForDeploymentPostprocessing='0'))
-add('CLITarget', dict(isa='PBXNativeTarget', buildConfigurationList=cli_configs, buildPhases=[source_phase('CLI', ['AirPlayerCore', 'AirPlayerCLI'])], buildRules=[], dependencies=[], name='airplayer', productName='airplayer', productReference=cli_product, productType='com.apple.product-type.tool'))
+add('CLITarget', dict(isa='PBXNativeTarget', buildConfigurationList=cli_configs, buildPhases=[source_phase('CLI', ['AirThrowCore', 'AirThrowCLI'])], buildRules=[], dependencies=[], name='athrow', productName='athrow', productReference=cli_product, productType='com.apple.product-type.tool'))
 icon_build = add('IconBuild', dict(isa='PBXBuildFile', fileRef=icon))
 resources = add('AppResources', dict(isa='PBXResourcesBuildPhase', buildActionMask='2147483647', files=[icon_build], runOnlyForDeploymentPostprocessing='0'))
 commit_phase = add('BuildCommit', dict(isa='PBXShellScriptBuildPhase', buildActionMask='2147483647', files=[],
     name='Stamp Git commit', inputPaths=[], outputPaths=['$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/BuildCommit.txt'],
     alwaysOutOfDate='1', runOnlyForDeploymentPostprocessing='0', shellPath='/bin/bash',
     shellScript='bash "$SRCROOT/scripts/write-build-commit.sh" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/BuildCommit.txt"\n'))
-app_target = add('AppTarget', dict(isa='PBXNativeTarget', buildConfigurationList=app_configs, buildPhases=[source_phase('App', ['AirPlayerCore', 'AirPlayerApp']), resources, copy, commit_phase], buildRules=[], dependencies=[dependency], name='AirPlayer', productName='AirPlayer', productReference=app_product, productType='com.apple.product-type.application'))
+app_target = add('AppTarget', dict(isa='PBXNativeTarget', buildConfigurationList=app_configs, buildPhases=[source_phase('App', ['AirThrowCore', 'AirThrowApp']), resources, copy, commit_phase], buildRules=[], dependencies=[dependency], name='AirThrow', productName='AirThrow', productReference=app_product, productType='com.apple.product-type.application'))
 add('Project', dict(isa='PBXProject', attributes=dict(LastUpgradeCheck='1600'), buildConfigurationList=project_configs, compatibilityVersion='Xcode 14.0', developmentRegion='en', hasScannedForEncodings='0', knownRegions=['en', 'Base'], mainGroup=main_group, productRefGroup=products, projectDirPath='', projectRoot='', targets=[app_target, cli_target]))
-project = root / 'AirPlayer.xcodeproj'
+project = root / 'AirThrow.xcodeproj'
 project.mkdir(exist_ok=True)
 (project / 'project.pbxproj').write_text('// !$*UTF8*$!\n' + encode(dict(archiveVersion='1', classes={}, objectVersion='56', objects=objects, rootObject=ref('Project'))) + '\n')
 schemes = project / 'xcshareddata/xcschemes'
 schemes.mkdir(parents=True, exist_ok=True)
-(schemes / 'AirPlayer.xcscheme').write_text(f'''<?xml version="1.0" encoding="UTF-8"?>
+(schemes / 'AirThrow.xcscheme').write_text(f'''<?xml version="1.0" encoding="UTF-8"?>
 <Scheme LastUpgradeVersion="1600" version="1.3">
  <BuildAction parallelizeBuildables="YES" buildImplicitDependencies="YES"><BuildActionEntries>
   <BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="YES" buildForArchiving="YES" buildForAnalyzing="YES">
-   <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="{app_target}" BuildableName="AirPlayer.app" BlueprintName="AirPlayer" ReferencedContainer="container:AirPlayer.xcodeproj"/>
+   <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="{app_target}" BuildableName="AirThrow.app" BlueprintName="AirThrow" ReferencedContainer="container:AirThrow.xcodeproj"/>
   </BuildActionEntry>
  </BuildActionEntries></BuildAction>
  <LaunchAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" launchStyle="0" useCustomWorkingDirectory="NO" ignoresPersistentStateOnLaunch="NO" debugDocumentVersioning="YES" allowLocationSimulation="YES">
-  <BuildableProductRunnable runnableDebuggingMode="0"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="{app_target}" BuildableName="AirPlayer.app" BlueprintName="AirPlayer" ReferencedContainer="container:AirPlayer.xcodeproj"/></BuildableProductRunnable>
+  <BuildableProductRunnable runnableDebuggingMode="0"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="{app_target}" BuildableName="AirThrow.app" BlueprintName="AirThrow" ReferencedContainer="container:AirThrow.xcodeproj"/></BuildableProductRunnable>
  </LaunchAction>
  <AnalyzeAction buildConfiguration="Debug"/>
  <ArchiveAction buildConfiguration="Release" revealArchiveInOrganizer="YES"/>

@@ -95,9 +95,9 @@ binary = build / 'SourceChoiceChecks'
 server = None
 try:
     run(['swiftc', '-swift-version', '6', '-parse-as-library',
-         *sorted((ROOT / 'Sources/AirPlayerCore').glob('*.swift')),
-         ROOT / 'Sources/AirPlayerApp/MediaDiagnostics.swift',
-         ROOT / 'Sources/AirPlayerApp/PlaybackController.swift',
+         *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
+         ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift',
+         ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
          ROOT / 'Tests/SourceChoiceChecks/main.swift', '-o', binary], timeout=180)
     print(f'Built {binary}')
     if args.compile_only:

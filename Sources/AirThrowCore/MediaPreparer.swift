@@ -79,7 +79,7 @@ public final class PreparedMedia {
 
 /// An advisory lease prevents startup cleanup from deleting another active session's files.
 private final class PreparationWorkspace: @unchecked Sendable {
-    static let root = FileManager.default.temporaryDirectory.appendingPathComponent("airplayer-prepared-v1", isDirectory: true)
+    static let root = FileManager.default.temporaryDirectory.appendingPathComponent("athrow-prepared-v1", isDirectory: true)
     let directory: URL
     private let lease: Int32
     init() throws {
@@ -178,10 +178,10 @@ public struct MediaPreparer: Sendable {
     /// a control surface can label a job that has not produced media yet.
     public func prepare(_ source: ResolvedSource, mode: PreparationMode? = nil,
                         onPlan: (@Sendable (PlaybackPath) async -> Void)? = nil) async throws -> PreparedMedia {
-        let mode = mode ?? (environment["AIRPLAYER_PREPARATION_MODE"] == "complete-file" ? .completeFile : .progressiveHLS)
+        let mode = mode ?? (environment["AIRTHROW_PREPARATION_MODE"] == "complete-file" ? .completeFile : .progressiveHLS)
         try Task.checkCancellation()
         // Resolve a LAN address before downloading. Loopback requires an explicit test override.
-        let host = try environment["AIRPLAYER_MEDIA_HOST"] ?? MediaHTTPServer.localAddress()
+        let host = try environment["AIRTHROW_MEDIA_HOST"] ?? MediaHTTPServer.localAddress()
         do {
             if source.url.isFileURL && !source.needsPreparation {
                 let file = try MediaInput.localFile(source.url)
@@ -196,8 +196,8 @@ public struct MediaPreparer: Sendable {
                 return await PreparedMedia(server: server, sourceDuration: duration, playbackPath: .direct)
             }
             let finder = HelperExecutables(environment: environment)
-            guard let ffmpeg = finder.executable("ffmpeg", override: "AIRPLAYER_FFMPEG"),
-                  let ffprobe = finder.executable("ffprobe", override: "AIRPLAYER_FFPROBE") else {
+            guard let ffmpeg = finder.executable("ffmpeg", override: "AIRTHROW_FFMPEG"),
+                  let ffprobe = finder.executable("ffprobe", override: "AIRTHROW_FFPROBE") else {
                 throw PreparationFailure.unavailable
             }
             let videoInput = try await probe(source.url, headers: source.headers, executable: ffprobe)

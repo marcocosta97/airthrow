@@ -2,12 +2,12 @@ import AppKit
 import Combine
 import SwiftUI
 #if SWIFT_PACKAGE
-import AirPlayerCore
+import AirThrowCore
 #endif
 
 @main
 @MainActor
-struct AirPlayerMain {
+struct AirThrowMain {
     static func main() {
         let app = NSApplication.shared
         let delegate = AppDelegate()
@@ -46,13 +46,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         do {
             try server.start { [weak self] request, reply in
                 Task { @MainActor in
-                    guard let self else { reply(Response(error: AppFailure(.appUnavailable, "AirPlayer is shutting down."))); return }
+                    guard let self else { reply(Response(error: AppFailure(.appUnavailable, "AirThrow is shutting down."))); return }
                     reply(self.handle(request))
                 }
             }
         } catch {
             // A second copy should reveal the existing app rather than steal its socket.
-            if let existing = NSRunningApplication.runningApplications(withBundleIdentifier: "app.airplayer.mac").first(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }) {
+            if let existing = NSRunningApplication.runningApplications(withBundleIdentifier: "app.airthrow.mac").first(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }) {
                 existing.activate(options: [])
                 NSApp.terminate(nil)
                 return
@@ -100,7 +100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     @objc func showWindow() {
         if window == nil {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: ControllerMetrics.width, height: Self.controllerHeight), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
-            window.title = "AirPlayer"
+            window.title = "AirThrow"
             window.backgroundColor = SurfaceColor.window
             window.titlebarAppearsTransparent = true
             window.titlebarSeparatorStyle = .none
@@ -136,7 +136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 }
             }
 
-            let toolbar = NSToolbar(identifier: "AirPlayerToolbar")
+            let toolbar = NSToolbar(identifier: "AirThrowToolbar")
             toolbar.delegate = self
             toolbar.displayMode = .iconOnly
             toolbar.allowsUserCustomization = false
@@ -200,7 +200,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if settingsWindow == nil {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 560),
                                   styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            window.title = "AirPlayer Settings"
+            window.title = "AirThrow Settings"
             window.isReleasedWhenClosed = false
             window.contentView = NSHostingView(rootView: SettingsView(controller: controller, cookieStatus: cookieStatus))
             window.center()
@@ -285,7 +285,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let main = NSMenu()
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu()
-        let about = appMenu.addItem(withTitle: "About AirPlayer", action: #selector(showAbout), keyEquivalent: "")
+        let about = appMenu.addItem(withTitle: "About AirThrow", action: #selector(showAbout), keyEquivalent: "")
         about.target = self
         appMenu.addItem(.separator())
         let settings = appMenu.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
@@ -294,7 +294,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let show = appMenu.addItem(withTitle: "Show Controller", action: #selector(showWindow), keyEquivalent: "0")
         show.target = self
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Hide AirPlayer", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(withTitle: "Hide AirThrow", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenuItem.submenu = appMenu
         main.addItem(appMenuItem)
@@ -310,8 +310,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         NSApp.mainMenu = main
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        item.button?.image = NSImage(systemSymbolName: "airplay.video", accessibilityDescription: "AirPlayer")
-        item.button?.toolTip = "AirPlayer"
+        item.button?.image = NSImage(systemSymbolName: "airplay.video", accessibilityDescription: "AirThrow")
+        item.button?.toolTip = "AirThrow"
         let menu = NSMenu()
         // Rebuild from the latest observed snapshot when the menu opens. AppKit's
         // automatic validation would otherwise replace the model's enablement.
@@ -391,7 +391,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         case .stop: "Stop"
         case .skipForward: "Forward 10 Seconds"
         case .next: "Next Playlist Item"
-        case .showController: "Show AirPlayer"
+        case .showController: "Show AirThrow"
         case .quit: "Quit"
         }
     }

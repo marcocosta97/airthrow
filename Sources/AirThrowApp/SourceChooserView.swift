@@ -1,6 +1,6 @@
 import SwiftUI
 #if SWIFT_PACKAGE
-import AirPlayerCore
+import AirThrowCore
 #endif
 
 private typealias ChooserState<Value> = SwiftUI.State<Value>

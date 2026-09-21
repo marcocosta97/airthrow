@@ -1,32 +1,32 @@
 import AppKit
 import Foundation
 #if SWIFT_PACKAGE
-import AirPlayerCore
+import AirThrowCore
 #endif
 
 @main
-struct AirPlayerCLI {
+struct AirThrowCLI {
     private static let helpText = """
-    AirPlayer — control the native AirPlay video session
+    AirThrow — control the native AirPlay video session
 
     Usage:
-      airplayer open SOURCE     Load a URL, YouTube playlist, or local file, paused
-      airplayer play            Start/resume on the selected video receiver
-      airplayer pause           Pause the current session
-      airplayer seek SECONDS    Seek to an absolute position
-      airplayer previous        Load the previous playlist item
-      airplayer next            Load the next playlist item
-      airplayer stop            Stop and unload the video
-      airplayer status [--json] Show observed playback state
-      airplayer sources         List available quality/source choices and their IDs
-      airplayer source ID       Reload a listed source, paused (or use automatic)
-      airplayer conversion allow-video|avoid-video
+      athrow open SOURCE     Load a URL, YouTube playlist, or local file, paused
+      athrow play            Start/resume on the selected video receiver
+      athrow pause           Pause the current session
+      athrow seek SECONDS    Seek to an absolute position
+      athrow previous        Load the previous playlist item
+      athrow next            Load the next playlist item
+      athrow stop            Stop and unload the video
+      athrow status [--json] Show observed playback state
+      athrow sources         List available quality/source choices and their IDs
+      athrow source ID       Reload a listed source, paused (or use automatic)
+      athrow conversion allow-video|avoid-video
                                 Set video conversion preference for future loads
-      airplayer show            Open the controller and choose a receiver
+      athrow show            Open the controller and choose a receiver
 
     --json is available on every command. Receiver selection uses the app's
-    AirPlay picker. open and show launch AirPlayer if needed.
-    Set AIRPLAYER_APP to an explicit AirPlayer.app path for development.
+    AirPlay picker. open and show launch AirThrow if needed.
+    Set AIRTHROW_APP to an explicit AirThrow.app path for development.
     """
 
     @MainActor static func main() async {
@@ -47,7 +47,7 @@ struct AirPlayerCLI {
                 if let error = response.error { exit(error.code.exitCode) }
             }
         } catch {
-            let failure = error as? AppFailure ?? AppFailure(.appUnavailable, "Could not communicate with AirPlayer.")
+            let failure = error as? AppFailure ?? AppFailure(.appUnavailable, "Could not communicate with AirThrow.")
             output(Response(error: failure), json: json)
             exit(failure.code.exitCode)
         }
@@ -57,17 +57,17 @@ struct AirPlayerCLI {
         let executable = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
         let directory = executable.deletingLastPathComponent()
         var candidates: [URL] = []
-        if let explicit = ProcessInfo.processInfo.environment["AIRPLAYER_APP"] {
+        if let explicit = ProcessInfo.processInfo.environment["AIRTHROW_APP"] {
             candidates.append(URL(fileURLWithPath: explicit))
         } else {
-            candidates += [directory.appendingPathComponent("AirPlayer.app"),
+            candidates += [directory.appendingPathComponent("AirThrow.app"),
                            directory.deletingLastPathComponent().deletingLastPathComponent(),
-                           URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Applications/AirPlayer.app"),
-                           URL(fileURLWithPath: "/Applications/AirPlayer.app")]
+                           URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Applications/AirThrow.app"),
+                           URL(fileURLWithPath: "/Applications/AirThrow.app")]
         }
         guard let app = candidates.first(where: {
-            $0.pathExtension == "app" && FileManager.default.fileExists(atPath: $0.appendingPathComponent("Contents/MacOS/AirPlayerApp").path)
-        }) else { throw AppFailure(.appUnavailable, "AirPlayer.app was not found. Build/install the app or set AIRPLAYER_APP to its path.") }
+            $0.pathExtension == "app" && FileManager.default.fileExists(atPath: $0.appendingPathComponent("Contents/MacOS/AirThrowApp").path)
+        }) else { throw AppFailure(.appUnavailable, "AirThrow.app was not found. Build/install the app or set AIRTHROW_APP to its path.") }
         let config = NSWorkspace.OpenConfiguration()
         config.activates = true
         _ = try await NSWorkspace.shared.openApplication(at: app, configuration: config)
@@ -76,7 +76,7 @@ struct AirPlayerCLI {
             if ready { return }
             try await Task.sleep(for: .milliseconds(100))
         }
-        throw AppFailure(.appUnavailable, "AirPlayer launched but its command endpoint is unavailable.")
+        throw AppFailure(.appUnavailable, "AirThrow launched but its command endpoint is unavailable.")
     }
 
     private static func output(_ response: Response, json: Bool, showSources: Bool = false) {

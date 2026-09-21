@@ -106,7 +106,7 @@ struct ResolverChecks {
         let combined: [String: Any] = ["url": "https://media.example/video?signature=secret", "protocol": "https",
             "vcodec": "avc1.64001f", "acodec": "mp4a.40.2", "ext": "mp4", "height": 720]
         let raw = try metadata([combined])
-        let temp = FileManager.default.temporaryDirectory.appendingPathComponent("airplayer-resolver-" + UUID().uuidString)
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent("athrow-resolver-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temp) }
         func helper(_ name: String, _ body: String) throws -> String {
@@ -115,7 +115,7 @@ struct ResolverChecks {
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: path.path)
             return path.path
         }
-        let absent = SourceResolver(environment: ["AIRPLAYER_YTDLP": "/missing/yt-dlp", "AIRPLAYER_DENO": "/missing/deno"])
+        let absent = SourceResolver(environment: ["AIRTHROW_YTDLP": "/missing/yt-dlp", "AIRTHROW_DENO": "/missing/deno"])
         let localMP4 = temp.appendingPathComponent("local video.mp4")
         let localMKV = temp.appendingPathComponent("local.mkv")
         let localHLS = temp.appendingPathComponent("local.m3u8")
@@ -548,21 +548,21 @@ struct ResolverChecks {
         try check(playlist.entries[1].url == nil && playlist.entries[2].url == nil && playlist.truncated,
                   "Unsupported playlist entries or truncation were not recorded")
         let playlistHelper = try helper("playlist", "printf '%s\\n' \"$@\" > '\(temp.path)/playlist-args'\ncat <<'JSON'\n\(String(decoding: playlistData, as: UTF8.self))\nJSON\n")
-        let playlistResolver = SourceResolver(environment: ["AIRPLAYER_YTDLP": playlistHelper, "AIRPLAYER_DENO": "/usr/bin/true"])
+        let playlistResolver = SourceResolver(environment: ["AIRTHROW_YTDLP": playlistHelper, "AIRTHROW_DENO": "/usr/bin/true"])
         _ = try await playlistResolver.resolvePlaylist(playlistPage)
         let playlistArgs = try String(contentsOf: temp.appendingPathComponent("playlist-args"), encoding: .utf8)
         try check(playlistArgs.contains("--flat-playlist") && playlistArgs.contains("--playlist-end"),
                   "Playlist helper was not bounded to flat metadata extraction")
         print("PASS dedicated playlist parsing, ordering, unavailable entries, Mix rejection and queue limit")
 
-        try check(YouTubeCookies.fromEnvironment(["AIRPLAYER_YTDLP_COOKIES": "/tmp/x.txt"]) == .file(URL(fileURLWithPath: "/tmp/x.txt")),
+        try check(YouTubeCookies.fromEnvironment(["AIRTHROW_YTDLP_COOKIES": "/tmp/x.txt"]) == .file(URL(fileURLWithPath: "/tmp/x.txt")),
                   "Cookie file override was not parsed")
-        try check(YouTubeCookies.fromEnvironment(["AIRPLAYER_YTDLP_COOKIES_FROM_BROWSER": "Safari"]) == .browser("safari"),
+        try check(YouTubeCookies.fromEnvironment(["AIRTHROW_YTDLP_COOKIES_FROM_BROWSER": "Safari"]) == .browser("safari"),
                   "Browser override was not normalized")
-        try check(YouTubeCookies.fromEnvironment(["AIRPLAYER_YTDLP_COOKIES_FROM_BROWSER": "not-a-browser"]) == .none,
+        try check(YouTubeCookies.fromEnvironment(["AIRTHROW_YTDLP_COOKIES_FROM_BROWSER": "not-a-browser"]) == .none,
                   "Unknown browser override was accepted")
-        try check(YouTubeCookies.fromEnvironment(["AIRPLAYER_YTDLP_COOKIES": "/tmp/x.txt",
-                                                  "AIRPLAYER_YTDLP_COOKIES_FROM_BROWSER": "chrome"]) == .file(URL(fileURLWithPath: "/tmp/x.txt")),
+        try check(YouTubeCookies.fromEnvironment(["AIRTHROW_YTDLP_COOKIES": "/tmp/x.txt",
+                                                  "AIRTHROW_YTDLP_COOKIES_FROM_BROWSER": "chrome"]) == .file(URL(fileURLWithPath: "/tmp/x.txt")),
                   "File override did not take precedence")
         try check(YouTubeCookies.fromEnvironment([:]) == .none, "Missing overrides enabled cookies")
         for domain in [".youtube.com", "youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", ".youtube-nocookie.com"] {
@@ -648,7 +648,7 @@ struct ResolverChecks {
         \(String(decoding: raw, as: UTF8.self))
         JSON
         """)
-        let cookieResolver = SourceResolver(environment: ["AIRPLAYER_YTDLP": cookieHelper, "AIRPLAYER_DENO": "/usr/bin/true"],
+        let cookieResolver = SourceResolver(environment: ["AIRTHROW_YTDLP": cookieHelper, "AIRTHROW_DENO": "/usr/bin/true"],
                                             cookies: .file(cookiesFile))
         _ = try await cookieResolver.resolve(page)
         let cookieArgs = try String(contentsOf: temp.appendingPathComponent("cookie-args"), encoding: .utf8)
@@ -668,7 +668,7 @@ struct ResolverChecks {
         print("PASS cookie materialization, YouTube-only handoff and scratch cleanup")
 
         let good = try helper("good", "printf '%s\\n' \"$@\" > '\(temp.path)/args'\ncat <<'JSON'\n\(String(decoding: raw, as: UTF8.self))\nJSON\n")
-        let resolver = SourceResolver(environment: ["AIRPLAYER_YTDLP": good, "AIRPLAYER_DENO": "/usr/bin/true"])
+        let resolver = SourceResolver(environment: ["AIRTHROW_YTDLP": good, "AIRTHROW_DENO": "/usr/bin/true"])
         _ = try await resolver.resolve(page)
         let args = try String(contentsOf: temp.appendingPathComponent("args"), encoding: .utf8)
         for flag in ["--ignore-config", "--no-plugin-dirs", "--no-cache-dir", "--simulate", "--dump-single-json", "--no-remote-components"] {
@@ -681,7 +681,7 @@ struct ResolverChecks {
         try check(!YouTubeSourceAdapter.isSignInChallenge(Data("ERROR: unable to download".utf8)),
                   "Unrelated helper output was treated as a sign-in challenge")
         let signInHelper = try helper("signin", "echo 'ERROR: [youtube] x: Sign in to confirm you’re not a bot.' >&2; exit 1\n")
-        let signInResolver = SourceResolver(environment: ["AIRPLAYER_YTDLP": signInHelper, "AIRPLAYER_DENO": "/usr/bin/true"])
+        let signInResolver = SourceResolver(environment: ["AIRTHROW_YTDLP": signInHelper, "AIRTHROW_DENO": "/usr/bin/true"])
         try await expect(.signInRequired) { _ = try await signInResolver.resolve(page) }
         print("PASS sign-in challenge classification")
         let bad = try helper("bad", "echo 'secret signed URL' >&2; exit 1\n")

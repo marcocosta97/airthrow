@@ -6,7 +6,7 @@ public enum LocalSocket {
     public static var directory: String {
         // Darwin's per-user temporary directory is short enough for sockaddr_un.
         let root = FileManager.default.temporaryDirectory.path
-        return root + "/airplayer-\(getuid())"
+        return root + "/athrow-\(getuid())"
     }
     public static var path: String { directory + "/control.sock" }
 
@@ -60,7 +60,7 @@ public enum LocalSocket {
                     Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
                 }
             }
-            guard result == 0, sameUser(fd) else { throw unavailable("AirPlayer is not running. Use ‘airplayer open URL’ or ‘airplayer show’.") }
+            guard result == 0, sameUser(fd) else { throw unavailable("AirThrow is not running. Use ‘athrow open URL’ or ‘athrow show’.") }
             return fd
         } catch { Darwin.close(fd); throw error }
     }
@@ -111,7 +111,7 @@ public enum LocalSocket {
 /// it may dispatch to the main actor without blocking the app's UI.
 public final class CommandServer: @unchecked Sendable {
     public typealias Handler = @Sendable (Request, @escaping @Sendable (Response) -> Void) -> Void
-    private let queue = DispatchQueue(label: "app.airplayer.commands", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "app.airthrow.commands", qos: .userInitiated)
     private var source: DispatchSourceRead?
     private var descriptor: Int32 = -1
     private var lock: Int32 = -1
@@ -129,7 +129,7 @@ public final class CommandServer: @unchecked Sendable {
             guard lock >= 0 else { throw LocalSocket.unavailable("Cannot lock the command endpoint.") }
             guard flock(lock, LOCK_EX | LOCK_NB) == 0 else {
                 Darwin.close(lock)
-                throw LocalSocket.unavailable("Another AirPlayer instance already owns this session.")
+                throw LocalSocket.unavailable("Another AirThrow instance already owns this session.")
             }
             let fd = socket(AF_UNIX, SOCK_STREAM, 0)
             guard fd >= 0 else { Darwin.close(lock); throw LocalSocket.unavailable("Cannot create the command endpoint.") }
@@ -159,7 +159,7 @@ public final class CommandServer: @unchecked Sendable {
                         let box = ReplyBox()
                         handler(request) { box.set($0) }
                         guard box.semaphore.wait(timeout: .now() + 2) == .success, let reply = box.get() else {
-                            throw LocalSocket.unavailable("AirPlayer did not respond in time.")
+                            throw LocalSocket.unavailable("AirThrow did not respond in time.")
                         }
                         try LocalSocket.writeLine(JSONEncoder().encode(reply), to: client)
                     } catch {

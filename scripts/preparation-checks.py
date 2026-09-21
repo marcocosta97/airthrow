@@ -130,8 +130,8 @@ threading.Thread(target=server.serve_forever, daemon=True).start()
 try:
     if "--progressive-only" not in sys.argv:
         binary = OUT / 'PreparationChecks'
-        run(['swiftc', '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirPlayerCore').glob('*.swift')),
-             ROOT / 'Sources/AirPlayerApp/MediaDiagnostics.swift', ROOT / 'Sources/AirPlayerApp/PlaybackController.swift',
+        run(['swiftc', '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
+             ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
              ROOT / 'Tests/PreparationChecks/main.swift', '-o', binary], timeout=90)
         checks = run([binary, f'http://127.0.0.1:{server.server_port}', OUT], timeout=180)
         print(checks.stdout, end='')
@@ -179,8 +179,8 @@ try:
         print('PASS converted output is SDR H.264 yuv420p <=1080p/60 and AAC LC <=48 kHz mono/stereo')
         print('PASS high-resolution downscale, 100->60 fps cap, software fallback and 10-bit refusal')
     progressive = OUT / 'ProgressiveChecks'
-    run(['swiftc', '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirPlayerCore').glob('*.swift')),
-         ROOT / 'Sources/AirPlayerApp/MediaDiagnostics.swift', ROOT / 'Sources/AirPlayerApp/PlaybackController.swift',
+    run(['swiftc', '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
+         ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
          ROOT / 'Tests/ProgressiveChecks/main.swift', '-o', progressive], timeout=90)
     print(run([progressive, f'http://127.0.0.1:{server.server_port}', OUT], timeout=140).stdout, end='')
     def video_frames(path):

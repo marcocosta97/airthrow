@@ -121,7 +121,7 @@ struct SourceChoiceChecks {
         // A real in-place delivery session for the preparation path. It avoids a
         // live remux/convert while still giving the controller a genuine
         // PreparedMedia, never a fabricated one.
-        let preparer = MediaPreparer(environment: ["AIRPLAYER_MEDIA_HOST": "127.0.0.1"])
+        let preparer = MediaPreparer(environment: ["AIRTHROW_MEDIA_HOST": "127.0.0.1"])
         let prepareSource: @Sendable (ResolvedSource) async throws -> PreparedMedia = { _ in
             try await preparer.prepare(ResolvedSource(url: localVideo, title: localVideo.lastPathComponent,
                                                       needsDelivery: true))

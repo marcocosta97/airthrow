@@ -5,7 +5,7 @@ import Foundation
 // Usage: swift scripts/add-test-audio.swift INPUT.mp4 OUTPUT.mp4
 let source = AVURLAsset(url: URL(fileURLWithPath: CommandLine.arguments[1]))
 let output = URL(fileURLWithPath: CommandLine.arguments[2])
-let wav = FileManager.default.temporaryDirectory.appendingPathComponent("airplayer-tone-\(UUID()).wav")
+let wav = FileManager.default.temporaryDirectory.appendingPathComponent("athrow-tone-\(UUID()).wav")
 defer { try? FileManager.default.removeItem(at: wav) }
 let format = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 1)!
 let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 88_200)!

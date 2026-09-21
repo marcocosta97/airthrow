@@ -37,7 +37,7 @@ struct PreparationChecks {
         let base = CommandLine.arguments[1]
         let directory = URL(fileURLWithPath: CommandLine.arguments[2])
         var environment = ProcessInfo.processInfo.environment
-        environment["AIRPLAYER_MEDIA_HOST"] = "127.0.0.1"
+        environment["AIRTHROW_MEDIA_HOST"] = "127.0.0.1"
         let preparer = MediaPreparer(environment: environment)
         let session = URLSession(configuration: .ephemeral)
         defer { session.invalidateAndCancel() }
@@ -51,7 +51,7 @@ struct PreparationChecks {
         let source = ResolvedSource(url: URL(string: base + "/combined.mkv")!)
         var prepared: PreparedMedia? = try await preparer.prepare(source, mode: .completeFile)
         let endpoint = prepared!.url
-        let cache = FileManager.default.temporaryDirectory.appendingPathComponent("airplayer-prepared-v1")
+        let cache = FileManager.default.temporaryDirectory.appendingPathComponent("athrow-prepared-v1")
         let active = Set(try FileManager.default.contentsOfDirectory(atPath: cache.path))
         let abandoned = cache.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: abandoned, withIntermediateDirectories: false)
@@ -173,7 +173,7 @@ struct PreparationChecks {
         // A helper that refuses the hardware preflight still converts in software;
         // one that refuses every H.264 preflight fails before any conversion.
         var softwareEnvironment = environment
-        softwareEnvironment["AIRPLAYER_FFMPEG"] = directory.appendingPathComponent("software-ffmpeg").path
+        softwareEnvironment["AIRTHROW_FFMPEG"] = directory.appendingPathComponent("software-ffmpeg").path
         let softwareSource = ResolvedSource(url: URL(string: base + "/vp9-opus.mkv")!,
                                             needsPreparation: true, conversionPolicy: .allowVideo)
         let softwareConverted = try await MediaPreparer(environment: softwareEnvironment)
@@ -183,7 +183,7 @@ struct PreparationChecks {
         try softwareData.write(to: directory.appendingPathComponent("software-converted.mp4"))
         softwareConverted.stop()
         var noEncoderEnvironment = environment
-        noEncoderEnvironment["AIRPLAYER_FFMPEG"] = directory.appendingPathComponent("no-encoder-ffmpeg").path
+        noEncoderEnvironment["AIRTHROW_FFMPEG"] = directory.appendingPathComponent("no-encoder-ffmpeg").path
         try await expect(.preparationFailed) {
             _ = try await MediaPreparer(environment: noEncoderEnvironment)
                 .prepare(softwareSource, mode: .completeFile)
@@ -208,7 +208,7 @@ struct PreparationChecks {
         let shortLimit = MediaPreparer(environment: environment, maximumBytes: 1000)
         try await expect(.preparationLimit) { _ = try await shortLimit.prepare(source) }
         var missingEnvironment = environment
-        missingEnvironment["AIRPLAYER_FFMPEG"] = "/missing/ffmpeg"
+        missingEnvironment["AIRTHROW_FFMPEG"] = "/missing/ffmpeg"
         let missingHelper = MediaPreparer(environment: missingEnvironment)
         try await expect(.preparerUnavailable) { _ = try await missingHelper.prepare(source) }
         print("PASS size limit and missing helpers")
@@ -218,7 +218,7 @@ struct PreparationChecks {
         try "#!/bin/sh\nsleep 20 &\nwait\n".write(to: slow, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: slow.path)
         var slowEnvironment = environment
-        slowEnvironment["AIRPLAYER_FFMPEG"] = slow.path
+        slowEnvironment["AIRTHROW_FFMPEG"] = slow.path
         let slowPreparer = MediaPreparer(environment: slowEnvironment)
         let cancelled = Task { try await slowPreparer.prepare(source) }
         try await Task.sleep(for: .milliseconds(600))

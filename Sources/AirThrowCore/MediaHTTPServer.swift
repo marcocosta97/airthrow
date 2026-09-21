@@ -92,7 +92,7 @@ public final class MediaHTTPServer {
 
     /// Prefer the system's primary LAN interface. Never advertise localhost automatically.
     nonisolated public static func localAddress() throws -> String {
-        let store = SCDynamicStoreCreate(nil, "AirPlayer" as CFString, nil, nil)
+        let store = SCDynamicStoreCreate(nil, "AirThrow" as CFString, nil, nil)
         let primary = (SCDynamicStoreCopyValue(store, "State:/Network/Global/IPv4" as CFString)
                        as? [String: Any])?["PrimaryInterface"] as? String
         var interfaces: UnsafeMutablePointer<ifaddrs>?

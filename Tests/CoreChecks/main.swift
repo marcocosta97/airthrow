@@ -1,6 +1,6 @@
 import Foundation
 import Darwin
-import AirPlayerCore
+import AirThrowCore
 
 struct CheckFailure: Error { let message: String }
 func check(_ condition: @autoclosure () throws -> Bool, _ message: String) throws {

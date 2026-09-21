@@ -16,11 +16,11 @@ struct ProgressiveChecks {
         let base = CommandLine.arguments[1]
         let directory = URL(fileURLWithPath: CommandLine.arguments[2])
         var environment = ProcessInfo.processInfo.environment
-        environment["AIRPLAYER_MEDIA_HOST"] = "127.0.0.1"
-        environment["AIRPLAYER_FFMPEG"] = directory.appendingPathComponent("paced-ffmpeg").path
+        environment["AIRTHROW_MEDIA_HOST"] = "127.0.0.1"
+        environment["AIRTHROW_FFMPEG"] = directory.appendingPathComponent("paced-ffmpeg").path
         let preparer = MediaPreparer(environment: environment)
         let source = ResolvedSource(url: URL(string: base + "/long.mp4")!, needsPreparation: true)
-        let cache = FileManager.default.temporaryDirectory.appendingPathComponent("airplayer-prepared-v1")
+        let cache = FileManager.default.temporaryDirectory.appendingPathComponent("athrow-prepared-v1")
         MediaPreparer.cleanAbandonedFiles()
         let originalWorkspaces = Set((try? FileManager.default.contentsOfDirectory(atPath: cache.path)) ?? [])
         let session = URLSession(configuration: .ephemeral)
@@ -85,14 +85,14 @@ struct ProgressiveChecks {
         print("PASS progressive readiness, atomic playlist/segment delivery, finite ENDLIST; observed readiness: \(String(format: "%.2f", readySeconds))s")
 
         var fallbackEnvironment = environment
-        fallbackEnvironment["AIRPLAYER_FFMPEG"] = directory.appendingPathComponent("fallback-ffmpeg").path
+        fallbackEnvironment["AIRTHROW_FFMPEG"] = directory.appendingPathComponent("fallback-ffmpeg").path
         let fallback = try await MediaPreparer(environment: fallbackEnvironment).prepare(source)
         try check(fallback.url.pathExtension == "mp4", "Startup failure did not use complete-file fallback")
         fallback.stop()
         print("PASS complete-file fallback before handoff")
 
         var hardwareFailureEnvironment = environment
-        hardwareFailureEnvironment["AIRPLAYER_FFMPEG"] = directory.appendingPathComponent("hardware-failure-ffmpeg").path
+        hardwareFailureEnvironment["AIRTHROW_FFMPEG"] = directory.appendingPathComponent("hardware-failure-ffmpeg").path
         let recovered = try await MediaPreparer(environment: hardwareFailureEnvironment).prepare(
             ResolvedSource(url: URL(string: base + "/vp9-opus.mkv")!, needsPreparation: true,
                            conversionPolicy: .allowVideo))
@@ -111,7 +111,7 @@ struct ProgressiveChecks {
         try check(timedFallback.url.pathExtension == "mp4", "Startup deadline did not use complete-file fallback")
         timedFallback.stop()
         var limitedEnvironment = environment
-        limitedEnvironment["AIRPLAYER_FFMPEG"] = directory.appendingPathComponent("oversized-ffmpeg").path
+        limitedEnvironment["AIRTHROW_FFMPEG"] = directory.appendingPathComponent("oversized-ffmpeg").path
         do {
             _ = try await MediaPreparer(environment: limitedEnvironment, maximumBytes: 2 * 1024 * 1024).prepare(source)
             try check(false, "Unfinished HLS segment escaped aggregate size limit")
@@ -186,7 +186,7 @@ struct ProgressiveChecks {
         print("PASS paused native HLS readiness, finite timeline, bounded seek and replacement/Stop/quit cleanup")
 
         var failedEnvironment = environment
-        failedEnvironment["AIRPLAYER_FFMPEG"] = directory.appendingPathComponent("failing-ffmpeg").path
+        failedEnvironment["AIRTHROW_FFMPEG"] = directory.appendingPathComponent("failing-ffmpeg").path
         let failingPreparer = MediaPreparer(environment: failedEnvironment)
         let failingController = PlaybackController(resolveSource: { _ in source }, prepareSource: { try await failingPreparer.prepare($0) })
         try failingController.load("https://example.com/video")
