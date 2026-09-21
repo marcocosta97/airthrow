@@ -259,6 +259,169 @@ let tests: [(String, () throws -> Void)] = [
         chmod(directory, 0o755)
         defer { rmdir(directory) }
         try rejects { try LocalSocket.prepareDirectory(directory) }
+    }),
+    ("source option protocol privacy and compatibility", {
+        // A protocol-v1 status that predates the chooser fields still decodes, and
+        // the new fields stay absent rather than being invented.
+        let legacy = Data(#"{"state":"idle","externalPlaybackActive":false,"seekableRanges":[],"title":"No video loaded","isLive":false}"#.utf8)
+        let decoded = try JSONDecoder().decode(PlaybackSnapshot.self, from: legacy)
+        try check(decoded.sources == nil && decoded.selectedSourceID == nil && decoded.allowVideoConversion == nil,
+                  "Legacy status invented source chooser fields")
+        var status = PlaybackSnapshot()
+        status.playbackPath = .remux
+        status.sources = [
+            SourceOptionSnapshot(id: "session-0", quality: "1080p maximum (adaptive)", audio: "English",
+                                 playbackPath: .remux, unavailableReason: nil),
+            SourceOptionSnapshot(id: "session-1", quality: "Quality unknown", audio: nil,
+                                 playbackPath: .videoConversion,
+                                 unavailableReason: "Video conversion is off.")
+        ]
+        status.selectedSourceID = "session-1"
+        status.allowVideoConversion = true
+        let data = try JSONEncoder().encode(status)
+        try check(try JSONDecoder().decode(PlaybackSnapshot.self, from: data) == status,
+                  "Source chooser status did not round-trip")
+        // The presentation list is session-scoped and URL-free by construction.
+        let encoded = String(decoding: data, as: UTF8.self)
+        for leaked in ["http", "://", "token", "Authorization", "provider", ".com"] {
+            try check(!encoded.contains(leaked), "Source status leaked \(leaked)")
+        }
+    }),
+    ("candidate identity is URL-free", {
+        // Identity is an opaque hash of presentation metadata. It must never leak a
+        // URL, query, header or title, and it must stay stable when only the
+        // expiring media URL or request headers change. Provider identifiers
+        // survive only when an adapter supplies them explicitly.
+        let signed = URL(string: "https://cdn.example.com/private/movie.mp4?token=secret-value")!
+        let derived = MediaCandidate(
+            source: ResolvedSource(url: signed, title: "Example", headers: ["Authorization": "secret-value"],
+                                   delivery: .hls),
+            height: 1080, audioDescription: "English")
+        for leaked in ["cdn.example.com", "secret-value", "movie", "private", "Example", "English", "://", "/"] {
+            try check(!derived.id.contains(leaked), "Candidate identity leaked \(leaked)")
+        }
+        try check(derived.id == derived.id.lowercased(), "Candidate identity was not normalized")
+        let rotated = MediaCandidate(
+            source: ResolvedSource(url: URL(string: "https://other.example.net/x/y.m3u8?t=rotated")!,
+                                   title: "Example", delivery: .hls),
+            height: 1080, audioDescription: "English")
+        try check(derived.id == rotated.id, "Candidate identity changed with only the URL and headers")
+        let differentQuality = MediaCandidate(source: ResolvedSource(url: signed, title: "Example", delivery: .hls),
+                                              height: 720, audioDescription: "English")
+        let differentAudio = MediaCandidate(source: ResolvedSource(url: signed, title: "Example", delivery: .hls),
+                                            height: 1080, audioDescription: "Spanish")
+        try check(derived.id != differentQuality.id && derived.id != differentAudio.id,
+                  "Candidate identity ignored presentation metadata")
+        let explicit = MediaCandidate(source: ResolvedSource(url: signed), id: "format-299", height: 1080)
+        try check(explicit.id == "format-299", "Explicit adapter identity was replaced")
+    }),
+    ("CLI arguments parse source commands and JSON", {
+        guard case .run(let sources) = try CLIArguments.parse(["sources"]) else {
+            throw CheckFailure(message: "sources did not parse")
+        }
+        try check(sources.command == .sources && sources.request.command == .sources,
+                  "sources command was lost")
+        try check(sources.showsSources && !sources.json, "sources metadata was wrong")
+
+        guard case .run(let jsonSources) = try CLIArguments.parse(["sources", "--json"]) else {
+            throw CheckFailure(message: "sources --json did not parse")
+        }
+        try check(jsonSources.json && jsonSources.showsSources, "--json was not captured for sources")
+
+        guard case .run(let source) = try CLIArguments.parse(["source", "automatic"]) else {
+            throw CheckFailure(message: "source did not parse")
+        }
+        try check(source.request.sourceID == "automatic", "source id was not forwarded")
+        try check(!source.showsSources && !source.json, "source metadata was wrong")
+
+        guard case .run(let boundary) = try CLIArguments.parse(["source", String(repeating: "a", count: CLIArguments.sourceIDLimit)]) else {
+            throw CheckFailure(message: "boundary source id was rejected")
+        }
+        try check(boundary.request.sourceID?.utf8.count == CLIArguments.sourceIDLimit,
+                  "boundary source id changed")
+
+        for invalid in [["sources", "extra"], ["source"], ["source", "id", "extra"], ["source", ""],
+                        ["source", String(repeating: "a", count: CLIArguments.sourceIDLimit + 1)],
+                        ["unknown"], ["--json"], ["status", "extra"]] {
+            try rejects { _ = try CLIArguments.parse(invalid) }
+        }
+    }),
+    ("CLI arguments parse conversion and shared flags", {
+        guard case .run(let allow) = try CLIArguments.parse(["conversion", "allow-video"]) else {
+            throw CheckFailure(message: "conversion allow-video did not parse")
+        }
+        try check(allow.request.allowVideoConversion == true && allow.command == .conversion,
+                  "allow-video was not captured")
+
+        guard case .run(let avoid) = try CLIArguments.parse(["conversion", "avoid-video"]) else {
+            throw CheckFailure(message: "conversion avoid-video did not parse")
+        }
+        try check(avoid.request.allowVideoConversion == false, "avoid-video was not captured")
+
+        for valid in [["conversion", "allow-video", "--json"], ["--json", "conversion", "avoid-video"],
+                      ["status", "--json"], ["play", "--json"]] {
+            guard case .run(let parsed) = try CLIArguments.parse(valid) else {
+                throw CheckFailure(message: "\(valid) did not parse")
+            }
+            try check(parsed.json, "\(valid) lost the --json flag")
+        }
+
+        for invalid in [["conversion"], ["conversion", "maybe"],
+                        ["conversion", "allow-video", "extra"], ["conversion", "--json"]] {
+            try rejects { _ = try CLIArguments.parse(invalid) }
+        }
+    }),
+    ("CLI arguments preserve help, open, and seek behavior", {
+        for help in [[], ["--help"], ["-h"], ["status", "--help"], ["open", "--help"]] {
+            guard case .help = try CLIArguments.parse(help) else {
+                throw CheckFailure(message: "\(help) did not request help")
+            }
+        }
+
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let directory = root.appendingPathComponent(".build/cli-args-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let original = FileManager.default.currentDirectoryPath
+        defer {
+            FileManager.default.changeCurrentDirectoryPath(original)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let name = "clip \(UUID().uuidString.prefix(6)).mp4"
+        let file = directory.appendingPathComponent(name)
+        try Data("media".utf8).write(to: file)
+        let expected = file.standardizedFileURL.resolvingSymlinksInPath().path
+        try check(FileManager.default.changeCurrentDirectoryPath(directory.path),
+                  "Could not enter the fixture directory")
+
+        guard case .run(let relative) = try CLIArguments.parse(["open", name]) else {
+            throw CheckFailure(message: "relative open did not parse")
+        }
+        try check(relative.request.url == expected, "Relative path was not resolved before sending")
+
+        guard case .run(let absolute) = try CLIArguments.parse(["open", file.path]) else {
+            throw CheckFailure(message: "absolute open did not parse")
+        }
+        try check(absolute.request.url == expected, "Local path was not resolved")
+
+        guard case .run(let remote) = try CLIArguments.parse(["open", "https://example.com/video.mp4?token=x"]) else {
+            throw CheckFailure(message: "remote open did not parse")
+        }
+        try check(remote.request.url == "https://example.com/video.mp4?token=x", "Remote URL changed")
+        try rejects { _ = try CLIArguments.parse(["open"]) }
+        try rejects { _ = try CLIArguments.parse(["open", file.path, "extra"]) }
+        try rejects { _ = try CLIArguments.parse(["open", directory.appendingPathComponent("missing.mp4").path]) }
+
+        guard case .run(let seek) = try CLIArguments.parse(["seek", "12.5"]) else {
+            throw CheckFailure(message: "seek did not parse")
+        }
+        try check(seek.request.seconds == 12.5, "Seek seconds were not forwarded")
+        guard case .run(let zero) = try CLIArguments.parse(["seek", "0"]) else {
+            throw CheckFailure(message: "zero seek did not parse")
+        }
+        try check(zero.request.seconds == 0, "Zero seek was not accepted")
+        for invalid in [["seek"], ["seek", "-1"], ["seek", "abc"], ["seek", "nan"], ["seek", "inf"], ["seek", "1", "extra"]] {
+            try rejects { _ = try CLIArguments.parse(invalid) }
+        }
     })
 ]
 var failures = 0

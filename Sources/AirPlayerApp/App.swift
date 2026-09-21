@@ -197,11 +197,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     @objc private func showSettings() {
         if settingsWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 170),
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 280),
                                   styleMask: [.titled, .closable], backing: .buffered, defer: false)
             window.title = "AirPlayer Settings"
             window.isReleasedWhenClosed = false
-            window.contentView = NSHostingView(rootView: SettingsView())
+            window.contentView = NSHostingView(rootView: SettingsView(controller: controller))
             window.center()
             settingsWindow = window
         }
@@ -252,7 +252,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 try controller.next()
                 return Response(message: "Next playlist item requested.", pending: true, status: controller.snapshot)
             case .show: showWindow()
-            case .status: controller.refresh()
+            case .status, .sources: controller.refresh()
+            case .source:
+                guard let id = request.sourceID else { throw AppFailure(.invalidRequest, "Choose a source ID or automatic.") }
+                try controller.selectSource(id)
+                return Response(message: "Reloading the selected source, paused.", pending: true, status: controller.snapshot)
+            case .conversion:
+                guard let allowed = request.allowVideoConversion else {
+                    throw AppFailure(.invalidRequest, "Choose allow-video or avoid-video.")
+                }
+                controller.setVideoConversionAllowed(allowed)
+                return Response(message: "Conversion preference saved. Applies to the next load or source choice.", status: controller.snapshot)
             }
             return Response(message: request.command == .status ? controller.snapshot.state.rawValue : "Done.", status: controller.snapshot)
         } catch {

@@ -58,6 +58,7 @@ struct ControllerView: View {
     @ViewState private var hoverTime: Double?
     @ViewState private var hoverX: CGFloat = 0
     @ViewState private var dropTargeted = false
+    @ViewState private var sourceChooserVisible = false
     @FocusState private var urlFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -88,8 +89,18 @@ struct ControllerView: View {
                                     .disabled(url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                                     .help("Load this video without starting playback")
                             }
-                            Text("Direct URL, YouTube, public playlist, or local file")
-                                .font(.caption).foregroundStyle(.secondary)
+                            HStack {
+                                Text("Direct URL, YouTube, playlist, or local file")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                Spacer(minLength: 4)
+                                Button("Quality…") { sourceChooserVisible = true }
+                                    .controlSize(.small)
+                                    .disabled(status.sources?.isEmpty != false)
+                                    .help("Choose the source quality and processing path")
+                                    .popover(isPresented: $sourceChooserVisible) {
+                                        SourceChooserView(controller: controller) { sourceChooserVisible = false }
+                                    }
+                            }
                         }
 
                         HStack(spacing: 10) {

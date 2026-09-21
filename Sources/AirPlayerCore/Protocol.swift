@@ -1,7 +1,7 @@
 import Foundation
 
 public enum Command: String, Codable, Sendable {
-    case open, play, pause, stop, seek, previous, next, status, show
+    case open, play, pause, stop, seek, previous, next, status, show, sources, source, conversion
 }
 
 public struct Request: Codable, Sendable {
@@ -9,6 +9,8 @@ public struct Request: Codable, Sendable {
     public let command: Command
     public var url: String?
     public var seconds: Double?
+    public var sourceID: String?
+    public var allowVideoConversion: Bool?
     public init(_ command: Command, url: String? = nil, seconds: Double? = nil) {
         self.command = command
         self.url = url
@@ -50,13 +52,24 @@ public enum PlaybackState: String, Codable, Sendable {
 
 /// Processing cost, not a quality score or proof of receiver playback.
 public enum PlaybackPath: String, Codable, Sendable {
-    case direct, remux
-    public var tier: Int { self == .direct ? 1 : 2 }
-    public var label: String { self == .direct ? "Direct playback" : "Remuxed playback" }
+    case direct, remux, audioConversion = "audio_conversion", videoConversion = "video_conversion"
+    public var tier: Int {
+        switch self { case .direct: 1; case .remux: 2; case .audioConversion: 3; case .videoConversion: 4 }
+    }
+    public var label: String {
+        switch self {
+        case .direct: "Direct playback"
+        case .remux: "Remuxed playback"
+        case .audioConversion: "Audio conversion"
+        case .videoConversion: "Video conversion"
+        }
+    }
     public var explanation: String {
         switch self {
         case .direct: "Tier 1: Plays the source directly — the receiver fetches a remote URL, or this Mac serves a local file in place — with no prepared copy."
         case .remux: "Tier 2: Copies audio and video into compatible media on this Mac without re-encoding. Preparation may continue during playback."
+        case .audioConversion: "Tier 3: Copies the video and converts audio to AAC on this Mac. Preparation may continue during playback."
+        case .videoConversion: "Tier 4: Converts video to SDR H.264 on this Mac, up to 1080p and 60 fps. Uses more processing and may take longer to start."
         }
     }
 }
@@ -145,7 +158,7 @@ public enum MediaFailureReason: String, Codable, Sendable {
         case .resolutionFailed: "Could not find a playable video. The page may require sign-in, be unavailable, or need an updated yt-dlp installation."
         case .resolutionTimedOut: "Finding the video timed out. Check the connection and try again."
         case .unsupportedWebsite: "Choose a public, on-demand YouTube video or dedicated public playlist. Live streams, Mixes and sign-in are not supported."
-        case .preparationRequired: "This source needs conversion or a delivery method that is not supported yet. Try an H.264/AAC video."
+        case .preparationRequired: "This source cannot use the current preparation settings. Allow video conversion for supported SDR sources, or choose another source. HDR, protected media and some delivery methods are unsupported."
         case .preparerUnavailable: "Preparing this video needs FFmpeg and ffprobe. Install FFmpeg with Homebrew, then load the link again."
         case .preparationFailed: "Could not prepare the video. Check the source, connection and available disk space, then load it again."
         case .preparationLimit: "Preparation exceeded a size, duration or time limit, or there is insufficient disk space. Try a shorter video."
@@ -184,7 +197,25 @@ public struct PlaybackSnapshot: Codable, Sendable, Equatable {
     public var diagnostics: PlaybackDiagnostics?
     /// Present while a playlist owns the shared playback session.
     public var queue: PlaybackQueueSnapshot?
+    /// Session-scoped opaque choices. Never contains source URLs or headers.
+    public var sources: [SourceOptionSnapshot]?
+    /// nil means automatic selection; explicit IDs expire when the item changes.
+    public var selectedSourceID: String?
+    public var allowVideoConversion: Bool?
     public init() {}
+}
+
+public struct SourceOptionSnapshot: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let quality: String
+    public let audio: String?
+    public let playbackPath: PlaybackPath
+    public let unavailableReason: String?
+    public init(id: String, quality: String, audio: String?, playbackPath: PlaybackPath,
+                unavailableReason: String?) {
+        self.id = id; self.quality = quality; self.audio = audio
+        self.playbackPath = playbackPath; self.unavailableReason = unavailableReason
+    }
 }
 
 public enum QueuePolicy {

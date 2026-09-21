@@ -4,6 +4,7 @@ import AirPlayerCore
 #endif
 
 struct SettingsView: View {
+    @ObservedObject var controller: PlaybackController
     @AppStorage("afterPlaybackBehavior") private var behavior = AfterPlaybackBehavior.keepConnected.rawValue
 
     var body: some View {
@@ -18,9 +19,17 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            Section("Media preparation") {
+                Toggle("Avoid video conversion", isOn: Binding(
+                    get: { !controller.allowVideoConversion },
+                    set: { controller.setVideoConversionAllowed(!$0) }))
+                Text("Copy compatible video and convert audio when needed. Turn this off to allow SDR video conversion up to 1080p. Applies to the next load or source choice.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .formStyle(.grouped)
         .padding(8)
-        .frame(width: 420, height: 170)
+        .frame(width: 440, height: 280)
     }
 }

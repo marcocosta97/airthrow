@@ -34,11 +34,18 @@ final class PlaybackController: ObservableObject {
     private var resolving = false
     private var preparing = false
     private var selectedSource: ResolvedSource?
+    private var originalSourceURL: URL?
+    private var sourceCandidates: [MediaCandidate] = []
+    private var sourceChoice: String?
+    private var changingSource = false
+    private var sourceOptionsGeneration = UUID()
+    private var actualPlaybackPath: PlaybackPath?
+    @Published private(set) var allowVideoConversion: Bool
     private var preparedMedia: PreparedMedia?
     private let prepareSource: (@Sendable (ResolvedSource) async throws -> PreparedMedia)?
     private var websiteURL: URL?
     private var retriedResolution = false
-    private let resolveSource: @Sendable (URL) async throws -> ResolvedSource
+    private let resolveCandidates: @Sendable (URL) async throws -> [MediaCandidate]
     private let resolvePlaylist: @Sendable (URL) async throws -> ResolvedPlaylist
     private let afterPlaybackBehavior: @MainActor () -> AfterPlaybackBehavior
     private var ended = false
@@ -70,9 +77,10 @@ final class PlaybackController: ObservableObject {
     private static let pickerOpenProbeTimeout: Double = 30
     private static let routeProbeTimeout: Double = 12
 
-    init(resolveSource: @escaping @Sendable (URL) async throws -> ResolvedSource = {
-        try await SourceResolver().resolve($0)
-    }, resolvePlaylist: @escaping @Sendable (URL) async throws -> ResolvedPlaylist = {
+    init(resolveSource: (@Sendable (URL) async throws -> ResolvedSource)? = nil,
+         resolveCandidates: (@Sendable (URL) async throws -> [MediaCandidate])? = nil,
+         allowVideoConversion: Bool? = nil,
+         resolvePlaylist: @escaping @Sendable (URL) async throws -> ResolvedPlaylist = {
         try await SourceResolver().resolvePlaylist($0)
     }, prepareSource: (@Sendable (ResolvedSource) async throws -> PreparedMedia)? = {
         try await MediaPreparer().prepare($0)
@@ -80,7 +88,11 @@ final class PlaybackController: ObservableObject {
         guard let raw = UserDefaults.standard.string(forKey: "afterPlaybackBehavior") else { return .keepConnected }
         return AfterPlaybackBehavior(rawValue: raw) ?? .keepConnected
     }) {
-        self.resolveSource = resolveSource
+        if let resolveCandidates { self.resolveCandidates = resolveCandidates }
+        else if let resolveSource {
+            self.resolveCandidates = { [MediaCandidate(source: try await resolveSource($0))] }
+        } else { self.resolveCandidates = { try await SourceResolver().candidates(for: $0) } }
+        self.allowVideoConversion = allowVideoConversion ?? UserDefaults.standard.bool(forKey: "allowVideoConversion")
         self.resolvePlaylist = resolvePlaylist
         self.prepareSource = prepareSource
         self.afterPlaybackBehavior = afterPlaybackBehavior
@@ -109,6 +121,62 @@ final class PlaybackController: ObservableObject {
             startPlaylistLoad(url)
         } else {
             startLoad(url)
+        }
+    }
+
+    private var conversionPolicy: ConversionPolicy { allowVideoConversion ? .allowVideo : .avoidVideo }
+
+    /// A new source choice must not start a competing load while any phase of the
+    /// current load is still running: candidate discovery, preparation, or the
+    /// native asset load that follows. A direct URL skips discovery, so the plain
+    /// `loading` flag is the only signal that its asset is still being loaded.
+    private var loadInProgress: Bool { loading || resolving || preparing }
+
+    func setVideoConversionAllowed(_ allowed: Bool) {
+        allowVideoConversion = allowed
+        UserDefaults.standard.set(allowed, forKey: "allowVideoConversion")
+        refresh()
+    }
+
+    /// Choices reload paused using freshly resolved URLs and preserve the player/queue.
+    /// An ID from an earlier source can never choose a different current item.
+    func selectSource(_ optionID: String) throws {
+        guard let url = originalSourceURL, !loadInProgress else {
+            throw AppFailure(.unsupportedOperation, "Wait for loading, source discovery, and preparation to finish.")
+        }
+        let candidateID: String?
+        if optionID == "automatic" { candidateID = nil }
+        else {
+            guard let index = sourceCandidates.indices.first(where: { sourceOptionID($0) == optionID }) else {
+                throw AppFailure(.invalidRequest, "This source choice has expired. List sources again.")
+            }
+            let candidate = sourceCandidates[index]
+            guard sourceCandidates.filter({ $0.id == candidate.id }).count == 1 else {
+                throw AppFailure(.unsupportedOperation, "This source cannot be identified uniquely. Choose Automatic.")
+            }
+            if let reason = candidate.unavailableReason(for: conversionPolicy) {
+                throw AppFailure(.unsupportedOperation, reason)
+            }
+            candidateID = candidate.id
+        }
+        startLoad(url, preservingQueue: queue != nil, titleOverride: title, sourceChoice: candidateID,
+                  changingSource: true)
+    }
+
+    private func sourceOptionID(_ index: Int) -> String { "\(sourceOptionsGeneration.uuidString)-\(index)" }
+
+    private var sourceOptions: [SourceOptionSnapshot]? {
+        guard !sourceCandidates.isEmpty else { return nil }
+        return sourceCandidates.enumerated().map { index, candidate in
+            let quality: String
+            if let height = candidate.height {
+                quality = "\(Int(min(height, 100_000)))p" + (candidate.source.delivery == .hls ? " maximum (adaptive)" : "")
+            } else { quality = "Quality unknown" }
+            return SourceOptionSnapshot(id: sourceOptionID(index), quality: quality,
+                audio: candidate.audioDescription, playbackPath: candidate.source.playbackPath,
+                unavailableReason: sourceCandidates.filter({ $0.id == candidate.id }).count > 1
+                    ? "This source cannot be identified uniquely. Choose Automatic."
+                    : candidate.unavailableReason(for: conversionPolicy))
         }
     }
 
@@ -145,9 +213,15 @@ final class PlaybackController: ObservableObject {
 
     private func startLoad(_ url: URL, retry: Bool = false, fallback: ResolvedSource? = nil,
                            preservingQueue: Bool = false, autoplay: Bool = false,
-                           titleOverride: String? = nil) {
+                           titleOverride: String? = nil, sourceChoice: String? = nil,
+                           changingSource: Bool = false) {
         let retryRoute = hasOpenedPicker || player.isExternalPlaybackActive
+        let retainedCandidates = fallback == nil ? [] : sourceCandidates
         resetItem(keepPlayerItem: true, preserveQueue: preservingQueue)
+        originalSourceURL = url
+        self.sourceChoice = sourceChoice
+        self.changingSource = changingSource
+        sourceCandidates = retainedCandidates
         probeWhenReady = retryRoute
         let id = generation
         loading = true
@@ -158,13 +232,36 @@ final class PlaybackController: ObservableObject {
         playWhenReady = autoplay
         if !preservingQueue { notice = nil }
         refresh()
-        let resolver = resolveSource
+        let resolver = resolveCandidates
+        let policy = conversionPolicy
         loadTask = Task { [weak self] in
             defer { self?.drainingLoads.removeValue(forKey: id) }
             do {
                 let source: ResolvedSource
                 if let fallback { source = fallback }
-                else { source = try await resolver(url) }
+                else {
+                    let candidates = try await resolver(url)
+                    guard let self, !Task.isCancelled, self.generation == id else { return }
+                    self.sourceCandidates = candidates
+                    self.resolving = false
+                    self.refresh()
+                    if let sourceChoice {
+                        // The choice was validated against the presented options.
+                        // Re-resolution can change that set, so revalidate the
+                        // identity against the freshly resolved candidates before
+                        // asking the selector to resolve it: a vanished candidate
+                        // keeps its existing recovery message, while a newly
+                        // duplicated identity must be refused as ambiguous.
+                        let matches = candidates.filter { $0.id == sourceChoice }
+                        guard !matches.isEmpty else {
+                            throw AppFailure(.unsupportedOperation, "This source is no longer available. Choose Automatic or another source.")
+                        }
+                        guard matches.count == 1 else {
+                            throw AppFailure(.unsupportedOperation, "This source cannot be identified uniquely. Choose Automatic.")
+                        }
+                    }
+                    source = try MediaSelector.select(candidates, policy: policy, sourceID: sourceChoice)
+                }
                 guard let self, !Task.isCancelled, self.generation == id else { return }
                 self.selectedSource = source
                 if let sourceTitle = source.title { self.title = sourceTitle }
@@ -180,6 +277,7 @@ final class PlaybackController: ObservableObject {
                         prepared.stop(); await prepared.waitForProducer(); return
                     }
                     self.preparedMedia = prepared
+                    self.actualPlaybackPath = prepared.playbackPath
                     if let failure = prepared.productionFailure { throw failure }
                     prepared.onFailure = { [weak self] failure in
                         guard let self, self.generation == id else { return }
@@ -567,6 +665,12 @@ final class PlaybackController: ObservableObject {
         stopPreparedMedia()
         loading = false; resolving = false; preparing = false; websiteURL = nil; retriedResolution = false
         selectedSource = nil
+        originalSourceURL = nil
+        sourceCandidates = []
+        sourceChoice = nil
+        changingSource = false
+        sourceOptionsGeneration = UUID()
+        actualPlaybackPath = nil
         ended = false; hasPlayed = false; failure = nil; failureReason = nil
         playWhenReady = false
         hasAudio = nil
@@ -586,17 +690,18 @@ final class PlaybackController: ObservableObject {
         // still paused. Never restart established playback or retry indefinitely.
         if reason == .sourceUnavailable, let websiteURL, !retriedResolution, !hasPlayed {
             startLoad(websiteURL, retry: true, preservingQueue: queue != nil,
-                      autoplay: playWhenReady, titleOverride: queue.map { $0.entries[$0.currentIndex].title })
+                      autoplay: playWhenReady, titleOverride: queue.map { $0.entries[$0.currentIndex].title },
+                      sourceChoice: sourceChoice, changingSource: changingSource)
             return
         }
         if !hasPlayed, prepareSource != nil, let selectedSource,
            let fallback = MediaSelector.remuxFallback(for: selectedSource, reason: reason) {
-            startLoad(websiteURL ?? selectedSource.url, retry: retriedResolution, fallback: fallback,
+            startLoad(originalSourceURL ?? selectedSource.url, retry: retriedResolution, fallback: fallback,
                       preservingQueue: queue != nil, autoplay: playWhenReady,
-                      titleOverride: title)
+                      titleOverride: title, sourceChoice: sourceChoice, changingSource: changingSource)
             return
         }
-        if advancingQueue, var queue, queueAttemptsRemaining > 1 {
+        if advancingQueue, !changingSource, sourceChoice == nil, var queue, queueAttemptsRemaining > 1 {
             queue.skipped.insert(queue.currentIndex)
             let failedTitle = queue.entries[queue.currentIndex].title
             let nextIndex = queue.currentIndex + queueDirection
@@ -709,7 +814,13 @@ final class PlaybackController: ObservableObject {
         next.error = failure
         next.errorReason = failureReason
         next.loadingPhase = resolving ? "resolving" : (preparing ? "preparing" : nil)
-        next.playbackPath = failure == nil ? selectedSource?.playbackPath : nil
+        next.playbackPath = failure == nil
+            ? (actualPlaybackPath ?? (preparing ? selectedSource?.plannedPath : selectedSource?.playbackPath)) : nil
+        next.sources = sourceOptions
+        if let sourceChoice, let index = sourceCandidates.firstIndex(where: { $0.id == sourceChoice }) {
+            next.selectedSourceID = sourceOptionID(index)
+        }
+        next.allowVideoConversion = allowVideoConversion
         next.hasAudio = hasAudio
         if let queue {
             next.queue = PlaybackQueueSnapshot(title: queue.title, currentIndex: queue.currentIndex,

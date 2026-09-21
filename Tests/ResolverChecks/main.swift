@@ -108,6 +108,237 @@ struct ResolverChecks {
         try await expect(.failed) { _ = try SourceResolver.select(Data("broken JSON with secret URL".utf8)) }
         print("PASS combined/HLS selection; separate tracks, unknown codecs, custom headers, DRM and live/playlist restrictions")
 
+        // Cost-aware selection, conversion policy, stable identity and audio metadata.
+        let nativeCombined: [String: Any] = ["format_id": "native", "url": "https://media.example/direct?signature=secret",
+            "protocol": "https", "vcodec": "avc1.64001f", "acodec": "mp4a.40.2", "ext": "mp4", "height": 720, "tbr": 1200]
+        let highH264: [String: Any] = ["format_id": "v1080", "url": "https://media.example/1080", "protocol": "https",
+            "vcodec": "avc1.640028", "acodec": "none", "ext": "mp4", "height": 1080, "tbr": 3000]
+        let aacTrack: [String: Any] = ["format_id": "a128", "url": "https://media.example/audio-aac", "protocol": "https",
+            "vcodec": "none", "acodec": "mp4a.40.2", "ext": "m4a", "abr": 128, "language": "English"]
+        let opusTrack: [String: Any] = ["format_id": "o160", "url": "https://media.example/audio-opus", "protocol": "https",
+            "vcodec": "none", "acodec": "opus", "ext": "webm", "abr": 160, "language": "Italian"]
+        let tierData = try metadata([nativeCombined, highH264, aacTrack])
+        let tierCandidates = try SourceResolver.candidates(tierData)
+        let prepared = tierCandidates.first { $0.source.needsPreparation }
+        try check(prepared?.source.playbackPath == .remux
+                  && prepared?.source.audio?.url.absoluteString == "https://media.example/audio-aac",
+                  "Higher-quality remux candidate was not preserved")
+        let automatic = try SourceResolver.select(tierData)
+        try check(automatic.url.absoluteString == "https://media.example/direct?signature=secret"
+                  && !automatic.needsPreparation && automatic.playbackPath == .direct,
+                  "Automatic selection did not prefer the lower tier")
+        guard let preparedID = prepared?.id else { throw NSError(domain: "ResolverChecks", code: 1) }
+        let explicit = try SourceResolver.select(tierData, sourceID: preparedID)
+        try check(explicit.url.absoluteString == "https://media.example/1080" && explicit.needsPreparation
+                  && explicit.audio?.url.absoluteString == "https://media.example/audio-aac"
+                  && explicit.conversionPolicy == .avoidVideo,
+                  "Explicit higher-quality remux choice did not override native")
+        try await expect(.failed) { _ = try SourceResolver.select(tierData, sourceID: "stale-format-id") }
+        let duplicateIDs = [MediaCandidate(source: automatic.withConversionPolicy(.avoidVideo), id: "duplicate"),
+                            MediaCandidate(source: automatic.withConversionPolicy(.avoidVideo), id: "duplicate")]
+        try await expect(.failed) { _ = try MediaSelector.select(duplicateIDs, sourceID: "duplicate") }
+
+        let vp9Video: [String: Any] = ["format_id": "vp9", "url": "https://media.example/vp9", "protocol": "https",
+            "vcodec": "vp9", "acodec": "none", "ext": "webm", "height": 720, "tbr": 1500]
+        let vp9Data = try metadata([vp9Video, opusTrack])
+        let blocked = try SourceResolver.candidates(vp9Data).first { $0.source.playbackPath == .videoConversion }
+        try check(blocked?.unavailableReason(for: .avoidVideo) != nil
+                  && blocked?.unavailableReason(for: .allowVideo) == nil,
+                  "Video conversion was not gated by policy")
+        try await expect(.preparationRequired) { _ = try SourceResolver.select(vp9Data) }
+        try await expect(.preparationRequired) { _ = try SourceResolver.select(vp9Data, sourceID: blocked?.id) }
+        let allowed = try SourceResolver.select(vp9Data, policy: .allowVideo)
+        try check(allowed.playbackPath == .videoConversion && allowed.needsPreparation
+                  && allowed.conversionPolicy == .allowVideo,
+                  "Allowed video conversion was not selected")
+
+        let h264OpusData = try metadata([highH264, opusTrack])
+        let audioConverted = try SourceResolver.select(h264OpusData)
+        try check(audioConverted.playbackPath == .audioConversion && audioConverted.needsPreparation,
+                  "Audio-only conversion was not available under avoidVideo")
+        try check(try SourceResolver.select(h264OpusData, policy: .allowVideo).playbackPath == .audioConversion,
+                  "Audio conversion tier changed under allowVideo")
+
+        let languageCandidates = try SourceResolver.candidates(metadata([highH264, aacTrack, opusTrack]))
+        let descriptions = languageCandidates.compactMap(\.audioDescription)
+        try check(descriptions.contains { $0.contains("English") } && descriptions.contains { $0.contains("Italian") }
+                  && descriptions.contains { $0.contains("AAC") },
+                  "Language or codec audio metadata was lost")
+        try check(Set(languageCandidates.map(\.id)).count == languageCandidates.count,
+                  "Language variants shared a candidate identity")
+        try check(languageCandidates.allSatisfy { candidate in
+            !candidate.id.contains("http") && !candidate.id.contains("example")
+                && !candidate.id.contains("signature") && !candidate.id.contains("secret")
+        }, "Candidate identifier exposed a URL or header")
+
+        let hdrVideo: [String: Any] = ["format_id": "vp9hdr", "url": "https://media.example/hdr", "protocol": "https",
+            "vcodec": "vp9", "acodec": "none", "ext": "webm", "height": 1080, "dynamic_range": "HDR10"]
+        let hdrData = try metadata([hdrVideo, aacTrack])
+        let hdrCandidate = try SourceResolver.candidates(hdrData).first { $0.source.playbackPath == .videoConversion }
+        try check(hdrCandidate?.unavailableReason != nil
+                  && hdrCandidate?.unavailableReason(for: .allowVideo) != nil,
+                  "HDR candidate was not exposed as disabled")
+        try await expect(.preparationRequired) { _ = try SourceResolver.select(hdrData, policy: .allowVideo) }
+        try check(try SourceResolver.candidates(metadata([nativeCombined.merging(["http_headers": ["X-Token": "secret"]]) { _, rhs in rhs }])).isEmpty,
+                  "Custom header format produced a candidate")
+
+        let extreme = MediaCandidate(source: automatic, height: 1e300, bitrate: 1e300)
+        try check(!extreme.id.isEmpty, "Extreme dimensions trapped or emptied the fallback identity")
+        let planned = ResolvedSource(url: URL(string: "https://media.example/x")!, plannedPath: .audioConversion)
+        try check(planned.needsPreparation && planned.playbackPath == .audioConversion && planned.needsPreparationPipeline,
+                  "Planned non-direct path did not imply preparation")
+        let unknownDirectSource = DirectSourceAdapter.candidates(direct).first!.source
+        try check(unknownDirectSource.conversionPolicy == .avoidVideo && unknownDirectSource.plannedPath == nil
+                  && unknownDirectSource.playbackPath == .direct,
+                  "Unknown direct source lost its native default plan")
+        try check(try await absent.resolve(direct, policy: .allowVideo).conversionPolicy == .allowVideo,
+                  "Resolver did not forward the conversion policy")
+        let fallbackPolicy = MediaSelector.remuxFallback(
+            for: ResolvedSource(url: URL(string: "https://media.example/native")!).withConversionPolicy(.allowVideo),
+            reason: .unreadableMedia)
+        try check(fallbackPolicy?.playbackPath == .remux && fallbackPolicy?.conversionPolicy == .allowVideo,
+                  "Remux fallback lost the conversion policy")
+
+        // Review follow-up: order-independent identities, collision handling,
+        // high-resolution conversion, bounded labels and candidate caps.
+        let reorderedFormats: [[String: Any]] = [nativeCombined, highH264, aacTrack, opusTrack]
+        let forwardIDs = Set(try SourceResolver.candidates(metadata(reorderedFormats)).map(\.id))
+        let reverseIDs = Set(try SourceResolver.candidates(metadata(Array(reorderedFormats.reversed()))).map(\.id))
+        try check(!forwardIDs.isEmpty && forwardIDs == reverseIDs,
+                  "Candidate identities changed when formats were reordered")
+
+        let copiedPresentation = nativeCombined.merging(["url": "https://media.example/copy-b"]) { _, rhs in rhs }
+        let collisionData = try metadata([nativeCombined, copiedPresentation])
+        let collisionCandidates = try SourceResolver.candidates(collisionData)
+        try check(collisionCandidates.count == 2 && Set(collisionCandidates.map(\.id)).count == 1,
+                  "An identity collision silently dropped or renamed a presentation")
+        try await expect(.failed) {
+            _ = try SourceResolver.select(collisionData, sourceID: collisionCandidates.first?.id)
+        }
+
+        let highResolution = highH264.merging(["height": 2160]) { _, rhs in rhs }
+        let highResolutionData = try metadata([highResolution, aacTrack])
+        try await expect(.preparationRequired) { _ = try SourceResolver.select(highResolutionData) }
+        try check(try SourceResolver.select(highResolutionData, policy: .allowVideo).playbackPath == .videoConversion,
+                  "High-resolution SDR H.264 was not convertible under allowVideo")
+        let highFPS = highH264.merging(["fps": 120]) { _, rhs in rhs }
+        try check(try SourceResolver.select(metadata([highFPS, aacTrack]), policy: .allowVideo).playbackPath == .videoConversion,
+                  "High-frame-rate H.264 was not convertible under allowVideo")
+        let beyondInput = highH264.merging(["height": 4320]) { _, rhs in rhs }
+        let beyondData = try metadata([beyondInput, aacTrack])
+        try check(try SourceResolver.candidates(beyondData).contains {
+            $0.source.playbackPath == .videoConversion && $0.unavailableReason != nil
+        }, "Above-bound input was not disabled")
+        try await expect(.preparationRequired) { _ = try SourceResolver.select(beyondData, policy: .allowVideo) }
+
+        let dirtyLanguage = "en\u{0007} <http://evil.example/x?token=secret>"
+        let dirtyCandidates = try SourceResolver.candidates(
+            metadata([highH264, aacTrack.merging(["language": dirtyLanguage]) { _, rhs in rhs }]))
+        let dirtyDescription = dirtyCandidates.first { $0.source.needsPreparation }?.audioDescription
+        try check(dirtyDescription?.contains("http") != true && dirtyDescription?.contains("://") != true
+                  && dirtyDescription?.contains("/") != true
+                  && dirtyDescription?.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) } != true,
+                  "Audio metadata leaked control characters or a URL-like value")
+        let longLanguage = aacTrack.merging(["language": String(repeating: "a", count: 500)]) { _, rhs in rhs }
+        let longDescription = try SourceResolver.candidates(metadata([highH264, longLanguage]))
+            .compactMap(\.audioDescription).first
+        try check((longDescription?.count ?? 0) <= 80 && longDescription?.isEmpty == false,
+                  "Audio description was not bounded")
+
+        let manyCombined = (0..<40).map { index in
+            nativeCombined.merging(["format_id": "f\(index)", "height": 720 + Double(index)]) { _, rhs in rhs }
+        }
+        try check(try SourceResolver.candidates(metadata(manyCombined)).count <= 12,
+                  "Combined candidates were not capped")
+        print("PASS reordered-format identity, ambiguity rejection, high-resolution conversion, label bounds and option caps")
+
+        // Cost-first caps: a flood of expensive high-resolution formats must not
+        // hide a compatible H.264 remux, and the bounded set must not depend on
+        // extractor order.
+        let av1High: [String: Any] = ["format_id": "av1", "url": "https://media.example/av1", "protocol": "https",
+            "vcodec": "av01.0.12M.08", "acodec": "opus", "ext": "webm", "width": 3840, "height": 2160, "tbr": 12000]
+        let h264Remux: [String: Any] = ["format_id": "h264mkv", "url": "https://media.example/h264-remux", "protocol": "https",
+            "vcodec": "avc1.640028", "acodec": "mp4a.40.2", "ext": "mkv", "width": 1920, "height": 1080, "tbr": 5000]
+        let expensiveConversions = (0..<24).map { index in
+            av1High.merging(["format_id": "av1\(index)", "url": "https://media.example/av1-\(index)"]) { _, rhs in rhs }
+        }
+        let capFormats = expensiveConversions + [h264Remux]
+        let capData = try metadata(capFormats)
+        let capReversed = try metadata(Array(capFormats.reversed()))
+        try check(Set(try SourceResolver.candidates(capData).map(\.id))
+                  == Set(try SourceResolver.candidates(capReversed).map(\.id)),
+                  "Expensive-format cap depended on extractor order")
+        let cappedRemux = try SourceResolver.select(capData)
+        try check(cappedRemux.playbackPath == .remux && cappedRemux.url.path == "/h264-remux",
+                  "High-resolution AV1/VP9 conversion formats displaced a compatible H.264 remux")
+
+        let av1VideoOnly: [String: Any] = ["format_id": "av1v", "url": "https://media.example/av1v", "protocol": "https",
+            "vcodec": "av01.0.12M.08", "acodec": "none", "ext": "webm", "width": 3840, "height": 2160, "tbr": 12000]
+        let h264VideoOnly: [String: Any] = ["format_id": "h264v", "url": "https://media.example/h264v", "protocol": "https",
+            "vcodec": "avc1.64001f", "acodec": "none", "ext": "mp4", "width": 1280, "height": 720, "tbr": 2500]
+        let expensiveVideos = (0..<24).map { index in
+            av1VideoOnly.merging(["format_id": "av1v\(index)", "url": "https://media.example/av1v-\(index)"]) { _, rhs in rhs }
+        }
+        let pairFormats = expensiveVideos + [h264VideoOnly, aacTrack]
+        let pairData = try metadata(pairFormats)
+        let pairCandidates = try SourceResolver.candidates(pairData)
+        try check(pairCandidates.contains {
+            $0.source.playbackPath == .remux && $0.source.url.path == "/h264v" && $0.source.audio != nil
+        }, "High-resolution AV1/VP9 videos displaced a compatible H.264 remux pair")
+        try check(Set(pairCandidates.map(\.id))
+                  == Set(try SourceResolver.candidates(metadata(Array(pairFormats.reversed()))).map(\.id)),
+                  "Paired-video cap depended on extractor order")
+        let pairedSelection = try SourceResolver.select(pairData)
+        try check(pairedSelection.playbackPath == .remux && pairedSelection.url.path == "/h264v",
+                  "Automatic selection did not preserve the cheap H.264 remux pair")
+
+        // Explicit identities survive expiring-URL rotation, while a genuine
+        // duplicate identity is refused rather than silently overridden.
+        let stableID = try SourceResolver.candidates(metadata([nativeCombined])).first!.id
+        let rotatedNative = nativeCombined.merging(["url": "https://media.example/direct?signature=rotated"]) { _, rhs in rhs }
+        let rotatedID = try SourceResolver.candidates(metadata([rotatedNative])).first!.id
+        try check(stableID == rotatedID, "Candidate identity changed when only the URL rotated")
+        let rotatedSelection = try SourceResolver.select(metadata([rotatedNative]), sourceID: rotatedID)
+        try check(rotatedSelection.url.absoluteString == "https://media.example/direct?signature=rotated",
+                  "Explicit identity did not survive URL rotation")
+        let identical = try SourceResolver.candidates(metadata([nativeCombined, nativeCombined]))
+        try check(identical.count == 1, "A byte-for-byte duplicate presentation was not deduplicated")
+        let headerA = nativeCombined.merging(["http_headers": ["User-Agent": "agent-a"]]) { _, rhs in rhs }
+        let headerB = nativeCombined.merging(["http_headers": ["User-Agent": "agent-b"]]) { _, rhs in rhs }
+        let headerCandidates = try SourceResolver.candidates(metadata([headerA, headerB]))
+        try check(headerCandidates.count == 2 && Set(headerCandidates.map(\.id)).count == 1,
+                  "Different request headers silently collapsed into one presentation")
+        try await expect(.failed) {
+            _ = try SourceResolver.select(metadata([headerA, headerB]), sourceID: headerCandidates.first?.id)
+        }
+        let videoA = h264VideoOnly.merging(["url": "https://media.example/video-a"]) { _, rhs in rhs }
+        let videoB = h264VideoOnly.merging(["url": "https://media.example/video-b"]) { _, rhs in rhs }
+        let pairCollision = try SourceResolver.candidates(metadata([videoA, videoB, aacTrack]))
+            .filter { $0.source.audio != nil }
+        try check(pairCollision.count == 2 && Set(pairCollision.map(\.id)).count == 1,
+                  "A paired identity collision was silently resolved")
+        try await expect(.failed) {
+            _ = try SourceResolver.select(metadata([videoA, videoB, aacTrack]), sourceID: pairCollision.first?.id)
+        }
+        let longLanguageA = aacTrack.merging(["language": String(repeating: "a", count: 40)]) { _, rhs in rhs }
+        let longLanguageB = aacTrack.merging(["language": String(repeating: "a", count: 40) + "b"]) { _, rhs in rhs }
+        let collapsedPairs = try SourceResolver.candidates(metadata([h264VideoOnly, longLanguageA, longLanguageB]))
+            .filter { $0.source.audio != nil }
+        try check(collapsedPairs.count == 1 && (collapsedPairs.first?.audioDescription?.count ?? 0) <= 80,
+                  "Collapsed long language labels were not reduced to one bounded safe candidate")
+
+        // Input and output bounds include width when an extractor reports it.
+        let wideInput = highH264.merging(["width": 4096]) { _, rhs in rhs }
+        let wideInputData = try metadata([wideInput, aacTrack])
+        try check(try SourceResolver.candidates(wideInputData).contains {
+            $0.source.playbackPath == .videoConversion && $0.unavailableReason != nil
+        }, "Wider-than-4K input was not disabled")
+        try await expect(.preparationRequired) { _ = try SourceResolver.select(wideInputData, policy: .allowVideo) }
+        let wideOutput = highH264.merging(["width": 2560]) { _, rhs in rhs }
+        try check(try SourceResolver.select(metadata([wideOutput, aacTrack]), policy: .allowVideo).playbackPath == .videoConversion,
+                  "Wider-than-1080 SDR H.264 was not convertible under allowVideo")
+        print("PASS cost-first caps preserve H.264 remux, bounded sets are order-independent, identities survive URL rotation, duplicates/headers are handled, and width bounds apply")
+
         let masterURL = URL(string: "https://media.example/master.m3u8?signature=secret")!
         let master = """
         #EXTM3U
@@ -192,7 +423,25 @@ struct ResolverChecks {
             return Data()
         }
         try check(await duplicateCounter.count == 1, "Master URLs were not deduplicated")
-        print("PASS alternate-audio HLS masters, selection priority, fallback, malformed input, size/attempt bounds and cancellation")
+        let firstMasterID = try await YouTubeSourceAdapter.candidatesWithHLS(metadata([adaptiveVideo, combined])) { _ in masterData }
+            .first { $0.source.delivery == .hls }?.id
+        let reorderedMasterID = try await YouTubeSourceAdapter.candidatesWithHLS(metadata([combined, adaptiveVideo])) { _ in masterData }
+            .first { $0.source.delivery == .hls }?.id
+        try check(firstMasterID != nil && firstMasterID == reorderedMasterID,
+                  "HLS master identity changed when formats were reordered")
+        // Two masters with identical quality metadata but different URLs keep the
+        // same opaque identity, are both retained, and refuse an ambiguous choice
+        // instead of letting one silently override the other.
+        let masterA = adaptiveVideo.merging(["manifest_url": "https://media.example/masterA.m3u8"]) { _, rhs in rhs }
+        let masterB = adaptiveVideo.merging(["manifest_url": "https://media.example/masterB.m3u8"]) { _, rhs in rhs }
+        let twinCandidates = try await YouTubeSourceAdapter.candidatesWithHLS(metadata([masterA, masterB])) { _ in masterData }
+        let twinMasters = twinCandidates.filter { $0.source.delivery == .hls }
+        try check(twinMasters.count == 2 && Set(twinMasters.map(\.id)).count == 1,
+                  "Identical-quality masters silently collapsed or got distinct identities")
+        try await expect(.failed) {
+            _ = try MediaSelector.select(twinCandidates, sourceID: twinMasters.first?.id)
+        }
+        print("PASS alternate-audio HLS masters, selection priority, fallback, malformed input, size/attempt bounds, stable HLS ids, twin masters and cancellation")
 
         var playlistEntries: [[String: Any]] = [
             ["id": "BaW_jenozKc", "title": " First "],
@@ -254,8 +503,12 @@ private actor ManifestCounter {
 
 // Exercise the same adapter -> shared selector boundary with deterministic metadata.
 private extension SourceResolver {
-    static func select(_ data: Data) throws -> ResolvedSource {
-        try MediaSelector.select(YouTubeSourceAdapter.candidates(data))
+    static func candidates(_ data: Data) throws -> [MediaCandidate] {
+        try YouTubeSourceAdapter.candidates(data)
+    }
+    static func select(_ data: Data, policy: ConversionPolicy = .avoidVideo,
+                       sourceID: String? = nil) throws -> ResolvedSource {
+        try MediaSelector.select(YouTubeSourceAdapter.candidates(data), policy: policy, sourceID: sourceID)
     }
     static func selectWithHLS(_ data: Data, fetch: @Sendable (URL) async throws -> Data) async throws -> ResolvedSource {
         try await MediaSelector.select(YouTubeSourceAdapter.candidatesWithHLS(data, fetch: fetch))

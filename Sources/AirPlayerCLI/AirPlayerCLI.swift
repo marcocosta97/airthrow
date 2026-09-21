@@ -6,59 +6,46 @@ import AirPlayerCore
 
 @main
 struct AirPlayerCLI {
+    private static let helpText = """
+    AirPlayer — control the native AirPlay video session
+
+    Usage:
+      airplayer open SOURCE     Load a URL, YouTube playlist, or local file, paused
+      airplayer play            Start/resume on the selected video receiver
+      airplayer pause           Pause the current session
+      airplayer seek SECONDS    Seek to an absolute position
+      airplayer previous        Load the previous playlist item
+      airplayer next            Load the next playlist item
+      airplayer stop            Stop and unload the video
+      airplayer status [--json] Show observed playback state
+      airplayer sources         List available quality/source choices and their IDs
+      airplayer source ID       Reload a listed source, paused (or use automatic)
+      airplayer conversion allow-video|avoid-video
+                                Set video conversion preference for future loads
+      airplayer show            Open the controller and choose a receiver
+
+    --json is available on every command. Receiver selection uses the app's
+    AirPlay picker. open and show launch AirPlayer if needed.
+    Set AIRPLAYER_APP to an explicit AirPlayer.app path for development.
+    """
+
     @MainActor static func main() async {
-        var arguments = Array(CommandLine.arguments.dropFirst())
-        if arguments.isEmpty || arguments.contains(where: { $0 == "--help" || $0 == "-h" }) {
-            print("""
-            AirPlayer — control the native AirPlay video session
-
-            Usage:
-              airplayer open SOURCE     Load a URL, YouTube playlist, or local file, paused
-              airplayer play            Start/resume on the selected video receiver
-              airplayer pause           Pause the current session
-              airplayer seek SECONDS    Seek to an absolute position
-              airplayer previous        Load the previous playlist item
-              airplayer next            Load the next playlist item
-              airplayer stop            Stop and unload the video
-              airplayer status [--json] Show observed playback state
-              airplayer show            Open the controller and choose a receiver
-
-            --json is available on every command. Receiver selection uses the app's
-            AirPlay picker. open and show launch AirPlayer if needed.
-            Set AIRPLAYER_APP to an explicit AirPlayer.app path for development.
-            """)
-            return
-        }
+        let arguments = Array(CommandLine.arguments.dropFirst())
         let json = arguments.contains("--json")
-        arguments.removeAll { $0 == "--json" }
         do {
-            guard let first = arguments.first, let command = Command(rawValue: first) else {
-                throw AppFailure(.invalidRequest, "Unknown command. Run airplayer --help.")
-            }
-            var request = Request(command)
-            switch command {
-            case .open:
-                guard arguments.count == 2 else { throw AppFailure(.invalidRequest, "Usage: airplayer open URL_OR_PATH") }
-                let source = try MediaInput.source(arguments[1])
-                // The app has a different working directory. Resolve relative
-                // paths in the invoking shell before sending the request.
-                request.url = source.isFileURL ? source.path : arguments[1]
-            case .seek:
-                guard arguments.count == 2, let seconds = Double(arguments[1]), seconds.isFinite, seconds >= 0 else {
-                    throw AppFailure(.invalidRequest, "Usage: airplayer seek SECONDS (finite and nonnegative)")
+            switch try CLIArguments.parse(arguments) {
+            case .help:
+                print(helpText)
+                return
+            case .run(let parsed):
+                if parsed.command == .open || parsed.command == .show {
+                    let running = await Task.detached { (try? LocalSocket.send(Request(.status))) != nil }.value
+                    if !running { try await launch() }
                 }
-                request.seconds = seconds
-            default:
-                guard arguments.count == 1 else { throw AppFailure(.invalidRequest, "Unexpected arguments. Run airplayer --help.") }
+                let response = try await Task.detached { try LocalSocket.send(parsed.request) }.value
+                output(response, json: parsed.json, showSources: parsed.showsSources)
+                if let error = response.error { exit(error.code.exitCode) }
             }
-            if command == .open || command == .show {
-                let running = await Task.detached { (try? LocalSocket.send(Request(.status))) != nil }.value
-                if !running { try await launch() }
-            }
-            let finalRequest = request
-            let response = try await Task.detached { try LocalSocket.send(finalRequest) }.value
-            output(response, json: json)
-            if let error = response.error { exit(error.code.exitCode) }
         } catch {
             let failure = error as? AppFailure ?? AppFailure(.appUnavailable, "Could not communicate with AirPlayer.")
             output(Response(error: failure), json: json)
@@ -92,7 +79,7 @@ struct AirPlayerCLI {
         throw AppFailure(.appUnavailable, "AirPlayer launched but its command endpoint is unavailable.")
     }
 
-    private static func output(_ response: Response, json: Bool) {
+    private static func output(_ response: Response, json: Bool, showSources: Bool = false) {
         if json {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -103,6 +90,14 @@ struct AirPlayerCLI {
             print("\(response.message)\nState: \(status.state.rawValue)\nExternal video: \(status.externalPlaybackActive ? "yes" : "no")")
             print("Title: \(status.title)")
             if let path = status.playbackPath { print("Playback path: \(path.label) (tier \(path.tier))") }
+            if let allowed = status.allowVideoConversion { print("Video conversion: \(allowed ? "allowed" : "avoided")") }
+            if showSources, let sources = status.sources {
+                print("Source selection: \(status.selectedSourceID ?? "automatic")")
+                for source in sources {
+                    print("  \(source.id): \(source.quality), \(source.playbackPath.label)\(source.audio.map { ", " + $0 } ?? "")")
+                    if let reason = source.unavailableReason { print("    Unavailable: \(reason)") }
+                }
+            }
             if status.loadingPhase == "resolving" { print("Finding video…") }
             if status.loadingPhase == "preparing" { print("Preparing video…") }
             if let position = status.position { print("Position: \(String(format: "%.1f", position))s") }
