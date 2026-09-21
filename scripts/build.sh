@@ -4,7 +4,13 @@ cd "$(dirname "$0")/.."
 configuration="${1:-${CONFIGURATION:-release}}"
 build_dir="${AIRPLAYER_BUILD_DIR:-build}"
 mkdir -p "$build_dir"
-swift build -c "$configuration" --disable-sandbox
+# Command Line Tools' SwiftPM records the deployment target as the linked SDK
+# version, which opts the app out of the current system design (Liquid Glass).
+# Pin the real SDK version so the app adopts the OS appearance it runs on.
+deployment_target="14.0"
+sdk_version="$(xcrun --sdk macosx --show-sdk-version)"
+swift build -c "$configuration" --disable-sandbox \
+    -Xlinker -platform_version -Xlinker macos -Xlinker "$deployment_target" -Xlinker "$sdk_version"
 bin_dir="$(swift build -c "$configuration" --show-bin-path --disable-sandbox)"
 staging_dir="$(mktemp -d "${TMPDIR:-/tmp}/airplayer-build.XXXXXX")"
 trap 'rm -rf "$staging_dir"' EXIT
