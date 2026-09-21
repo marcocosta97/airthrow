@@ -25,6 +25,11 @@ def ffmpeg(*arguments):
     run([FFMPEG, '-hide_banner', '-loglevel', 'error', '-nostdin', '-n', *arguments], timeout=30)
 
 
+def fraction(value):
+    numerator, _, denominator = (value or '0/0').partition('/')
+    return float(numerator or 0) / float(denominator) if float(denominator or 0) else 0.0
+
+
 ffmpeg('-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
        '-t', '2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ac', '2', '-movflags', '+faststart', OUT / 'combined.mp4')
 ffmpeg('-i', OUT / 'combined.mp4', '-map', '0', '-c', 'copy', OUT / 'combined.mkv')
@@ -34,6 +39,24 @@ ffmpeg('-i', OUT / 'combined.mp4', '-c:v', 'copy', '-c:a', 'flac', OUT / 'flac.m
 ffmpeg('-i', OUT / 'combined.mp4', '-f', 'lavfi', '-i', 'sine=frequency=330:sample_rate=48000',
        '-t', '2', '-map', '0:v', '-map', '0:a', '-map', '1:a',
        '-c:v', 'copy', '-c:a:0', 'pcm_s16le', '-c:a:1', 'aac', '-ac:a:1', '2', OUT / 'multitrack.mkv')
+ffmpeg('-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
+       '-t', '2', '-c:v', 'libvpx-vp9', '-b:v', '0', '-crf', '30', '-c:a', 'libopus', OUT / 'vp9-opus.mkv')
+# 4K and 100 fps inputs are converted down to the bounded 1080p/60 H.264 output.
+ffmpeg('-f', 'lavfi', '-i', 'testsrc2=size=3840x2160:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
+       '-t', '2', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ac', '2',
+       OUT / 'uhd.mkv')
+ffmpeg('-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=100', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
+       '-t', '2', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ac', '2',
+       OUT / 'highfps.mkv')
+# A 10-bit layout is not an understood 8-bit SDR input and is refused.
+ffmpeg('-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
+       '-t', '2', '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuv420p10le', '-b:v', '200k', '-c:a', 'libopus',
+       OUT / 'tenbit.mkv')
+# HDR-tagged input is refused even when video conversion is allowed: output must stay SDR.
+ffmpeg('-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
+       '-t', '2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+       '-x264-params', 'colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc',
+       '-c:a', 'aac', '-ac', '2', OUT / 'hdr.mkv')
 ffmpeg('-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
        '-t', '20', '-c:v', 'libx264', '-g', '48', '-keyint_min', '48', '-sc_threshold', '0', '-flags', '+cgop',
        '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ac', '2', '-movflags', '+faststart', OUT / 'long.mp4')
@@ -50,7 +73,22 @@ fallback.chmod(0o700)
 oversized = OUT / 'oversized-ffmpeg'
 oversized.write_text('#!/usr/bin/python3\nimport pathlib, sys, time\np = pathlib.Path(sys.argv[-1]).with_name("segment000000.ts.tmp")\nwith p.open("wb") as f: f.truncate(8 * 1024 * 1024)\ntime.sleep(20)\n')
 oversized.chmod(0o700)
-FILES = {f'/{name}': (OUT / name).read_bytes() for name in ['combined.mp4', 'combined.mkv', 'video.mp4', 'audio.m4a', 'flac.mkv', 'multitrack.mkv', 'long.mp4']}
+# Refuses the hardware preflight, so conversion must succeed through libx264.
+software = OUT / 'software-ffmpeg'
+software.write_text('#!/usr/bin/python3\nimport os, sys\na = sys.argv[1:]\nif "h264_videotoolbox" in a: sys.exit(1)\nos.execv(' + repr(FFMPEG) + ', [' + repr(FFMPEG) + '] + a)\n')
+software.chmod(0o700)
+# Refuses every H.264 preflight so no encoder can be prepared.
+no_encoder = OUT / 'no-encoder-ffmpeg'
+no_encoder.write_text('#!/usr/bin/python3\nimport sys\nsys.exit(1)\n')
+no_encoder.chmod(0o700)
+# Pass the hardware preflight but fail the real job. Log encoder attempts so a
+# hardware HLS failure cannot silently retry hardware MP4 before software.
+hardware_failure = OUT / 'hardware-failure-ffmpeg'
+hardware_failure.write_text('#!/usr/bin/python3\nimport os, pathlib, sys\na = sys.argv[1:]\nhardware = "h264_videotoolbox" in a\npreflight = "lavfi" in a\nwith pathlib.Path(' + repr(str(OUT / 'encoder-attempts.txt')) + ').open("a") as log:\n log.write(("hardware" if hardware else "software") + ("-preflight" if preflight else "-job") + "\\n")\nif hardware: sys.exit(0 if preflight else 1)\nos.execv(' + repr(FFMPEG) + ', [' + repr(FFMPEG) + '] + a)\n')
+hardware_failure.chmod(0o700)
+FILES = {f'/{name}': (OUT / name).read_bytes() for name in ['combined.mp4', 'combined.mkv', 'video.mp4', 'audio.m4a',
+                                                            'flac.mkv', 'multitrack.mkv', 'long.mp4', 'vp9-opus.mkv',
+                                                            'hdr.mkv', 'uhd.mkv', 'highfps.mkv', 'tenbit.mkv']}
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -95,7 +133,7 @@ try:
         run(['swiftc', '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirPlayerCore').glob('*.swift')),
              ROOT / 'Sources/AirPlayerApp/MediaDiagnostics.swift', ROOT / 'Sources/AirPlayerApp/PlaybackController.swift',
              ROOT / 'Tests/PreparationChecks/main.swift', '-o', binary], timeout=90)
-        checks = run([binary, f'http://127.0.0.1:{server.server_port}', OUT], timeout=100)
+        checks = run([binary, f'http://127.0.0.1:{server.server_port}', OUT], timeout=180)
         print(checks.stdout, end='')
         # Compare each compressed packet: this establishes stream copying rather than merely matching codec names.
         def packets(path):
@@ -105,12 +143,46 @@ try:
         expected = packets(OUT / 'combined.mp4')
         for name in ['remuxed.mp4', 'joined.mp4', 'local-remuxed.mp4']:
             assert packets(OUT / name) == expected, f'{name}: compressed media changed'
+        # Audio conversion must preserve the H.264 packets and only re-encode audio.
+        audio_converted = packets(OUT / 'audio-converted.mp4')
+        assert audio_converted[0] == expected[0], 'audio conversion changed the video packets'
+        assert audio_converted[1] != expected[1], 'audio conversion did not re-encode the audio'
         print('PASS identical compressed video/audio packet hashes after remux and join')
+
+        # Validate the actual converted output profile, not just the reported path.
+        def streams(path):
+            return json.loads(run([FFPROBE, '-v', 'error', '-show_entries',
+                'stream=codec_name,codec_type,pix_fmt,width,height,avg_frame_rate,channels,sample_rate',
+                '-of', 'json', path]).stdout)['streams']
+
+        video_converted = streams(OUT / 'video-converted.mp4')
+        video = [s for s in video_converted if s['codec_type'] == 'video']
+        audio = [s for s in video_converted if s['codec_type'] == 'audio']
+        assert len(video) == 1 and len(audio) == 1, 'converted output lost a track'
+        assert video[0]['codec_name'] == 'h264' and video[0]['pix_fmt'] == 'yuv420p', \
+            'converted video is not SDR H.264 4:2:0'
+        assert int(video[0]['width']) <= 1920 and int(video[0]['height']) <= 1080, 'converted video exceeded 1080p'
+        assert fraction(video[0].get('avg_frame_rate')) <= 60, 'converted video exceeded 60 fps'
+        assert audio[0]['codec_name'] == 'aac' and int(audio[0].get('sample_rate', 0)) <= 48000 \
+            and int(audio[0].get('channels', 0)) <= 2, 'converted audio is not AAC LC mono/stereo <= 48 kHz'
+        audio_only = [s for s in streams(OUT / 'audio-converted.mp4') if s['codec_type'] == 'audio']
+        assert audio_only and audio_only[0]['codec_name'] == 'aac', 'audio-only conversion did not produce AAC'
+        uhd_video = [s for s in streams(OUT / 'uhd-converted.mp4') if s['codec_type'] == 'video']
+        assert uhd_video and int(uhd_video[0]['width']) <= 1920 and int(uhd_video[0]['height']) <= 1080, \
+            '4K input was not downscaled into the 1080p bound'
+        high_fps = [s for s in streams(OUT / 'highfps-converted.mp4') if s['codec_type'] == 'video']
+        assert high_fps and fraction(high_fps[0].get('avg_frame_rate')) <= 60, '100 fps input was not capped at 60 fps'
+        software = [s for s in streams(OUT / 'software-converted.mp4') if s['codec_type'] == 'video']
+        assert software and software[0]['codec_name'] == 'h264', 'software fallback did not produce H.264'
+        tenbit = [s for s in streams(OUT / 'tenbit.mkv') if s['codec_type'] == 'video']
+        assert tenbit and tenbit[0]['pix_fmt'] == 'yuv420p10le', '10-bit fixture is not 10-bit'
+        print('PASS converted output is SDR H.264 yuv420p <=1080p/60 and AAC LC <=48 kHz mono/stereo')
+        print('PASS high-resolution downscale, 100->60 fps cap, software fallback and 10-bit refusal')
     progressive = OUT / 'ProgressiveChecks'
     run(['swiftc', '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirPlayerCore').glob('*.swift')),
          ROOT / 'Sources/AirPlayerApp/MediaDiagnostics.swift', ROOT / 'Sources/AirPlayerApp/PlaybackController.swift',
          ROOT / 'Tests/ProgressiveChecks/main.swift', '-o', progressive], timeout=90)
-    print(run([progressive, f'http://127.0.0.1:{server.server_port}', OUT], timeout=100).stdout, end='')
+    print(run([progressive, f'http://127.0.0.1:{server.server_port}', OUT], timeout=140).stdout, end='')
     def video_frames(path):
         return [line.split(',')[-1].strip() for line in run([FFMPEG, '-v', 'error', '-i', path,
                 '-map', '0:v:0', '-f', 'framemd5', '-']).stdout.splitlines() if not line.startswith('#')]
@@ -120,7 +192,26 @@ try:
                               OUT / 'joined.ts']).stdout)['streams']
     assert sorted(s['codec_name'] for s in streams) == ['aac', 'h264'], 'HLS join lost audio or video'
     print('PASS identical decoded video frames after HLS remux/join and retained AAC audio')
-    (OUT / 'results.json').write_text(json.dumps(dict(checks='passed', packetHashes='not run' if '--progressive-only' in sys.argv else 'identical', progressiveHLS='passed', receiver='untested'), indent=2) + '\n')
+    # The first completed converted segment was probed before handoff; verify the
+    # bounded SDR H.264/AAC output independently from the saved TS.
+    converted = json.loads(run([FFPROBE, '-v', 'error', '-show_entries',
+        'stream=codec_name,codec_type,pix_fmt,width,height,avg_frame_rate,profile,channels,sample_rate',
+        '-of', 'json', OUT / 'converted.ts']).stdout)['streams']
+    converted_video = [s for s in converted if s['codec_type'] == 'video']
+    converted_audio = [s for s in converted if s['codec_type'] == 'audio']
+    assert converted_video and converted_video[0]['codec_name'] == 'h264' \
+        and converted_video[0]['pix_fmt'] == 'yuv420p' and 'high' in (converted_video[0].get('profile') or '').lower(), \
+        'progressive conversion is not SDR H.264 High'
+    assert int(converted_video[0]['width']) <= 1920 and int(converted_video[0]['height']) <= 1080 \
+        and fraction(converted_video[0].get('avg_frame_rate')) <= 60, 'progressive conversion exceeded 1080p/60'
+    assert converted_audio and converted_audio[0]['codec_name'] == 'aac' \
+        and int(converted_audio[0].get('sample_rate', 0)) <= 48000 \
+        and int(converted_audio[0].get('channels', 0)) <= 2, 'progressive conversion audio is not bounded AAC'
+    print('PASS progressive video+audio conversion segment is bounded SDR H.264 High / AAC')
+    (OUT / 'results.json').write_text(json.dumps(dict(checks='passed',
+        packetHashes='not run' if '--progressive-only' in sys.argv else 'identical',
+        conversion='not run' if '--progressive-only' in sys.argv else 'passed',
+        progressiveHLS='passed', receiver='untested'), indent=2) + '\n')
     print(f'Report: {OUT / "results.json"}')
 except subprocess.CalledProcessError as error:
     print(error.stdout, error.stderr)

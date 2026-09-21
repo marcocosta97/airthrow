@@ -91,6 +91,20 @@ struct ProgressiveChecks {
         fallback.stop()
         print("PASS complete-file fallback before handoff")
 
+        var hardwareFailureEnvironment = environment
+        hardwareFailureEnvironment["AIRPLAYER_FFMPEG"] = directory.appendingPathComponent("hardware-failure-ffmpeg").path
+        let recovered = try await MediaPreparer(environment: hardwareFailureEnvironment).prepare(
+            ResolvedSource(url: URL(string: base + "/vp9-opus.mkv")!, needsPreparation: true,
+                           conversionPolicy: .allowVideo))
+        try check(recovered.url.pathExtension == "m3u8" && recovered.playbackPath == .videoConversion,
+                  "Failed hardware job did not recover through software HLS")
+        let attempts = try String(contentsOf: directory.appendingPathComponent("encoder-attempts.txt"), encoding: .utf8)
+        try check(attempts.split(separator: "\n") == ["hardware-preflight", "hardware-job", "software-job"],
+                  "Hardware was retried before software fallback: \(attempts)")
+        recovered.stop()
+        await recovered.waitForProducer()
+        print("PASS hardware startup failure switches directly to software without a second hardware job")
+
         let timedPreparer = MediaPreparer(environment: environment, maximumBytes: 2 * 1024 * 1024 * 1024,
                                           startupTimeout: .milliseconds(200))
         let timedFallback = try await timedPreparer.prepare(ResolvedSource(url: URL(string: base + "/combined.mp4")!))
@@ -122,7 +136,20 @@ struct ProgressiveChecks {
         let (joinedBytes, _) = try await fetch(joined.url.deletingLastPathComponent().appendingPathComponent("segment000000.ts"))
         try joinedBytes.write(to: directory.appendingPathComponent("joined.ts"))
         joined.stop()
-        print("PASS startup deadline, unfinished-segment and source-size headroom limits and short separate-track HLS")
+        // Progressive delivery also serves converted tracks, not only copies.
+        let converting = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/vp9-opus.mkv")!,
+            needsPreparation: true, conversionPolicy: .allowVideo))
+        try check(converting.playbackPath == .videoConversion && converting.url.pathExtension == "m3u8",
+                  "Progressive HLS did not serve the video-conversion tier")
+        let (conversionPlaylist, conversionResponse) = try await fetch(converting.url)
+        try check(conversionResponse.statusCode == 200
+                  && String(decoding: conversionPlaylist, as: UTF8.self).hasPrefix("#EXTM3U"),
+                  "Converted HLS playlist was not served")
+        let (convertedSegment, _) = try await fetch(converting.url.deletingLastPathComponent()
+            .appendingPathComponent("segment000000.ts"))
+        try convertedSegment.write(to: directory.appendingPathComponent("converted.ts"))
+        converting.stop()
+        print("PASS startup deadline, unfinished-segment and source-size headroom limits, short separate-track and validated opt-in converted HLS")
 
         // Native readiness must stay paused and finite while the producer is active.
         let controller = PlaybackController(resolveSource: { url in

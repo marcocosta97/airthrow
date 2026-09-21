@@ -105,7 +105,7 @@ struct PreparationChecks {
         print("PASS local MKV inspection and stream-copy remux")
 
         let split = ResolvedSource(url: URL(string: base + "/video.mp4")!,
-            audio: MediaTrack(url: URL(string: base + "/audio.m4a")!))
+            audio: MediaTrack(url: URL(string: base + "/audio.m4a")!), plannedPath: .remux)
         let joined = try await preparer.prepare(split, mode: .completeFile)
         let (joinedData, _) = try await fetch(joined.url)
         try joinedData.write(to: directory.appendingPathComponent("joined.mp4"))
@@ -113,16 +113,105 @@ struct PreparationChecks {
         let multiple = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/multitrack.mkv")!), mode: .completeFile)
         multiple.stop()
         print("PASS multi-track input selects a compatible audio stream")
+
+        // Audio-only conversion copies H.264 and encodes FLAC to AAC. The path
+        // must be published before processing and the video track preserved.
+        let flacRecorder = PlanRecorder()
+        let audioConverted = try await preparer.prepare(
+            ResolvedSource(url: URL(string: base + "/flac.mkv")!),
+            mode: .completeFile, onPlan: { await flacRecorder.record($0) })
+        try check(audioConverted.playbackPath == .audioConversion,
+                  "FLAC audio was not reported as audio conversion")
+        try check(await flacRecorder.paths() == [.audioConversion],
+                  "onPlan did not publish the audio-conversion path before processing")
+        let (audioConvertedData, _) = try await fetch(audioConverted.url)
+        try audioConvertedData.write(to: directory.appendingPathComponent("audio-converted.mp4"))
+        audioConverted.stop()
+
+        // Video conversion is opt-in: the same VP9/Opus fixture is refused by
+        // default and converted only when the source allows video conversion.
+        try await expect(.preparationRequired) {
+            _ = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/vp9-opus.mkv")!,
+                                                          needsPreparation: true))
+        }
+        let videoRecorder = PlanRecorder()
+        let videoSource = ResolvedSource(url: URL(string: base + "/vp9-opus.mkv")!,
+                                         needsPreparation: true, conversionPolicy: .allowVideo)
+        let videoConverted = try await preparer.prepare(videoSource, mode: .completeFile,
+                                                        onPlan: { await videoRecorder.record($0) })
+        try check(videoConverted.playbackPath == .videoConversion,
+                  "VP9/Opus source was not reported as video conversion")
+        try check(await videoRecorder.paths() == [.videoConversion],
+                  "onPlan did not publish the video-conversion path before processing")
+        let (videoConvertedData, _) = try await fetch(videoConverted.url)
+        try videoConvertedData.write(to: directory.appendingPathComponent("video-converted.mp4"))
+        videoConverted.stop()
+
+        // A 4K source is downscaled and a 100 fps source is capped at 60 fps,
+        // rather than being refused for exceeding the copy bounds.
+        let uhdSource = ResolvedSource(url: URL(string: base + "/uhd.mkv")!,
+                                       needsPreparation: true, conversionPolicy: .allowVideo)
+        let uhdConverted = try await preparer.prepare(uhdSource, mode: .completeFile)
+        try check(uhdConverted.playbackPath == .videoConversion, "High-resolution source was not converted")
+        let (uhdData, _) = try await fetch(uhdConverted.url)
+        try uhdData.write(to: directory.appendingPathComponent("uhd-converted.mp4"))
+        uhdConverted.stop()
+        let highFpsSource = ResolvedSource(url: URL(string: base + "/highfps.mkv")!,
+                                           needsPreparation: true, conversionPolicy: .allowVideo)
+        let highFpsConverted = try await preparer.prepare(highFpsSource, mode: .completeFile)
+        try check(highFpsConverted.playbackPath == .videoConversion, "High-frame-rate source was not converted")
+        let (highFpsData, _) = try await fetch(highFpsConverted.url)
+        try highFpsData.write(to: directory.appendingPathComponent("highfps-converted.mp4"))
+        highFpsConverted.stop()
+
+        // An unsupported 10-bit pixel layout is refused even when conversion is allowed.
+        try await expect(.preparationRequired) {
+            _ = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/tenbit.mkv")!,
+                                                          needsPreparation: true, conversionPolicy: .allowVideo))
+        }
+
+        // A helper that refuses the hardware preflight still converts in software;
+        // one that refuses every H.264 preflight fails before any conversion.
+        var softwareEnvironment = environment
+        softwareEnvironment["AIRPLAYER_FFMPEG"] = directory.appendingPathComponent("software-ffmpeg").path
+        let softwareSource = ResolvedSource(url: URL(string: base + "/vp9-opus.mkv")!,
+                                            needsPreparation: true, conversionPolicy: .allowVideo)
+        let softwareConverted = try await MediaPreparer(environment: softwareEnvironment)
+            .prepare(softwareSource, mode: .completeFile)
+        try check(softwareConverted.playbackPath == .videoConversion, "Software fallback did not convert")
+        let (softwareData, _) = try await fetch(softwareConverted.url)
+        try softwareData.write(to: directory.appendingPathComponent("software-converted.mp4"))
+        softwareConverted.stop()
+        var noEncoderEnvironment = environment
+        noEncoderEnvironment["AIRPLAYER_FFMPEG"] = directory.appendingPathComponent("no-encoder-ffmpeg").path
+        try await expect(.preparationFailed) {
+            _ = try await MediaPreparer(environment: noEncoderEnvironment)
+                .prepare(softwareSource, mode: .completeFile)
+        }
+
+        // HDR is refused even when video conversion is allowed; output stays SDR.
+        try await expect(.preparationRequired) {
+            _ = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/hdr.mkv")!,
+                                                          needsPreparation: true, conversionPolicy: .allowVideo))
+        }
+        // Absent tracks are refused rather than silently dropping a stream.
+        try await expect(.preparationRequired) {
+            _ = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/audio.m4a")!,
+                                                          needsPreparation: true))
+        }
+        try await expect(.preparationRequired) {
+            _ = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/video.mp4")!,
+                                                          needsPreparation: true))
+        }
+        print("PASS selective audio/video conversion, opt-in video, 4K/100fps bounds, 10-bit/HDR refusal, software fallback, onPlan")
+
         let shortLimit = MediaPreparer(environment: environment, maximumBytes: 1000)
         try await expect(.preparationLimit) { _ = try await shortLimit.prepare(source) }
-        try await expect(.preparationRequired) {
-            _ = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/flac.mkv")!))
-        }
         var missingEnvironment = environment
         missingEnvironment["AIRPLAYER_FFMPEG"] = "/missing/ffmpeg"
         let missingHelper = MediaPreparer(environment: missingEnvironment)
         try await expect(.preparerUnavailable) { _ = try await missingHelper.prepare(source) }
-        print("PASS separate H.264/AAC tracks, unsupported audio, size limit and missing helpers")
+        print("PASS size limit and missing helpers")
 
         // A slow helper verifies cancellation while a workspace is live, rather than during inspection.
         let slow = directory.appendingPathComponent("slow-ffmpeg")
@@ -138,7 +227,15 @@ struct PreparationChecks {
         catch is CancellationError {}
         let afterCancel = Set(try FileManager.default.contentsOfDirectory(atPath: cache.path))
         try check(afterCancel.isEmpty, "Cancelled or stopped preparation retained media")
-        print("PASS cancellation and abandoned/active workspace cleanup")
+        // Conversion jobs cancel through the same producer lifecycle.
+        let cancelledConversion = Task { try await slowPreparer.prepare(videoSource) }
+        try await Task.sleep(for: .milliseconds(600))
+        cancelledConversion.cancel()
+        do { _ = try await cancelledConversion.value; try check(false, "Cancelled conversion succeeded") }
+        catch is CancellationError {}
+        try check(Set(try FileManager.default.contentsOfDirectory(atPath: cache.path)).isEmpty,
+                  "Cancelled conversion retained media")
+        print("PASS cancellation, conversion cancellation and abandoned/active workspace cleanup")
 
         let preparingController = PlaybackController(resolveSource: { _ in split }, prepareSource: { try await slowPreparer.prepare($0) })
         try preparingController.load("https://youtu.be/BaW_jenozKc")
@@ -215,4 +312,11 @@ struct PreparationChecks {
         print("PASS source-independent remux fallback and title preservation")
         print("Preparation checks passed; receiver playback remains untested")
     }
+}
+
+/// Records the path published by `onPlan` so tests can assert it fires before processing.
+private actor PlanRecorder {
+    private var values: [PlaybackPath] = []
+    func record(_ path: PlaybackPath) { values.append(path) }
+    func paths() -> [PlaybackPath] { values }
 }
