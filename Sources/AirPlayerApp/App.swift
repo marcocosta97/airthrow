@@ -19,7 +19,8 @@ struct AirPlayerMain {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate, NSToolbarDelegate {
-    private static let controllerHeight: CGFloat = 414
+    // Content needs ~395pt; the unified toolbar adds a 52pt top safe-area inset.
+    private static let controllerHeight: CGFloat = 452
     private let controller = PlaybackController()
     private let presentation = ControllerPresentation()
     private let server = CommandServer()
