@@ -6,11 +6,11 @@
 - `Sources/AirThrowCore`: validation, playback policy, command protocol, and local socket.
 - `Sources/AirThrowCLI`: command parsing and app launch.
 - `Tests`: core checks and focused controller checks.
-- `scripts`: packaging, Xcode project generation, icon generation, and test fixtures.
+- `scripts`: packaging, Xcode project generation, icon compilation, and test fixtures.
 
 Use Apple's public APIs and the system receiver picker. Keep one playback session shared by the UI and CLI, with no local video presentation. Derive status from observed playback state and cancel stale work when media changes.
 
-`SourceResolver` dispatches discovery to direct/YouTube/local adapters. Adapters return complete `MediaCandidate` presentations rather than selecting one: an upstream master, combined file, paired audio/video tracks, or a validated local regular file. `MediaSelector` ranks them without provider-specific logic and returns a `ResolvedSource` execution plan. Native playback wins over remuxing by default; within a tier, known resolution wins, HLS breaks resolution ties, then bitrate. HLS quality comes from eligible variants in the inspected master and is not the observed playback quality. Unknown direct media remains eligible for a native attempt without helper/network preflight. Local MP4/MOV files are served in place, while MKV/WebM enter stream-copy preparation. The shared remux fallback handles initial native format failures; HLS, network/DRM failures and already-prepared sources do not enter that fallback. `MediaPreparer` still validates actual streams before copying them.
+`SourceResolver` dispatches discovery to direct/YouTube/local adapters. Adapters return complete `MediaCandidate` presentations rather than selecting one: an upstream master, combined file, paired audio/video tracks, or a validated local regular file. `MediaSelector` ranks them without provider-specific logic and returns a `ResolvedSource` execution plan. Native playback wins over remuxing by default; within a tier, known resolution wins, HLS breaks resolution ties, then bitrate. HLS quality comes from eligible variants in the inspected master and is not the observed playback quality. Unknown direct media remains eligible for a native attempt without helper/network preflight, except remote MKV/WebM, which enter preparation like local MKV/WebM. Local MP4/MOV files are served in place. The shared remux fallback handles initial native format failures; HLS, network/DRM failures and already-prepared sources do not enter that fallback. `MediaPreparer` still validates actual streams before copying them.
 
 The additive protocol-v1 `playbackPath` reports `direct`, `remux`, `audio_conversion`, or `video_conversion`, and is absent before selection, after Stop, and on terminal failure. An unknown preparation plan remains unlabelled while inspection runs; prepared media reports the actual path used. The UI and CLI use the same snapshot. It neither exposes candidate URLs nor asserts receiver compatibility. Resolver/core checks cover ranking independently of adapter order, preserving alternatives, lower-quality HLS versus native MP4, and bounded fallback; preparation checks cover label changes and cleanup across replacement/Stop.
 
@@ -22,7 +22,14 @@ Run the source-choice controller regressions sequentially with the other AVPlaye
 python3 scripts/source-choice-checks.py
 ```
 
-The suite uses synthetic local fixtures and injected candidates to verify automatic selection, explicit reloads, stale IDs, queue navigation, conversion preference scope, missing or ambiguous refreshed candidates, direct-load gating, privacy, and stale resolver completion. Identity intentionally includes exact format metadata: metadata jitter invalidates an explicit choice rather than guessing between potentially different presentations. URL/header rotation alone does not invalidate identity. It does not exercise a live website or receiver.
+The suite uses synthetic local fixtures and injected candidates to verify automatic selection, explicit reloads, stale IDs, queue navigation, captured load preferences, missing or ambiguous refreshed candidates, direct-load gating, privacy, and stale resolver completion. Fallback regressions verify that an explicit choice retains its presentation while Automatic can choose the best remux, with bounded preparation attempts. Identity intentionally includes exact format metadata: metadata jitter invalidates an explicit choice rather than guessing between potentially different presentations. URL/header rotation alone does not invalidate identity. It does not exercise a live website or receiver.
+
+Settings checks use synthetic cookie probes to verify serialized reads, coalesced preference changes, and rejection of stale results. They do not read browser data:
+
+```bash
+swiftc -swift-version 6 -parse-as-library Sources/AirThrowCore/*.swift Sources/AirThrowApp/MediaDiagnostics.swift Sources/AirThrowApp/PlaybackController.swift Sources/AirThrowApp/SettingsView.swift Tests/SettingsChecks/main.swift -o .build/SettingsChecks
+.build/SettingsChecks
+```
 
 ## Core checks
 
@@ -109,7 +116,7 @@ The same suite also uses a paced 20-second fixture to check HLS readiness before
 
 The preparation suite also checks local-file parsing, symlink resolution, zero-copy MP4 delivery, source preservation after Stop, path privacy, MKV remuxing, replacement cleanup, and packet identity. Local delivery uses the selected file in place; tests must never place a disposable fixture over a user-owned path.
 
-Progressive stream copy uses FFmpeg’s [HLS EVENT muxer and `temp_file` flag](https://ffmpeg.org/ffmpeg-formats.html#hls-2). Two seconds is a segment target; stream copy cuts at source keyframes. Startup requires at least three complete segments covering six seconds and production averaging at least real time, or validated completion for short media. A 30-second startup deadline falls back once to MP4 before returning a URL. `MediaPreparer.prepare(_:mode:)` can explicitly select `.completeFile`; the app also accepts `AIRTHROW_PREPARATION_MODE=complete-file` in its launch environment. After handoff, a producer failure ends the session rather than advancing a playlist. Stop detaches it and closes delivery immediately, cancels the process group, and keeps the workspace lease until the helper is reaped; Quit awaits this cleanup.
+The app defaults to finalized MP4 preparation so finite videos are not presented as live on the receiver. The experimental progressive path can be tested with `MediaPreparer.prepare(_:mode: .progressiveHLS)` or `AIRTHROW_PREPARATION_MODE=progressive-hls`. It uses FFmpeg’s [HLS EVENT muxer and `temp_file` flag](https://ffmpeg.org/ffmpeg-formats.html#hls-2). Two seconds is a segment target; stream copy cuts at source keyframes. Startup requires at least three complete segments covering six seconds and production averaging at least real time, or validated completion for short media. A 30-second startup deadline falls back once to MP4 before returning a URL. After handoff, a producer failure ends the session rather than advancing a playlist. Stop closes delivery and cancels the process group, keeping the workspace lease until the helper is reaped; Quit awaits this cleanup.
 
 For a bounded live website check, the generated `PreparationChecks` binary also accepts `--website URL`. It resolves, prepares when required, checks native audio/video tracks, and removes its temporary result. This downloads the selected media; use a short public test clip. It does not verify receiver playback.
 

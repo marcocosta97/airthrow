@@ -189,7 +189,7 @@ enum LocalSourceAdapter {
         // MP4/MOV and unknown containers get one native attempt through the LAN
         // server. Containers AVPlayer normally cannot read go straight to the
         // existing stream-copy inspection/remux path.
-        let needsRemux = ["mkv", "webm"].contains(ext)
+        let needsRemux = ["mkv", "webm", "mpg", "mpeg", "vob"].contains(ext)
         return [MediaCandidate(source: ResolvedSource(
             url: url, title: url.lastPathComponent, needsPreparation: needsRemux,
             needsDelivery: true, delivery: .file))]
@@ -198,9 +198,14 @@ enum LocalSourceAdapter {
 
 enum DirectSourceAdapter {
     static func candidates(_ url: URL) -> [MediaCandidate] {
-        // Unknown/extensionless URLs retain the native attempt. A URL alone
-        // cannot tell us which other presentations a publisher might offer.
-        let delivery: MediaDelivery = url.pathExtension.lowercased() == "m3u8" ? .hls : .unknown
-        return [MediaCandidate(source: ResolvedSource(url: url, delivery: delivery))]
+        // Like local Matroska/WebM, these containers need inspection and a
+        // compatible delivery format before handing a URL to AVPlayer. Keep
+        // the native attempt for unknown/extensionless URLs: an extension is
+        // only a routing hint, not proof of the contained codecs.
+        let ext = url.pathExtension.lowercased()
+        let needsPreparation = ["mkv", "webm", "mpg", "mpeg", "vob"].contains(ext)
+        let delivery: MediaDelivery = ext == "m3u8" ? .hls : (needsPreparation ? .file : .unknown)
+        return [MediaCandidate(source: ResolvedSource(url: url, needsPreparation: needsPreparation,
+                                                       delivery: delivery))]
     }
 }

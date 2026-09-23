@@ -16,6 +16,26 @@ struct PreparationChecks {
         catch { print("FAIL preparation checks: \(error)"); exit(1) }
     }
     static func run() async throws {
+        if (3...4).contains(CommandLine.arguments.count), CommandLine.arguments[1] == "--remote" {
+            let input = try MediaInput.url(CommandLine.arguments[2])
+            let policy: ConversionPolicy = CommandLine.arguments.count == 4 && CommandLine.arguments[3] == "allow-video"
+                ? .allowVideo : .avoidVideo
+            let source = try await SourceResolver().resolve(input, policy: policy)
+            try check(source.needsPreparation && source.playbackPath == .remux,
+                      "Remote container did not enter preparation")
+            var environment = ProcessInfo.processInfo.environment
+            environment["AIRTHROW_MEDIA_HOST"] = "127.0.0.1"
+            let prepared = try await MediaPreparer(environment: environment).prepare(source,
+                onPlan: { print("Remote inspection selected \($0.label)") })
+            defer { prepared.stop() }
+            try check(prepared.videoHeight != nil, "Remote inspection lost video quality")
+            await prepared.waitForProducer()
+            try check(prepared.productionFailure == nil, "Remote production failed after initial readiness")
+            let asset = AVURLAsset(url: prepared.url)
+            try check(try await asset.load(.isPlayable), "Prepared remote source is not natively playable")
+            print("PASS remote \(prepared.videoHeight!)p \(prepared.playbackPath.label) with playable native asset; receiver untested")
+            return
+        }
         if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--website" {
             do {
                 let source = try await SourceResolver().resolve(MediaInput.url(CommandLine.arguments[2]))
@@ -104,6 +124,23 @@ struct PreparationChecks {
         localRemux.stop()
         print("PASS local MKV inspection and stream-copy remux")
 
+        let mpegURL = directory.appendingPathComponent("synthetic.mpg")
+        let mpegSource = try await SourceResolver().resolve(mpegURL, policy: .allowVideo)
+        try check(mpegSource.needsPreparationPipeline, "MPEG-PS bypassed inspection")
+        do {
+            _ = try await preparer.prepare(mpegSource.withConversionPolicy(.avoidVideo))
+            try check(false, "MPEG-2 video bypassed opt-in conversion")
+        } catch let PreparationFailure.videoConversionRequired(height, _) {
+            try check(height == 180, "MPEG fixture quality was not inspected")
+        }
+        let mpegConverted = try await preparer.prepare(mpegSource)
+        try check(mpegConverted.playbackPath == .videoConversion && mpegConverted.videoHeight == 180,
+                  "MPEG-PS conversion lost the source's path or quality")
+        let mpegAsset = AVURLAsset(url: mpegConverted.url)
+        try check(try await mpegAsset.load(.isPlayable), "Converted MPEG-PS is not a playable MP4")
+        mpegConverted.stop()
+        print("PASS synthetic MPEG-PS inspection, opt-in conversion and playable MP4")
+
         let split = ResolvedSource(url: URL(string: base + "/video.mp4")!,
             audio: MediaTrack(url: URL(string: base + "/audio.m4a")!), plannedPath: .remux)
         let joined = try await preparer.prepare(split, mode: .completeFile)
@@ -111,7 +148,20 @@ struct PreparationChecks {
         try joinedData.write(to: directory.appendingPathComponent("joined.mp4"))
         joined.stop()
         let multiple = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/multitrack.mkv")!), mode: .completeFile)
+        try check(multiple.videoHeight != nil, "Inspected video resolution was not retained")
         multiple.stop()
+        for ext in ["mkv", "webm", "mpg", "mpeg"] {
+            let url = URL(string: "https://example.com/movie.\(ext)?token=private")!
+            let source = try await SourceResolver().resolve(url)
+            try check(source.needsPreparationPipeline && source.playbackPath == .remux,
+                      "Remote \(ext) was incorrectly handed to native playback")
+            try check(source.url == url, "Signed remote source URL changed")
+        }
+        for ext in ["mp4", "m3u8", "unknown"] {
+            let source = try await SourceResolver().resolve(URL(string: "https://example.com/movie.\(ext)")!)
+            try check(!source.needsPreparationPipeline && source.playbackPath == .direct,
+                      "Native-first behavior changed for \(ext)")
+        }
         print("PASS multi-track input selects a compatible audio stream")
 
         // Audio-only conversion copies H.264 and encodes FLAC to AAC. The path
@@ -130,9 +180,12 @@ struct PreparationChecks {
 
         // Video conversion is opt-in: the same VP9/Opus fixture is refused by
         // default and converted only when the source allows video conversion.
-        try await expect(.preparationRequired) {
+        do {
             _ = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/vp9-opus.mkv")!,
                                                           needsPreparation: true))
+            try check(false, "Video conversion bypassed its preference")
+        } catch let PreparationFailure.videoConversionRequired(height, _) {
+            try check(height != nil, "Rejected conversion lost inspected quality")
         }
         let videoRecorder = PlanRecorder()
         let videoSource = ResolvedSource(url: URL(string: base + "/vp9-opus.mkv")!,
@@ -141,6 +194,7 @@ struct PreparationChecks {
                                                         onPlan: { await videoRecorder.record($0) })
         try check(videoConverted.playbackPath == .videoConversion,
                   "VP9/Opus source was not reported as video conversion")
+        try check(videoConverted.videoHeight != nil, "Converted source resolution was not retained")
         try check(await videoRecorder.paths() == [.videoConversion],
                   "onPlan did not publish the video-conversion path before processing")
         let (videoConvertedData, _) = try await fetch(videoConverted.url)

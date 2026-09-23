@@ -2,12 +2,19 @@ import Foundation
 import AVFoundation
 import Darwin
 
-public enum PreparationFailure: Error, Sendable {
-    case unavailable, unsupported, failed, limit, delivery
+// Container duration may include an unselected subtitle or data track that
+// outlasts the video. Keep completion validation strict for short clips, with
+// at most two seconds of tolerance for longer sources.
+private func completionTolerance(for duration: Double) -> Double {
+    max(0.5, min(2, duration * 0.05))
+}
+
+public enum PreparationFailure: Error, Sendable, Equatable {
+    case unavailable, unsupported, videoConversionRequired(height: Int?, frameRate: Double?), failed, limit, delivery
     public var reason: MediaFailureReason {
         switch self {
         case .unavailable: .preparerUnavailable
-        case .unsupported: .preparationRequired
+        case .unsupported, .videoConversionRequired: .preparationRequired
         case .failed: .preparationFailed
         case .limit: .preparationLimit
         case .delivery: .deliveryUnavailable
@@ -24,6 +31,9 @@ public final class PreparedMedia {
     /// The tier actually used to produce this media: `.direct` for in-place
     /// local delivery, otherwise the inspected remux/audio/video conversion.
     public let playbackPath: PlaybackPath
+    /// Source-video quality observed by ffprobe, not a receiver rendition.
+    public let videoHeight: Int?
+    public let videoFrameRate: Double?
     public private(set) var productionFailure: PreparationFailure?
     public private(set) var isProducing = false
     public var onFailure: (@MainActor (PreparationFailure) -> Void)?
@@ -31,9 +41,11 @@ public final class PreparedMedia {
     private let server: MediaHTTPServer
     private var workspace: PreparationWorkspace?
     fileprivate init(server: MediaHTTPServer, workspace: PreparationWorkspace? = nil,
-                     sourceDuration: Double? = nil, playbackPath: PlaybackPath = .remux) {
+                     sourceDuration: Double? = nil, playbackPath: PlaybackPath = .remux,
+                     videoHeight: Int? = nil, videoFrameRate: Double? = nil) {
         self.server = server; self.workspace = workspace; self.sourceDuration = sourceDuration
         self.playbackPath = playbackPath
+        self.videoHeight = videoHeight; self.videoFrameRate = videoFrameRate
         url = server.url!
     }
 
@@ -53,7 +65,7 @@ public final class PreparedMedia {
                     })
                 try workspace.checkSize(maximumBytes)
                 let playlist = try HLSPlaylist(directory: workspace.directory)
-                guard playlist.complete, playlist.duration >= duration - 0.5,
+                guard playlist.complete, playlist.duration >= duration - completionTolerance(for: duration),
                       playlist.duration <= duration + 2 else { throw PreparationFailure.failed }
             } catch is CancellationError {
                 // Cancellation belongs to Stop/replacement, not a playback error.
@@ -69,10 +81,13 @@ public final class PreparedMedia {
 
     public func waitForProducer() async { await producer?.value }
     deinit { producer?.cancel() }
+    /// Halt conversion during a player-item handoff while keeping its delivery
+    /// server alive until AVPlayer has received the replacement item.
+    public func cancelProduction() { producer?.cancel() }
     public func stop() {
         onFailure = nil
         server.stop()
-        producer?.cancel()
+        cancelProduction()
         workspace = nil
     }
 }
@@ -178,7 +193,10 @@ public struct MediaPreparer: Sendable {
     /// a control surface can label a job that has not produced media yet.
     public func prepare(_ source: ResolvedSource, mode: PreparationMode? = nil,
                         onPlan: (@Sendable (PlaybackPath) async -> Void)? = nil) async throws -> PreparedMedia {
-        let mode = mode ?? (environment["AIRTHROW_PREPARATION_MODE"] == "complete-file" ? .completeFile : .progressiveHLS)
+        // A growing EVENT playlist is presented as live by AirPlay receivers,
+        // even when its source duration is known. Hand off a finalized VOD file
+        // for finite media so receiver seeking and host controls remain usable.
+        let mode = mode ?? (environment["AIRTHROW_PREPARATION_MODE"] == "progressive-hls" ? .progressiveHLS : .completeFile)
         try Task.checkCancellation()
         // Resolve a LAN address before downloading. Loopback requires an explicit test override.
         let host = try environment["AIRTHROW_MEDIA_HOST"] ?? MediaHTTPServer.localAddress()
@@ -284,11 +302,13 @@ public struct MediaPreparer: Sendable {
                 guard verified.streams.count == 2,
                       verified.streams.contains(where: { $0.copyableVideo }),
                       verified.streams.contains(where: { $0.copyableAudio }),
-                      duration >= videoDuration - 0.5, duration <= videoDuration + 2 else { throw PreparationFailure.failed }
+                      duration >= videoDuration - completionTolerance(for: videoDuration),
+                      duration <= videoDuration + 2 else { throw PreparationFailure.failed }
                 let server = try await MediaHTTPServer.start(file: output, host: host)
                 do { try Task.checkCancellation() }
                 catch { await server.stop(); throw error }
-                return await PreparedMedia(server: server, workspace: workspace, playbackPath: plan.path)
+                return await PreparedMedia(server: server, workspace: workspace, playbackPath: plan.path,
+                                           videoHeight: plan.video.height, videoFrameRate: plan.video.frameRate)
             }
             let encoder = plan.videoAction == .convert
                 ? try await Self.selectEncoder(stream: plan.video, executable: ffmpeg)
@@ -319,7 +339,8 @@ public struct MediaPreparer: Sendable {
             playlist.path]
         let server = try await MediaHTTPServer.start(file: playlist, host: host, hls: true)
         let prepared = PreparedMedia(server: server, workspace: workspace, sourceDuration: duration,
-                                     playbackPath: playbackPath)
+                                     playbackPath: playbackPath, videoHeight: plan.video.height,
+                                     videoFrameRate: plan.video.frameRate)
         prepared.produce(executable: executable, arguments: arguments, workspace: workspace,
                          maximumBytes: maximumBytes, timeout: timeout, duration: duration)
         let started = ContinuousClock.now
@@ -390,7 +411,9 @@ public struct MediaPreparer: Sendable {
             ?? audioInput.streams.first(where: { $0.convertibleAudio })
         guard let audio else { throw PreparationFailure.unsupported }
         let videoAction: TrackAction = video.copyableVideo ? .copy : .convert
-        guard videoAction == .copy || policy == .allowVideo else { throw PreparationFailure.unsupported }
+        guard videoAction == .copy || policy == .allowVideo else {
+            throw PreparationFailure.videoConversionRequired(height: video.height, frameRate: video.frameRate)
+        }
         return PreparationPlan(video: video, audio: audio, audioInput: separateAudio ? 1 : 0,
                                videoAction: videoAction, audioAction: audio.copyableAudio ? .copy : .convert)
     }
@@ -403,7 +426,7 @@ public struct MediaPreparer: Sendable {
         guard action == .convert else { return ["-c:v", "copy"] }
         var arguments = ["-c:v", encoder, "-pix_fmt", "yuv420p", "-profile:v", "high", "-level:v", "4.2",
                          "-b:v", "4000k", "-maxrate", "4000k", "-bufsize", "8000k",
-                         "-g", "120", "-keyint_min", "120", "-sc_threshold", "0",
+                         "-color_range", "tv", "-g", "120", "-keyint_min", "120", "-sc_threshold", "0",
                          "-force_key_frames", "expr:gte(t,n_forced*2)",
                          "-vf", Self.scaleFilter(for: stream)]
         arguments += encoder == "h264_videotoolbox" ? ["-allow_sw", "0"] : ["-preset", "veryfast"]
@@ -412,6 +435,9 @@ public struct MediaPreparer: Sendable {
 
     private static func scaleFilter(for stream: Stream) -> String {
         var filter = "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"
+        // Full-range VP9 can otherwise retain a yuvj420p output despite
+        // -pix_fmt yuv420p. Normalize it to the bounded SDR output range.
+        if stream.color_range == "pc" { filter += ":in_range=full:out_range=tv" }
         if let fps = stream.frameRate, fps > 60 { filter += ",fps=60" }
         return filter
     }
@@ -482,6 +508,7 @@ public struct MediaPreparer: Sendable {
         if plan.videoAction == .convert {
             guard video.codec_name == "h264", video.pix_fmt == "yuv420p",
                   (video.profile ?? "").localizedCaseInsensitiveContains("high"),
+                  video.color_range != "pc",
                   (1...1920).contains(video.width ?? 0),
                   (video.width ?? 0) <= min(1920, plan.video.width ?? 1920),
                   (1...1080).contains(video.height ?? 0),
@@ -508,7 +535,7 @@ public struct MediaPreparer: Sendable {
 
     private static func inputOptions(headers: [String: String]) throws -> [String] {
         // Only simple HTTP files are prepared in this slice; playlist/proxy handling is separate work.
-        var options = ["-protocol_whitelist", "http,https,tcp,tls", "-format_whitelist", "mov,matroska,webm",
+        var options = ["-protocol_whitelist", "http,https,tcp,tls", "-format_whitelist", "mov,matroska,webm,mpeg",
                        "-rw_timeout", "15000000", "-probesize", "5000000", "-analyzeduration", "5000000"]
         guard headers.count <= 8, headers.allSatisfy({ key, value in
             ["user-agent", "accept", "accept-language", "sec-fetch-mode"].contains(key.lowercased())
@@ -524,7 +551,7 @@ public struct MediaPreparer: Sendable {
         if url.isFileURL {
             guard headers.isEmpty else { throw PreparationFailure.unsupported }
             _ = try MediaInput.localFile(url)
-            return ["-protocol_whitelist", "file", "-format_whitelist", "mov,matroska,webm",
+            return ["-protocol_whitelist", "file", "-format_whitelist", "mov,matroska,webm,mpeg",
                     "-probesize", "5000000", "-analyzeduration", "5000000", "-i", url.path]
         }
         return try inputOptions(headers: headers) + ["-i", url.absoluteString]
@@ -541,12 +568,12 @@ public struct MediaPreparer: Sendable {
         if mpegts {
             options = ["-protocol_whitelist", "file", "-f", "mpegts"]
         } else if isLocal {
-            options = ["-protocol_whitelist", "file", "-format_whitelist", "mov,matroska,webm"]
+            options = ["-protocol_whitelist", "file", "-format_whitelist", "mov,matroska,webm,mpeg"]
         } else {
             options = try Self.inputOptions(headers: headers)
         }
         let arguments = ["-v", "error"] + options + ["-show_entries",
-            "format=duration,size:stream=index,codec_type,codec_name,codec_tag_string,pix_fmt,width,height,profile,channels,sample_rate,color_transfer,color_primaries,color_space,avg_frame_rate,r_frame_rate:stream_disposition=attached_pic:stream_side_data",
+            "format=duration,size:stream=index,codec_type,codec_name,codec_tag_string,pix_fmt,width,height,profile,channels,sample_rate,color_range,color_transfer,color_primaries,color_space,avg_frame_rate,r_frame_rate:stream_disposition=attached_pic:stream_side_data",
             "-of", "json", "-i", isLocal ? url.path : url.absoluteString]
         let data = try await runProbe(executable: executable, arguments: arguments,
                                       timeout: .seconds(mpegts ? 8 : 40), retry: !isLocal)
@@ -595,6 +622,7 @@ public struct MediaPreparer: Sendable {
         let channels: Int?
         let sample_rate: String?
         let color_transfer: String?
+        let color_range: String?
         let color_primaries: String?
         let color_space: String?
         let avg_frame_rate: String?
@@ -680,10 +708,10 @@ public struct MediaPreparer: Sendable {
             return true
         }
         private static let convertibleVideoCodecs: Set<String> = [
-            "h264", "hevc", "vp9", "vp8", "av1", "mpeg4", "mpeg2video", "prores", "mjpeg", "theora", "wmv3", "vc1"
+            "h264", "hevc", "vp9", "vp8", "av1", "mpeg4", "mpeg2video", "mpeg1video", "prores", "mjpeg", "theora", "wmv3", "vc1"
         ]
         private static let convertibleAudioCodecs: Set<String> = [
-            "aac", "flac", "opus", "vorbis", "mp3", "ac3", "eac3", "alac",
+            "aac", "flac", "opus", "vorbis", "mp3", "mp2", "ac3", "eac3", "alac",
             "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_f32le", "pcm_f64le",
             "pcm_u8", "pcm_s16be", "pcm_s24be", "pcm_mulaw", "pcm_alaw",
             "pcm_s16le_planar", "pcm_s24le_planar", "pcm_f32le_planar"

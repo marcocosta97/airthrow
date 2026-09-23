@@ -17,6 +17,7 @@ struct ProgressiveChecks {
         let directory = URL(fileURLWithPath: CommandLine.arguments[2])
         var environment = ProcessInfo.processInfo.environment
         environment["AIRTHROW_MEDIA_HOST"] = "127.0.0.1"
+        environment["AIRTHROW_PREPARATION_MODE"] = "progressive-hls"
         environment["AIRTHROW_FFMPEG"] = directory.appendingPathComponent("paced-ffmpeg").path
         let preparer = MediaPreparer(environment: environment)
         let source = ResolvedSource(url: URL(string: base + "/long.mp4")!, needsPreparation: true)
