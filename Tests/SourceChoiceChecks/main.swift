@@ -42,6 +42,19 @@ private func candidate(_ url: URL, title: String, id: String, height: Double,
                    id: id, height: height)
 }
 
+private actor PreparationRequests {
+    private(set) var urls: [URL] = []
+    func record(_ source: ResolvedSource) { urls.append(source.url) }
+}
+
+private actor FailureRequests {
+    private(set) var count = 0
+    func fail() throws -> [MediaCandidate] {
+        count += 1
+        throw ResolutionFailure.signInRequired
+    }
+}
+
 @main
 @MainActor
 struct SourceChoiceChecks {
@@ -101,6 +114,11 @@ struct SourceChoiceChecks {
             if let previousPreference { UserDefaults.standard.set(previousPreference, forKey: "allowVideoConversion") }
             else { UserDefaults.standard.removeObject(forKey: "allowVideoConversion") }
         }
+        let previousQuality = UserDefaults.standard.object(forKey: "preferHigherQuality")
+        defer {
+            if let previousQuality { UserDefaults.standard.set(previousQuality, forKey: "preferHigherQuality") }
+            else { UserDefaults.standard.removeObject(forKey: "preferHigherQuality") }
+        }
         guard CommandLine.arguments.count == 3 else {
             throw NSError(domain: "SourceChoiceChecks", code: 5,
                           userInfo: [NSLocalizedDescriptionKey: "Expected the fixture base URL and local video path"])
@@ -131,6 +149,7 @@ struct SourceChoiceChecks {
         try await explicitChoiceReResolves(website: website, high: native1080, low: native720)
         try await expiredIDsRejected(website: website, high: native1080, low: native720)
         try await queueResetsOverride(videoURL: videoURL, audioURL: audioURL)
+        try await playlistSignInStopsAtFirstItem()
         try await snapshotIsPrivate(base: base, website: website, secret: secret)
         try await conversionToggle(website: website, conversion: conversion1080, native: native720,
                                    prepareSource: prepareSource)
@@ -140,7 +159,10 @@ struct SourceChoiceChecks {
         try await collisionOnReResolution(website: website, high: native1080, low: native720)
         try await directLoadMidLoadRejected(videoURL: videoURL, native: native720)
         try await fallbackIdentityJitter(website: website, videoURL: videoURL, audioURL: audioURL)
-        print("12/12 source-choice controller checks passed (no physical receiver)")
+        try await delayedDiscoveryCapturesPreference(website: website, remux: remux1080, native: native720, prepareSource: prepareSource)
+        try await explicitFallbackPreservesChoice(website: website, videoURL: videoURL, audioURL: audioURL, prepareSource: prepareSource)
+        try await automaticFallbackUpgradesToBestRemux(website: website, audioURL: audioURL, prepareSource: prepareSource)
+        print("16/16 source-choice controller checks passed (no physical receiver)")
     }
 
     // Automatic selection prefers native playback even when a remux candidate
@@ -273,6 +295,24 @@ struct SourceChoiceChecks {
         try check(controller.snapshot.selectedSourceID == nil, "Override survived returning to an item")
         print("PASS queue navigation resets the per-item source override")
         await controller.shutdownAndWait()
+    }
+
+    static func playlistSignInStopsAtFirstItem() async throws {
+        let requests = FailureRequests()
+        let entries = (1...4).map {
+            PlaylistEntry(url: URL(string: "https://www.youtube.com/watch?v=SIGNIN\($0)")!, title: "Item \($0)")
+        }
+        let controller = PlaybackController(
+            resolveCandidates: { _ in try await requests.fail() },
+            resolvePlaylist: { _ in ResolvedPlaylist(title: "Sign-in queue", entries: entries, truncated: false) },
+            prepareSource: nil)
+        try controller.load("https://www.youtube.com/playlist?list=PLSIGNINLIST")
+        let result = try await settle(controller, states: [.failed])
+        try check(result.errorReason == .signInRequired && result.queue?.currentIndex == 0,
+                  "Sign-in failure advanced the playlist: reason=\(String(describing: result.errorReason)), index=\(String(describing: result.queue?.currentIndex))")
+        try check(await requests.count == 1, "Sign-in failure requested later playlist items")
+        await controller.shutdownAndWait()
+        print("PASS playlist sign-in failure stops at the first item")
     }
 
     // The published status must never expose media URLs, headers or provider IDs.
@@ -522,6 +562,118 @@ struct SourceChoiceChecks {
         try check(controller.player.currentItem == nil,
                   "A jittered fallback identity silently selected another presentation")
         print("PASS a float metadata jitter changes the fallback identity and the refreshed choice fails closed")
+        await controller.shutdownAndWait()
+    }
+
+    // A delayed resolver must use the preferQuality value captured when the
+    // load started, not the live property toggled mid-discovery. The new
+    // preference applies only to the next user load.
+    static func delayedDiscoveryCapturesPreference(website: URL, remux: MediaCandidate, native: MediaCandidate,
+                                                  prepareSource: @escaping @Sendable (ResolvedSource) async throws -> PreparedMedia) async throws {
+        let resolver = ScriptedResolver([website.absoluteString: [
+            .init(candidates: [remux, native], delay: .seconds(1)),
+            .init(candidates: [remux, native])
+        ]])
+        let controller = PlaybackController(resolveCandidates: { try await resolver.candidates(for: $0) },
+                                            preferQuality: false, prepareSource: prepareSource)
+        try controller.load(website.absoluteString)
+        try await Task.sleep(for: .milliseconds(300))
+        controller.setPreferQuality(true)
+        let first = try await settle(controller)
+        try check(first.title == "Native 720" && first.playbackPath == .direct,
+                  "Delayed discovery used live preferQuality instead of the captured false preference")
+        try check(await resolver.count() == 1, "First load resolved more than once")
+        // A settings change must not retroactively switch an already settled item.
+        controller.refresh()
+        try await Task.sleep(for: .milliseconds(50))
+        try check(controller.snapshot.title == "Native 720",
+                  "PreferQuality toggle retroactively changed the settled item")
+
+        try controller.load(website.absoluteString)
+        let second = try await settle(controller)
+        try check(second.title == "Remux 1080",
+                  "Next load did not apply the updated preferQuality preference")
+        try check(await resolver.count() == 2, "Second load did not resolve once")
+        print("PASS delayed discovery captures preferQuality per load, next load uses new setting")
+        await controller.shutdownAndWait()
+    }
+
+    // When an explicit choice fails with an unreadable native presentation,
+    // the fallback must remux the selected source itself rather than silently
+    // upgrading to the best remux candidate.
+    static func explicitFallbackPreservesChoice(website: URL, videoURL: URL, audioURL: URL,
+                                                prepareSource: @escaping @Sendable (ResolvedSource) async throws -> PreparedMedia) async throws {
+        let garbage = FileManager.default.temporaryDirectory
+            .appendingPathComponent("athrow-explicit-fallback-\(UUID().uuidString).bin")
+        try Data("not video data".utf8).write(to: garbage)
+        defer { try? FileManager.default.removeItem(at: garbage) }
+
+        let good = candidate(videoURL, title: "Native 720", id: "native-720", height: 720)
+        let broken = candidate(garbage, title: "Broken 480", id: "broken-480", height: 480)
+        let remux = candidate(audioURL, title: "Remux 1080", id: "remux-1080", height: 1080, plannedPath: .remux)
+
+        let resolver = ScriptedResolver([website.absoluteString: [.init(candidates: [good, broken, remux])]])
+        let prepared = PreparationRequests()
+        let controller = PlaybackController(resolveCandidates: { try await resolver.candidates(for: $0) },
+                                            preferQuality: false, prepareSource: {
+            await prepared.record($0)
+            return try await prepareSource($0)
+        })
+        try controller.load(website.absoluteString)
+        let automatic = try await settle(controller)
+        try check(automatic.title == "Native 720", "Automatic selection did not prefer the good direct source")
+        guard let brokenOption = automatic.sources?.first(where: { $0.quality == "480p" }) else {
+            throw NSError(domain: "SourceChoiceChecks", code: 50,
+                          userInfo: [NSLocalizedDescriptionKey: "Broken option was not published"])
+        }
+
+        let sharedPlayer = controller.player
+        let callsBefore = await resolver.count()
+        try controller.selectSource(brokenOption.id)
+        let chosen = try await settle(controller)
+        try check(await resolver.count() == callsBefore + 1,
+                  "Explicit choice did not re-resolve exactly once")
+        try check(chosen.title == "Broken 480" && chosen.quality == "480p",
+                  "Explicit fallback did not preserve the chosen presentation; got \(chosen.title) / \(chosen.quality ?? "nil")")
+        try check(chosen.selectedSourceID == chosen.sources?.first(where: { $0.quality == "480p" })?.id,
+                  "Explicit fallback did not keep the selected source ID")
+        try check(await prepared.urls == [garbage], "Explicit fallback prepared a different source or retried")
+        try check(controller.player === sharedPlayer && controller.player.rate == 0 && controller.player.isMuted,
+                  "Explicit fallback disturbed the shared paused player")
+        print("PASS explicit fallback preserves the chosen presentation by remuxing it")
+        await controller.shutdownAndWait()
+    }
+
+    // Automatic fallback without an explicit choice may upgrade to the best
+    // remux candidate, and the fallback must stay bounded (no re-resolution,
+    // no infinite loop).
+    static func automaticFallbackUpgradesToBestRemux(website: URL, audioURL: URL,
+                                                     prepareSource: @escaping @Sendable (ResolvedSource) async throws -> PreparedMedia) async throws {
+        let garbage = FileManager.default.temporaryDirectory
+            .appendingPathComponent("athrow-auto-fallback-\(UUID().uuidString).bin")
+        try Data("not video data".utf8).write(to: garbage)
+        defer { try? FileManager.default.removeItem(at: garbage) }
+
+        let broken = candidate(garbage, title: "Broken 480", id: "broken-480", height: 480)
+        let remux = candidate(audioURL, title: "Remux 1080", id: "remux-1080", height: 1080, plannedPath: .remux)
+
+        let resolver = ScriptedResolver([website.absoluteString: [.init(candidates: [broken, remux])]])
+        let prepared = PreparationRequests()
+        let controller = PlaybackController(resolveCandidates: { try await resolver.candidates(for: $0) },
+                                            preferQuality: false, prepareSource: {
+            await prepared.record($0)
+            return try await prepareSource($0)
+        })
+        try controller.load(website.absoluteString)
+        let settled = try await settle(controller)
+        try check(settled.title == "Remux 1080" && settled.quality == "1080p",
+                  "Automatic fallback did not upgrade to the best remux presentation")
+        try check(await resolver.count() == 1,
+                  "Automatic fallback re-resolved instead of using the fallback directly")
+        try check(await prepared.urls == [audioURL], "Automatic fallback did not prepare exactly its best remux")
+        try check(controller.player.currentItem != nil && controller.player.rate == 0,
+                  "Automatic fallback did not settle paused on the shared player")
+        print("PASS automatic fallback upgrades to the best remux presentation and stays bounded")
         await controller.shutdownAndWait()
     }
 }

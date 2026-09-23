@@ -396,7 +396,7 @@ public enum PlaybackPolicy {
     }
 
     public static func canSeek(_ snapshot: PlaybackSnapshot) -> Bool {
-        canControl(snapshot) && activeSeekRange(snapshot) != nil
+        canControl(snapshot) && !snapshot.seekableRanges.isEmpty && activeSeekRange(snapshot) != nil
     }
 
     public static func stateLabel(_ snapshot: PlaybackSnapshot) -> String {

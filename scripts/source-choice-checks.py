@@ -10,6 +10,7 @@ import http.server
 import json
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -34,9 +35,15 @@ def run(command, timeout=180):
                           capture_output=True, text=True, timeout=timeout)
 
 
-# Original two-second fixtures only; never reuse a user-owned file.
-run(['swift', ROOT / 'scripts' / 'make-test-video.swift', out / 'video.mp4'])
-run(['swift', ROOT / 'scripts' / 'add-test-audio.swift', out / 'video.mp4', out / 'audio.mp4'])
+# Original two-second fixtures only; never reuse a user-owned file. FFmpeg's
+# software encoder keeps this test independent of AVAssetWriter's hardware path.
+ffmpeg = shutil.which('ffmpeg') or '/opt/homebrew/bin/ffmpeg'
+run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-n', '-f', 'lavfi',
+     '-i', 'testsrc2=size=320x180:rate=24', '-t', '2', '-c:v', 'libx264',
+     '-pix_fmt', 'yuv420p', '-an', '-movflags', '+faststart', out / 'video.mp4'])
+run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-n', '-i', out / 'video.mp4',
+     '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '2',
+     '-c:v', 'copy', '-c:a', 'aac', '-ac', '2', '-movflags', '+faststart', out / 'audio.mp4'])
 
 FILES = {
     '/video.mp4': (out / 'video.mp4').read_bytes(),

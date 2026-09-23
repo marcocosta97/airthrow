@@ -8,6 +8,10 @@ import AirThrowCore
 
 @MainActor
 final class PlaybackController: ObservableObject {
+    private struct LoadPreferences {
+        let conversion: ConversionPolicy
+        let preferQuality: Bool
+    }
     private struct QueueState {
         let title: String
         let entries: [PlaylistEntry]
@@ -30,6 +34,9 @@ final class PlaybackController: ObservableObject {
     private var timeoutTask: Task<Void, Never>?
     private var probeTask: Task<Void, Never>?
     private var generation = UUID()
+    private var seekID: UUID?
+    private var probeID = UUID()
+    private var loadPreferences: LoadPreferences?
     private var loading = false
     private var resolving = false
     private var preparing = false
@@ -44,6 +51,7 @@ final class PlaybackController: ObservableObject {
     @Published private(set) var allowVideoConversion: Bool
     @Published private(set) var preferQuality: Bool
     private var preparedMedia: PreparedMedia?
+    private var retiredPreparedMedia: PreparedMedia?
     private let prepareSource: (@Sendable (ResolvedSource) async throws -> PreparedMedia)?
     private var websiteURL: URL?
     private var retriedResolution = false
@@ -74,9 +82,9 @@ final class PlaybackController: ObservableObject {
     private var playWhenReady = false
     private var pendingInitialSeek = false
     // A receiver chosen in the system picker sets the active route before the
-    // picker reports that it finished presenting. This short window lets that
-    // route observable publish; without one there is nothing left to negotiate.
-    private static let pickerDismissalGrace: Double = 2
+    // picker reports that it finished presenting. Allow a bounded window for
+    // the selected route to become active before ending a muted negotiation.
+    private static let pickerDismissalGrace: Double = 12
     private static let pickerOpenProbeTimeout: Double = 30
     private static let routeProbeTimeout: Double = 12
 
@@ -118,6 +126,7 @@ final class PlaybackController: ObservableObject {
             Task { @MainActor in self?.refresh() }
         }
         installRemoteCommands()
+        updateNowPlaying()
     }
 
     func load(_ input: String) throws {
@@ -180,8 +189,13 @@ final class PlaybackController: ObservableObject {
     /// appears above 30 so ordinary presentations stay "720p".
     private static func qualityLabel(_ candidate: MediaCandidate) -> String? {
         guard let height = candidate.height else { return nil }
-        var label = "\(Int(min(height, 100_000)))p"
-        if let frameRate = candidate.frameRate, frameRate > 30 { label += "\(Int(frameRate))" }
+        return qualityLabel(height: Int(min(height, 100_000)), frameRate: candidate.frameRate)
+    }
+
+    private static func qualityLabel(height: Int?, frameRate: Double?) -> String? {
+        guard let height, height > 0 else { return nil }
+        var label = "\(height)p"
+        if let frameRate, frameRate.isFinite, frameRate > 30 { label += "\(Int(frameRate))" }
         return label
     }
 
@@ -242,10 +256,12 @@ final class PlaybackController: ObservableObject {
     private func startLoad(_ url: URL, retry: Bool = false, fallback: ResolvedSource? = nil,
                            preservingQueue: Bool = false, autoplay: Bool = false,
                            titleOverride: String? = nil, sourceChoice: String? = nil,
-                           changingSource: Bool = false) {
+                           changingSource: Bool = false, preferences: LoadPreferences? = nil) {
+        let preferences = preferences ?? LoadPreferences(conversion: conversionPolicy, preferQuality: preferQuality)
         let retryRoute = hasOpenedPicker || player.isExternalPlaybackActive
         let retainedCandidates = fallback == nil ? [] : sourceCandidates
         resetItem(keepPlayerItem: true, preserveQueue: preservingQueue)
+        loadPreferences = preferences
         originalSourceURL = url
         self.sourceChoice = sourceChoice
         self.changingSource = changingSource
@@ -261,7 +277,7 @@ final class PlaybackController: ObservableObject {
         if !preservingQueue { notice = nil }
         refresh()
         let resolver = resolveCandidates
-        let policy = conversionPolicy
+        let policy = preferences.conversion
         loadTask = Task { [weak self] in
             defer { self?.drainingLoads.removeValue(forKey: id) }
             do {
@@ -289,7 +305,7 @@ final class PlaybackController: ObservableObject {
                         }
                     }
                     source = try MediaSelector.select(candidates, policy: policy, sourceID: sourceChoice,
-                                                      preferQuality: self.preferQuality)
+                                                      preferQuality: preferences.preferQuality)
                 }
                 guard let self, !Task.isCancelled, self.generation == id else { return }
                 self.selectedSource = source
@@ -310,6 +326,9 @@ final class PlaybackController: ObservableObject {
                     }
                     self.preparedMedia = prepared
                     self.actualPlaybackPath = prepared.playbackPath
+                    self.selectedQuality = Self.qualityLabel(height: prepared.videoHeight,
+                                                              frameRate: prepared.videoFrameRate)
+                        ?? self.selectedQuality
                     if let failure = prepared.productionFailure { throw failure }
                     prepared.onFailure = { [weak self] failure in
                         guard let self, self.generation == id else { return }
@@ -405,9 +424,11 @@ final class PlaybackController: ObservableObject {
                         if self.probing {
                             // A short clip may end while the receiver picker is open.
                             // Keep the muted negotiation alive until its bounded timeout.
+                            let negotiationID = self.probeID
                             self.player.seek(to: .zero) { [weak self] finished in
                                 Task { @MainActor in
-                                    guard finished, let self, self.generation == id, self.probing else { return }
+                                    guard finished, let self, self.generation == id,
+                                          self.probeID == negotiationID, self.probing else { return }
                                     self.player.play()
                                 }
                             }
@@ -448,6 +469,12 @@ final class PlaybackController: ObservableObject {
                 self.refresh()
             } catch {
                 guard let self, !Task.isCancelled, self.generation == id else { return }
+                if case let PreparationFailure.videoConversionRequired(height, frameRate) = error {
+                    self.selectedQuality = Self.qualityLabel(height: height, frameRate: frameRate)
+                    self.fail(.preparationRequired,
+                              message: "This source needs video conversion. Turn off Avoid video conversion in Settings, then reload.")
+                    return
+                }
                 // Keep a validator's specific message instead of flattening it to
                 // the generic load failure, e.g. a local file removed after input
                 // validation.
@@ -559,6 +586,9 @@ final class PlaybackController: ObservableObject {
 
     func seek(_ seconds: Double) throws {
         try MediaInput.validateSeek(seconds, ranges: snapshot.seekableRanges)
+        guard !loadInProgress, failure == nil, mediaItem?.status == .readyToPlay else {
+            throw AppFailure(.unsupportedOperation, "Wait for a video to finish loading before seeking.")
+        }
         guard !probing else { throw AppFailure(.unsupportedOperation, "Wait for the receiver connection to finish.") }
         guard player.isExternalPlaybackActive else {
             throw AppFailure(.routeRequired, "Choose a video receiver first.")
@@ -566,16 +596,30 @@ final class PlaybackController: ObservableObject {
         ended = false
         pendingSeek = seconds
         let id = generation
+        let requestID = UUID()
+        seekID = requestID
         player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600),
                     toleranceBefore: CMTime(seconds: 0.5, preferredTimescale: 600),
                     toleranceAfter: CMTime(seconds: 0.5, preferredTimescale: 600)) { [weak self] _ in
             Task { @MainActor in
-                guard let self, self.generation == id else { return }
+                guard let self, self.generation == id, self.seekID == requestID else { return }
+                self.seekID = nil
                 self.pendingSeek = nil
                 self.refresh()
             }
         }
         refresh()
+    }
+
+    /// Accumulate rapid skips from the latest request, within prepared/seekable media.
+    func skip(by seconds: Double) throws {
+        guard seconds.isFinite else { throw AppFailure(.invalidRequest, "Use a finite seek interval.") }
+        let range = snapshot.isLive ? snapshot.seekableRanges.last : snapshot.seekableRanges.first
+        guard let range else {
+            throw AppFailure(.unsupportedOperation, "This video does not currently support seeking.")
+        }
+        let position = pendingSeek ?? snapshot.position ?? range.start
+        try seek(min(max(position + seconds, range.start), range.end))
     }
 
     func goLive() throws {
@@ -592,7 +636,7 @@ final class PlaybackController: ObservableObject {
     func pickerWillOpen() {
         hasOpenedPicker = true
         pickerIsOpen = true
-        probeWhenReady = true
+        probeWhenReady = !player.isExternalPlaybackActive
         // Reopening during a negotiation restarts the picker window so a
         // receiver chosen in this presentation is not cancelled by the previous
         // dismissal's shorter deadline.
@@ -601,25 +645,32 @@ final class PlaybackController: ObservableObject {
     }
 
     private func beginProbeIfReady() {
-        guard probeWhenReady, mediaItem?.status == .readyToPlay, !loading, !playWhenReady else { return }
+        guard probeWhenReady, mediaItem?.status == .readyToPlay, !loading else { return }
         if failure != nil {
             probeWhenReady = false
             return
         }
         guard !probing else { return }
         probeWhenReady = false
+        // Opening the picker on an active route must not pause or rewind playback.
+        guard !player.isExternalPlaybackActive else { return }
         probePosition = finite(player.currentTime().seconds) ?? 0
         probing = true
+        probeID = UUID()
+        let negotiationID = probeID
         player.isMuted = true
-        if player.isExternalPlaybackActive {
-            finishProbeIfReady()
-            return
-        }
         let id = generation
         player.preroll(atRate: 1) { [weak self] finished in
             Task { @MainActor in
-                guard finished, let self, self.generation == id, self.probing else { return }
-                self.finishProbeIfReady()
+                guard finished, let self, self.generation == id,
+                      self.probeID == negotiationID, self.probing else { return }
+                if self.player.isExternalPlaybackActive {
+                    self.finishProbeIfReady()
+                } else {
+                    // Preroll only buffers; a muted playback request is needed
+                    // to negotiate the selected AirPlay video route.
+                    self.player.play()
+                }
             }
         }
         scheduleProbeTimeout(seconds: pickerIsOpen ? Self.pickerOpenProbeTimeout : Self.routeProbeTimeout)
@@ -657,6 +708,7 @@ final class PlaybackController: ObservableObject {
     }
 
     private func cancelProbe(restorePosition: Bool) {
+        probeID = UUID()
         probeTask?.cancel()
         probeTask = nil
         player.cancelPendingPrerolls()
@@ -679,7 +731,19 @@ final class PlaybackController: ObservableObject {
         }
     }
 
+    private func stopRetiredPreparedMedia() {
+        guard let retired = retiredPreparedMedia else { return }
+        retiredPreparedMedia = nil
+        retired.stop()
+        let id = UUID()
+        drainingLoads[id] = Task { [weak self] in
+            await retired.waitForProducer()
+            self?.drainingLoads.removeValue(forKey: id)
+        }
+    }
+
     private func resetItem(keepPlayerItem: Bool = false, preserveQueue: Bool = false) {
+        let installedPrepared = preparedMedia != nil && mediaItem != nil && player.currentItem === mediaItem
         generation = UUID()
         loadTask?.cancel(); loadTask = nil
         loadingAsset?.cancelLoading(); loadingAsset = nil
@@ -692,12 +756,26 @@ final class PlaybackController: ObservableObject {
         notifications.removeAll()
         mediaItem = nil
         pendingSeek = nil
+        seekID = nil
+        loadPreferences = nil
         probeWhenReady = false
         pickerIsOpen = false
-        // Direct sources can retain the old paused item. Prepared media must be
-        // detached before closing its server and deleting its file.
-        if !keepPlayerItem || preparedMedia != nil { player.replaceCurrentItem(with: nil) }
-        stopPreparedMedia()
+        // Keep the previous delivery URL valid while AVPlayer retains its item.
+        // Cancel any expensive conversion immediately; release the server only
+        // after the replacement item is installed (or loading fails/stops).
+        if keepPlayerItem, installedPrepared, let prepared = preparedMedia {
+            stopRetiredPreparedMedia()
+            prepared.onFailure = nil
+            prepared.cancelProduction()
+            retiredPreparedMedia = prepared
+            preparedMedia = nil
+        } else if keepPlayerItem {
+            stopPreparedMedia()
+        } else {
+            player.replaceCurrentItem(with: nil)
+            stopPreparedMedia()
+            stopRetiredPreparedMedia()
+        }
         loading = false; resolving = false; preparing = false; websiteURL = nil; retriedResolution = false
         selectedSource = nil
         selectedQuality = nil
@@ -728,7 +806,7 @@ final class PlaybackController: ObservableObject {
         if reason == .sourceUnavailable, let websiteURL, !retriedResolution, !hasPlayed {
             startLoad(websiteURL, retry: true, preservingQueue: queue != nil,
                       autoplay: playWhenReady, titleOverride: queue.map { $0.entries[$0.currentIndex].title },
-                      sourceChoice: sourceChoice, changingSource: changingSource)
+                      sourceChoice: sourceChoice, changingSource: changingSource, preferences: loadPreferences)
             return
         }
         if !hasPlayed, prepareSource != nil, let selectedSource,
@@ -736,14 +814,18 @@ final class PlaybackController: ObservableObject {
             // Prefer the best available remux presentation over remuxing the
             // failed native URL, so a fallback is not stuck at the low-quality
             // direct stream.
-            let fallback = MediaSelector.bestRemuxFallback(from: sourceCandidates, policy: conversionPolicy)
-                ?? remuxFallback
+            let fallback = sourceChoice == nil
+                ? (MediaSelector.bestRemuxFallback(from: sourceCandidates, policy: selectedSource.conversionPolicy)
+                   ?? remuxFallback)
+                : remuxFallback
             startLoad(originalSourceURL ?? selectedSource.url, retry: retriedResolution, fallback: fallback,
                       preservingQueue: queue != nil, autoplay: playWhenReady,
-                      titleOverride: title, sourceChoice: sourceChoice, changingSource: changingSource)
+                      titleOverride: title, sourceChoice: sourceChoice, changingSource: changingSource,
+                      preferences: loadPreferences)
             return
         }
-        if advancingQueue, !changingSource, sourceChoice == nil, var queue, queueAttemptsRemaining > 1 {
+        if advancingQueue, reason != .signInRequired, !changingSource, sourceChoice == nil,
+           var queue, queueAttemptsRemaining > 1 {
             queue.skipped.insert(queue.currentIndex)
             let failedTitle = queue.entries[queue.currentIndex].title
             let nextIndex = queue.currentIndex + queueDirection
@@ -759,10 +841,15 @@ final class PlaybackController: ObservableObject {
         loading = false
         failureReason = reason
         failure = message ?? reason.message
+        loadTask?.cancel(); loadTask = nil
+        pendingSeek = nil
+        seekID = nil
+        playWhenReady = false
         player.isMuted = true
         player.pause()
         timeoutTask?.cancel()
         player.replaceCurrentItem(with: nil)
+        stopRetiredPreparedMedia()
         loadingAsset?.cancelLoading(); loadingAsset = nil
         mediaItem = nil
         itemObservations.removeAll()
@@ -796,7 +883,10 @@ final class PlaybackController: ObservableObject {
         if wasExternal && !external {
             player.isMuted = true
             player.pause()
-            if mediaItem != nil && failure == nil && !probeWhenReady {
+            if !loading { playWhenReady = false }
+            pendingSeek = nil
+            seekID = nil
+            if mediaItem != nil && failure == nil && !loading && !probeWhenReady {
                 notice = "AirPlay disconnected. Choose a receiver to continue."
             }
         }
@@ -840,15 +930,19 @@ final class PlaybackController: ObservableObject {
             if (finite(player.currentTime().seconds) ?? 0) > 0.5 { player.seek(to: .zero) }
         }
         beginProbeIfReady()
+        if retiredPreparedMedia != nil, !loading, item?.status == .readyToPlay,
+           !probing && !probeWhenReady {
+            stopRetiredPreparedMedia()
+        }
         if playWhenReady, !loading, item?.status == .readyToPlay {
-            playWhenReady = false
             if external && !probing {
+                playWhenReady = false
                 probeWhenReady = false
                 hasPlayed = true
                 player.isMuted = false
                 player.play()
-            } else {
-                notice = "Next playlist item is ready. Choose a receiver, then press Play."
+            } else if !probing {
+                notice = "Next playlist item is ready. Waiting for the receiver…"
             }
         }
         if external && !probing && player.rate > 0 {
@@ -864,7 +958,7 @@ final class PlaybackController: ObservableObject {
         next.loadingPhase = resolving ? "resolving" : (preparing ? "preparing" : nil)
         next.playbackPath = failure == nil
             ? (actualPlaybackPath ?? (preparing ? selectedSource?.plannedPath : selectedSource?.playbackPath)) : nil
-        next.quality = failure == nil ? selectedQuality : nil
+        next.quality = selectedQuality
         next.sources = sourceOptions
         if let sourceChoice, let index = sourceCandidates.firstIndex(where: { $0.id == sourceChoice }) {
             next.selectedSourceID = sourceOptionID(index)
@@ -939,8 +1033,10 @@ final class PlaybackController: ObservableObject {
             connecting: probing, external: external, ended: ended,
             playing: player.timeControlStatus == .playing, waiting: player.timeControlStatus == .waitingToPlayAtSpecifiedRate,
             hasPlayed: hasPlayed)
-        if snapshot != next { snapshot = next }
-        updateNowPlaying()
+        if snapshot != next {
+            snapshot = next
+            updateNowPlaying()
+        }
     }
 
     private func waitingReason(_ reason: AVPlayer.WaitingReason?) -> PlaybackWaitingReason? {

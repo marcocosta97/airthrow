@@ -143,6 +143,12 @@ let tests: [(String, () throws -> Void)] = [
         finite.seekableRanges = [SeekRange(start: 0, end: 10)]
         try check(PlaybackPolicy.activeSeekRange(finite) == SeekRange(start: 0, end: 100),
                   "A partial seek range overrode the known finite duration")
+        var durationOnly = PlaybackSnapshot()
+        durationOnly.state = .ready
+        durationOnly.duration = 100
+        durationOnly.externalPlaybackActive = true
+        try check(PlaybackPolicy.activeSeekRange(durationOnly) == SeekRange(start: 0, end: 100) && !PlaybackPolicy.canSeek(durationOnly),
+                  "canSeek allowed seek with empty seekableRanges despite known duration")
         snapshot.state = .buffering
         try check(PlaybackPolicy.isPlaying(snapshot) && PlaybackPolicy.canSeek(snapshot),
                   "Buffering control state was wrong")
