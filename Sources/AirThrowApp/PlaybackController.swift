@@ -79,6 +79,9 @@ final class PlaybackController: ObservableObject {
     private var title = "No video loaded"
     private var remoteTargets: [(MPRemoteCommand, Any)] = []
     private var activity: NSObjectProtocol?
+    // AVPlayer can briefly report paused during an active AirPlay session.
+    // Keep idle sleep prevention tied to the requested session, not that sample.
+    private var playbackRequested = false
     private var queue: QueueState?
     private var queueDirection = 1
     private var queueAttemptsRemaining = 0
@@ -277,6 +280,7 @@ final class PlaybackController: ObservableObject {
         retriedResolution = retry
         title = titleOverride ?? (url.isFileURL ? url.lastPathComponent : (url.host ?? "Video"))
         playWhenReady = autoplay
+        playbackRequested = autoplay
         if !preservingQueue { notice = nil }
         refresh()
         let resolver = resolveCandidates
@@ -445,6 +449,7 @@ final class PlaybackController: ObservableObject {
                                                direction: 1, autoplay: true)
                         } else if self.queue != nil {
                             self.ended = true
+                            self.playbackRequested = false
                             self.player.pause()
                             if !hasNext { self.notice = "End of playlist." }
                             self.refresh()
@@ -453,6 +458,7 @@ final class PlaybackController: ObservableObject {
                             self.notice = "Playback finished. The video was unloaded."
                         } else {
                             self.ended = true
+                            self.playbackRequested = false
                             self.player.pause()
                             self.refresh()
                         }
@@ -529,6 +535,7 @@ final class PlaybackController: ObservableObject {
             ended = false
         }
         hasPlayed = true
+        playbackRequested = true
         player.isMuted = false
         player.play()
         refresh()
@@ -536,6 +543,7 @@ final class PlaybackController: ObservableObject {
 
     func pause() {
         playWhenReady = false
+        playbackRequested = false
         probeWhenReady = false
         cancelProbe(restorePosition: true)
         player.pause()
@@ -838,6 +846,7 @@ final class PlaybackController: ObservableObject {
         actualPlaybackPath = nil
         ended = false; hasPlayed = false; failure = nil; failureReason = nil
         playWhenReady = false
+        playbackRequested = false
         pendingInitialSeek = false
         probeRestoreFailed = false
         hasAudio = nil
@@ -897,6 +906,7 @@ final class PlaybackController: ObservableObject {
         pendingSeek = nil
         seekID = nil
         playWhenReady = false
+        playbackRequested = false
         player.isMuted = true
         player.pause()
         timeoutTask?.cancel()
@@ -933,6 +943,7 @@ final class PlaybackController: ObservableObject {
         }
         let external = player.isExternalPlaybackActive
         if wasExternal && !external {
+            playbackRequested = false
             player.isMuted = true
             player.pause()
             if !loading { playWhenReady = false }
@@ -989,6 +1000,7 @@ final class PlaybackController: ObservableObject {
         if playWhenReady, !loading, item?.status == .readyToPlay, !probeRestoring && !probeRestoreFailed {
             if external && !probing {
                 playWhenReady = false
+                playbackRequested = true
                 probeWhenReady = false
                 hasPlayed = true
                 player.isMuted = false
@@ -1089,6 +1101,7 @@ final class PlaybackController: ObservableObject {
             snapshot = next
             updateNowPlaying()
         }
+        updateSleepActivity()
     }
 
     private func waitingReason(_ reason: AVPlayer.WaitingReason?) -> PlaybackWaitingReason? {
@@ -1200,7 +1213,14 @@ final class PlaybackController: ObservableObject {
             info.nowPlayingInfo = metadata
             info.playbackState = snapshot.state == .playing ? .playing : .paused
         } else { info.nowPlayingInfo = nil; info.playbackState = .stopped }
-        let needsActivity = preparing || snapshot.state == .playing || snapshot.state == .buffering
+    }
+
+    private func updateSleepActivity() {
+        // Loading and route negotiation may need the Mac even before playback.
+        // Once Play is requested, transient AVPlayer pauses must not permit idle
+        // sleep; prepared and local media also depend on this Mac's HTTP server.
+        let needsActivity = loading || resolving || preparing || probing || probeRestoring
+            || pendingSeek != nil || playbackRequested
         if needsActivity && activity == nil {
             activity = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled], reason: "Preparing or playing AirPlay video")
         } else if !needsActivity, let activity {
