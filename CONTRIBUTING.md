@@ -16,6 +16,161 @@ The additive protocol-v1 `playbackPath` reports `direct`, `remux`, `audio_conver
 
 `ConversionPolicy.avoidVideo` is the default. It permits audio conversion while requiring compatible video to be copied. Explicit source choices override quality ranking, but never conversion permissions or unsupported-source restrictions. Adapters return bounded, complete presentations with stable metadata identities; the controller exposes fresh session-scoped IDs rather than provider IDs or URLs. Choosing a source resolves the original input again and reloads paused on the persistent player. Generation guards discard stale discovery and preparation results. Navigation resets the per-item override; source changes preserve the queue without advancing it on failure.
 
+## Product behaviour and limits
+
+User-facing behaviour that is too detailed for the README lives here.
+
+### Receiver selection
+
+Receiver selection uses Apple's system AirPlay picker and stays in the app. There
+is no public API to select an AirPlay route by name, so the CLI cannot choose a
+receiver: it only controls playback and observes `externalPlaybackActive`. A
+command that needs a route fails with exit code 4. The picker is usable before
+media is loaded; opening it is not evidence that a receiver was selected.
+
+### Loading, route negotiation, and playback
+
+Loading always starts paused. AirThrow may briefly attempt muted playback to
+establish the external video route; a receiver chosen in the picker sets the
+active route before the picker reports dismissal, so a bounded negotiation
+window covers that gap. Route loss pauses and mutes playback. Closing the window
+keeps the app running; the Mac must remain awake and connected. Live streams show
+their distance from the live edge and offer **Go Live** when playback falls
+behind. In Settings, a finished video either stays loaded for replay or is
+unloaded so the receiver returns to its normal screen.
+
+### Playback paths
+
+The processing path is reported as one of four tiers: **direct** (source played
+without preparing a local file), **remux** (compressed tracks copied), **audio
+conversion** (compatible video kept, audio converted to AAC), and **video
+conversion** (SDR H.264 produced on the Mac). These are processing tiers, not
+quality scores or proof of receiver playback. The same value appears in UI, CLI
+status, and the optional JSON `playbackPath` field. Inspection determines the
+actual path.
+
+**Avoid video conversion** is on by default. Audio conversion is allowed under
+it; turn it off to permit supported SDR video conversion. Changes apply to the
+next load or source choice; an in-flight preparation keeps its captured
+settings. Conversion produces H.264/AAC up to 1080p/60 without upscaling,
+prefers hardware encoding, and has a software fallback. HDR/Dolby Vision tone
+mapping, subtitle burn-in, surround preservation, and arbitrary seeking into
+unprepared media are unsupported.
+
+### Source quality
+
+When a source offers multiple presentations, use the **Quality** menu beside the
+playback details. **Automatic** prefers less processing, then higher known
+quality within that tier; **Prefer higher quality** in Settings changes that
+priority. A single file has no meaningful alternate quality. Explicitly choosing
+a higher-quality remuxed presentation over a lower-quality direct source is
+allowed. Choosing an option re-resolves the original source, reloads the item
+from the start, and leaves it paused; receiver selection and the playlist are
+preserved. The choice applies only to that item, and navigation returns to
+Automatic. If the requested presentation disappears, loading fails with a
+recovery message instead of silently choosing another. HLS quality describes an
+available maximum, not the current rendition.
+
+`source` IDs are session-scoped and expire on reload, replacement, or Stop.
+List sources again before choosing. Status exposes optional `sources`,
+`selectedSourceID` (absent for Automatic), and `allowVideoConversion`.
+`conversion allow-video` / `conversion avoid-video` saves the same preference as
+the UI.
+
+### YouTube extraction and cookies
+
+Source adapters discover candidates; one shared policy prefers native playback
+over preparation. Among native candidates it prefers higher resolution, then HLS
+at equal resolution, then bitrate. A usable H.264/AAC HLS master goes straight to
+AVPlayer, which selects and synchronizes its renditions; FFmpeg is not involved.
+Direct URLs usually supply one candidate; MKV/WebM enter inspection, while other
+unknown formats get one native attempt. Dedicated `playlist?list=…` links and
+Mixes (`list=RD…`) create a queue of up to 100 entries; entries resolve lazily, so
+signed URLs are not retained for the whole playlist, and unavailable, live, or
+unsupported entries are skipped with a notice. Private/authenticated playlists,
+shuffle, repeat, and queue editing are unsupported. A watch link with any other
+`list=` loads only its named video. DRM, non-YouTube sites, and custom request
+headers are out of scope.
+
+Some public videos fail with "Could not find a playable video" because YouTube
+challenges the request, not because the video is private. Settings → YouTube
+access selects a browser or a Netscape `cookies.txt` file. AirThrow reads the
+source itself and keeps only `youtube.com`, `youtu.be`, and
+`youtube-nocookie.com` cookies, writes them to a private `0600` temporary
+Netscape file, and deletes it once extraction finishes; cookie values never
+appear in status or logs. The picker lists only browsers found on this Mac, and a
+status line reports whether a signed-in session was found. Safari requires Full
+Disk Access; Chromium-family browsers ask for Keychain access to decrypt their
+store.
+
+Helpers are found in standard Homebrew locations even when the app is launched
+from Finder. `AIRTHROW_YTDLP`, `AIRTHROW_DENO`, `AIRTHROW_FFMPEG`, and
+`AIRTHROW_FFPROBE` override their paths, and `AIRTHROW_YTDLP_COOKIES` /
+`AIRTHROW_YTDLP_COOKIES_FROM_BROWSER` override the Settings cookie choice — all
+read **in the app's launch environment**, not from a CLI command. Helpers are not
+bundled.
+
+### Local files
+
+Local files are chosen with the folder button, dropped on the source area, pasted
+as a path or `file:` URL, opened from Finder, or passed to `athrow open`.
+Relative CLI paths and a leading `~` are expanded before the request reaches the
+shared session. AirThrow resolves symlinks to a readable regular file and rejects
+directories, empty files, and remote `file:` hosts. MP4/MOV and unknown
+containers first use zero-copy delivery over the private LAN endpoint; MKV/WebM
+enter inspection immediately, with a bounded fallback for an initially unreadable
+container. In-place delivery has no size cap and Stop never deletes the selected
+file; prepared media still obeys the size and duration limits below. Local HLS
+folders/playlists, directory browsing, and local playlists are unsupported.
+
+### Preparation limits
+
+Preparation accepts finite media up to four hours. Compatible H.264 SDR up to
+1080p/60 and AAC-LC mono/stereo are copied; other supported tracks are converted
+as described above. Video conversion accepts known SDR inputs through 3840×2160
+at 120 fps and produces at most 1080p/60. Preparation requires disk headroom,
+monitors a 2 GiB temporary-media limit, and allows ten minutes per processing
+attempt. The app waits for a finalized MP4 before handing prepared media to the
+receiver, so finite videos have a finite timeline; loading stays paused.
+Progressive HLS remains available with `AIRTHROW_PREPARATION_MODE=progressive-hls`
+in the app's launch environment, but a receiver may treat its growing EVENT
+playlist as live. These are conservative limits, not receiver compatibility
+guarantees.
+
+### Supported sources and failure handling
+
+- Direct HTTP/HTTPS video supported by AVFoundation and the receiver; MP4 and HLS
+  are the initial formats. Local MP4/MOV use in-place LAN delivery. Remote and
+  local MKV/WebM enter preparation; compatible H.264/AAC tracks can be remuxed,
+  and supported incompatible tracks require conversion. Other extensions get one
+  native attempt; the extension alone does not establish compatibility. Native
+  loading does not prove receiver playback.
+- Direct sources need their own audio track or HLS audio rendition; the app warns
+  about detected video-only sources. There is no manual two-URL input.
+- A live stream plays only when it offers a native H.264/AAC presentation; a live
+  stream that would need remuxing or conversion is refused.
+- Audio-only AirPlay speakers cannot display video; the TV owns volume.
+- Apple TV Remote integration uses public Now Playing and remote-command APIs;
+  actual receiver behaviour needs hardware testing.
+
+Stop and URL replacement cancel extraction/preparation, stop the session media
+server, and remove temporary media. A source reported unavailable during initial
+website loading gets one re-resolution attempt; established playback is never
+automatically restarted. Unclassified player failures remain `load_failed` or
+`playback_interrupted`; status messages omit underlying URLs and request details.
+
+### Network delivery
+
+Prepared media is served on the Mac's active Wi-Fi/Ethernet IPv4 address and an
+ephemeral port, through a random session URL. Allow AirThrow through the macOS
+firewall/local-network prompt if shown; network changes may require loading
+again. Multi-interface setups can set `AIRTHROW_MEDIA_HOST` to the
+receiver-reachable IPv4 address (never `127.0.0.1` for a receiver). Prepared
+files are removed on Stop, replacement, failure, and Quit; abandoned preparation
+files are cleaned on the next launch. The app stores no media history or pairing
+credentials of its own; media URLs and local paths stay in memory and are omitted
+from status and errors.
+
 Run the source-choice controller regressions sequentially with the other AVPlayer suites:
 
 ```bash
@@ -132,7 +287,7 @@ Hardware acceptance remains separate: verify prepared-file picture/sound/sync, s
 
 `bash scripts/build.sh` uses an ad-hoc signature for local testing. Set `AIRTHROW_BUILD_DIR` to build elsewhere while preserving an existing bundle. Only one app session runs at a time. Regenerate the Xcode project using `python3 scripts/generate-xcode-project.py`; verify Xcode builds separately when full Xcode is available.
 
-For distribution, supply `CODE_SIGN_IDENTITY='Developer ID Application: Your Name (TEAMID)'` to the build script. This enables hardened runtime and timestamping; notarization is a separate release step. The app is not App Sandbox-enabled. Its command endpoint is a private per-user Unix socket, not a TCP listener.
+For distribution, supply `CODE_SIGN_IDENTITY='Developer ID Application: Your Name (TEAMID)'` to the build script. This enables hardened runtime and timestamping; notarization (`notarytool`) and stapling are separate release steps. The app is not App Sandbox-enabled. Its command endpoint is a private per-user Unix socket, not a TCP listener.
 
 Prefer extracting the packaged ZIP to an unsynced application directory: cloud-sync metadata on a loose app can interfere with strict signature verification. Do not commit build output, signing credentials, or local editor state.
 
