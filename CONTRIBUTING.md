@@ -86,8 +86,9 @@ AVPlayer, which selects and synchronizes its renditions; FFmpeg is not involved.
 Direct URLs usually supply one candidate; MKV/WebM enter inspection, while other
 unknown formats get one native attempt. Dedicated `playlist?list=…` links and
 Mixes (`list=RD…`) create a queue of up to 100 entries; entries resolve lazily, so
-signed URLs are not retained for the whole playlist, and unavailable, live, or
-unsupported entries are skipped with a notice. Private/authenticated playlists,
+signed URLs are not retained for the whole playlist, and unavailable or
+not-yet-started entries are skipped with a notice. Live entries play through the
+native HLS path when one is available. Private/authenticated playlists,
 shuffle, repeat, and queue editing are unsupported. A watch link with any other
 `list=` loads only its named video. DRM, non-YouTube sites, and custom request
 headers are out of scope.

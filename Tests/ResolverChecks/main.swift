@@ -208,12 +208,15 @@ struct ResolverChecks {
         }
         // The full resolver path refuses a live source with no native presentation
         // instead of offering a preparation that cannot succeed.
+        let liveFetchCounter = ManifestCounter()
         try await expect(.liveUnsupported) {
             _ = try await SourceResolver.selectWithHLS(metadata([videoOnly, separateAudio], extra: ["is_live": true])) { _ in
-                try check(false, "A live source without a native presentation fetched a master")
+                await liveFetchCounter.increment()
                 return Data()
             }
         }
+        try check(await liveFetchCounter.count == 0,
+                  "A live source without a native presentation fetched a master")
         try await expect(.failed) { _ = try SourceResolver.select(Data("broken JSON with secret URL".utf8)) }
         print("PASS combined/HLS selection; separate tracks, unknown codecs, custom headers, DRM, upcoming rejection and native-live selection")
 
