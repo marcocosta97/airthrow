@@ -2,7 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
     <key>CFBundleIdentifier</key><string>app.airthrow.mac</string>
-    <key>CFBundleIconFile</key><string>AirThrow</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>CFBundleIconName</key><string>AppIcon</string>
     <key>CFBundleName</key><string>AirThrow</string>
     <key>CFBundleDisplayName</key><string>AirThrow</string>
     <key>CFBundleExecutable</key><string>AirThrowApp</string>

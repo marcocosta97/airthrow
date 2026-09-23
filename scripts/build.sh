@@ -21,8 +21,17 @@ cp "$bin_dir/athrow" "$app/Contents/MacOS/athrow"
 cp "$bin_dir/athrow" "$build_dir/athrow"
 cp Resources/Info.plist "$app/Contents/Info.plist"
 bash scripts/write-build-commit.sh "$app/Contents/Resources/BuildCommit.txt"
-swift scripts/make-icon.swift "$build_dir/AirThrow.iconset"
-iconutil -c icns "$build_dir/AirThrow.iconset" -o "$app/Contents/Resources/AirThrow.icns"
+# Compile the Icon Composer document so macOS renders the Liquid Glass icon,
+# including its light, dark, and tinted appearances (Assets.car), with a loose
+# AppIcon.icns fallback for older systems.
+xcrun actool Resources/AppIcon.icon \
+    --compile "$app/Contents/Resources" \
+    --platform macosx \
+    --minimum-deployment-target "$deployment_target" \
+    --app-icon AppIcon \
+    --standalone-icon-behavior all \
+    --output-partial-info-plist "$build_dir/AppIcon-partial.plist" \
+    --output-format human-readable-text
 # Finder/iCloud can attach metadata to a generated .app inside Documents.
 xattr -dr com.apple.FinderInfo "$app" 2>/dev/null || true
 xattr -dr com.apple.ResourceFork "$app" 2>/dev/null || true
@@ -38,5 +47,8 @@ codesign --verify --strict "$app"
 # Keep an archive without Finder/iCloud metadata; synced folders can reattach
 # prohibited attributes to a loose .app even after successful signing.
 ditto --norsrc --noextattr -c -k --keepParent "$app" "$build_dir/AirThrow.zip"
+# Replace the previous bundle instead of merging into it, so resources removed
+# from the app (for example a superseded icon) do not linger.
+rm -rf "$build_dir/AirThrow.app"
 ditto --norsrc --noextattr "$app" "$build_dir/AirThrow.app"
 printf 'Built %s/AirThrow.app\nArchive: %s/AirThrow.zip\nCLI: %s/athrow\n' "$build_dir" "$build_dir" "$build_dir"

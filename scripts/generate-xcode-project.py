@@ -28,7 +28,7 @@ files = {}
 for path in sorted((root / 'Sources').rglob('*.swift')):
     relative = str(path.relative_to(root))
     files[relative] = add(relative, dict(isa='PBXFileReference', lastKnownFileType='sourcecode.swift', path=relative, sourceTree='<group>'))
-icon = add('Icon', dict(isa='PBXFileReference', lastKnownFileType='image.icns', path='Resources/AirThrow.icns', sourceTree='<group>'))
+icon = add('Icon', dict(isa='PBXFileReference', lastKnownFileType='folder.iconcomposer.icon', path='Resources/AppIcon.icon', sourceTree='<group>'))
 plist = add('Info', dict(isa='PBXFileReference', lastKnownFileType='text.plist.xml', path='Resources/Info.plist', sourceTree='<group>'))
 app_product = add('AppProduct', dict(isa='PBXFileReference', explicitFileType='wrapper.application', path='AirThrow.app', sourceTree='BUILT_PRODUCTS_DIR'))
 cli_product = add('CLIProduct', dict(isa='PBXFileReference', explicitFileType='compiled.mach-o.executable', path='athrow', sourceTree='BUILT_PRODUCTS_DIR'))
@@ -48,7 +48,7 @@ def config_list(name, extra):
     return add(name + 'Configurations', dict(isa='XCConfigurationList', buildConfigurations=ids, defaultConfigurationIsVisible='0', defaultConfigurationName='Release'))
 
 project_configs = config_list('Project', {})
-app_configs = config_list('App', dict(PRODUCT_NAME='AirThrow', PRODUCT_MODULE_NAME='AirThrowApp', EXECUTABLE_NAME='AirThrowApp', INFOPLIST_FILE='Resources/Info.plist', PRODUCT_BUNDLE_IDENTIFIER='app.airthrow.mac', CODE_SIGN_STYLE='Automatic', ENABLE_HARDENED_RUNTIME='YES', COMBINE_HIDPI_IMAGES='YES', ENABLE_USER_SCRIPT_SANDBOXING='NO'))
+app_configs = config_list('App', dict(PRODUCT_NAME='AirThrow', PRODUCT_MODULE_NAME='AirThrowApp', EXECUTABLE_NAME='AirThrowApp', INFOPLIST_FILE='Resources/Info.plist', PRODUCT_BUNDLE_IDENTIFIER='app.airthrow.mac', CODE_SIGN_STYLE='Automatic', ENABLE_HARDENED_RUNTIME='YES', COMBINE_HIDPI_IMAGES='YES', ENABLE_USER_SCRIPT_SANDBOXING='NO', ASSETCATALOG_COMPILER_APPICON_NAME='AppIcon'))
 cli_configs = config_list('CLI', dict(PRODUCT_NAME='athrow', PRODUCT_MODULE_NAME='AirThrowCLI', CODE_SIGN_STYLE='Automatic', ENABLE_HARDENED_RUNTIME='YES', SKIP_INSTALL='YES'))
 
 def source_phase(name, folders):
