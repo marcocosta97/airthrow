@@ -16,7 +16,7 @@ permissions:
 jobs:
   core:
     name: Build and core checks
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
@@ -63,7 +63,7 @@ jobs:
 
   media:
     name: Media checks (optional helpers)
-    runs-on: macos-15
+    runs-on: macos-26
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
