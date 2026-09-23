@@ -598,7 +598,9 @@ final class PlaybackController: ObservableObject {
         guard !loadInProgress, failure == nil, mediaItem?.status == .readyToPlay else {
             throw AppFailure(.unsupportedOperation, "Wait for a video to finish loading before seeking.")
         }
-        guard !probing else { throw AppFailure(.unsupportedOperation, "Wait for the receiver connection to finish.") }
+        guard !probing && !probeRestoring else {
+            throw AppFailure(.unsupportedOperation, "Wait for the receiver connection to finish.")
+        }
         guard player.isExternalPlaybackActive else {
             throw AppFailure(.routeRequired, "Choose a video receiver first.")
         }
