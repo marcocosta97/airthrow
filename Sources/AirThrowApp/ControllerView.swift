@@ -58,7 +58,6 @@ struct ControllerView: View {
     @ViewState private var hoverTime: Double?
     @ViewState private var hoverX: CGFloat = 0
     @ViewState private var dropTargeted = false
-    @ViewState private var sourceChooserVisible = false
     @FocusState private var urlFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -89,18 +88,8 @@ struct ControllerView: View {
                                     .disabled(url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                                     .help("Load this video without starting playback")
                             }
-                            HStack {
-                                Text("Direct URL, YouTube, playlist, or local file")
-                                    .font(.caption).foregroundStyle(.secondary)
-                                Spacer(minLength: 4)
-                                Button("Quality…") { sourceChooserVisible = true }
-                                    .controlSize(.small)
-                                    .disabled(status.sources?.isEmpty != false)
-                                    .help("Choose the source quality and processing path")
-                                    .popover(isPresented: $sourceChooserVisible) {
-                                        SourceChooserView(controller: controller) { sourceChooserVisible = false }
-                                    }
-                            }
+                            Text("Direct URL, YouTube, playlist, or local file")
+                                .font(.caption).foregroundStyle(.secondary)
                         }
 
                         HStack(spacing: 10) {
@@ -122,41 +111,59 @@ struct ControllerView: View {
                     }
                 }
 
-                section("Playback") {
-                    VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 8) {
-                        if busy || status.state == .buffering {
-                            ProgressView()
-                                .controlSize(.small)
-                                .accessibilityHidden(true)
-                        }
-                        Text(status.state == .idle ? "No video loaded" : PlaybackPolicy.stateLabel(status))
-                            .font(.headline)
-                    }
+                section("Playback", height: 216) {
+                    VStack(alignment: .leading, spacing: 5) {
                     if status.state != .idle {
-                        Text(status.title)
-                            .font(.title3.weight(.semibold))
-                            .foregroundStyle(.primary)
-                            .multilineTextAlignment(.center)
-                            .lineLimit(2)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .center)
-                            .textSelection(.enabled)
+                        HStack(spacing: 8) {
+                            if busy || status.state == .buffering {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .accessibilityHidden(true)
+                            }
+                            Text(PlaybackPolicy.stateLabel(status)).font(.headline)
+                        }
                     }
-                    if let path = status.playbackPath {
-                        let detail = [path.label, status.quality].compactMap { $0 }.joined(separator: " · ")
-                        Text(detail)
-                            .font(.caption).foregroundStyle(.secondary)
-                            .help(path.explanation)
-                            .accessibilityLabel("Playback: \(detail)")
-                            .accessibilityHint(path.explanation)
-                    }
-                    if status.hasAudio == false {
-                        Label("No audio track detected. Try a link that includes audio.", systemImage: "speaker.slash")
+                    Spacer(minLength: 2)
+                    if status.state == .idle {
+                        Label("No video loaded", systemImage: "play.rectangle")
                             .font(.callout)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .accessibilityLabel("No audio track detected. Try a link that includes audio.")
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity)
+                    } else {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(status.title)
+                                .font(.headline.weight(.semibold))
+                                .foregroundStyle(.primary)
+                                .multilineTextAlignment(.center)
+                                .lineLimit(2)
+                                .frame(maxWidth: .infinity, alignment: .center)
+                                .textSelection(.enabled)
+                            if status.playbackPath != nil || status.quality != nil || (status.sources?.count ?? 0) > 1 {
+                                HStack(spacing: 8) {
+                                    if status.playbackPath != nil || status.quality != nil {
+                                        let detail = [status.playbackPath?.label, status.quality].compactMap { $0 }.joined(separator: " · ")
+                                        Text(detail)
+                                            .font(.caption).foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                            .help(status.playbackPath?.explanation ?? "Inspected source resolution")
+                                            .accessibilityLabel("Playback: \(detail)")
+                                            .accessibilityHint(status.playbackPath?.explanation ?? "Inspected source resolution")
+                                    }
+                                    Spacer(minLength: 0)
+                                    if (status.sources?.count ?? 0) > 1 {
+                                        SourceChooserView(controller: controller)
+                                    }
+                                }
+                            }
+                            if status.hasAudio == false {
+                                Label("No audio track detected. Try a link that includes audio.", systemImage: "speaker.slash")
+                                    .font(.callout)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .accessibilityLabel("No audio track detected. Try a link that includes audio.")
+                            }
+                        }
                     }
+                    Spacer(minLength: 0)
                     VStack(spacing: 4) {
                         GeometryReader { geometry in
                             ZStack(alignment: .topLeading) {
@@ -168,7 +175,7 @@ struct ControllerView: View {
                                     if !editing { perform { try controller.seek(scrub) } }
                                 })
                                 .padding(.top, 8)
-                                .disabled(!canControl || range == nil)
+                                .disabled(!PlaybackPolicy.canSeek(status))
                                 .accessibilityLabel("Playback position")
                                 .accessibilityValue(PlaybackFormat.time(controller.pendingSeek ?? status.position))
                                 if let hoverTime {
@@ -212,10 +219,10 @@ struct ControllerView: View {
                                 .disabled(queue.currentIndex == 0 || busy)
                                 .help("Previous playlist item").accessibilityLabel("Previous playlist item")
                         }
-                        Button { perform { try controller.seek(max(range?.start ?? 0, (status.position ?? 0) - 10)) } } label: {
+                        Button { perform { try controller.skip(by: -10) } } label: {
                             Image(systemName: "gobackward.10")
                         }
-                        .disabled(!canControl || range == nil)
+                        .disabled(!PlaybackPolicy.canSeek(status))
                         .help("Back 10 seconds").accessibilityLabel("Back 10 seconds")
 
                         Button {
@@ -232,10 +239,10 @@ struct ControllerView: View {
                             .disabled(status.state == .idle)
                             .help("Stop and unload video").accessibilityLabel("Stop")
 
-                        Button { perform { try controller.seek(min(range?.end ?? 0, (status.position ?? 0) + 10)) } } label: {
+                        Button { perform { try controller.skip(by: 10) } } label: {
                             Image(systemName: "goforward.10")
                         }
-                        .disabled(!canControl || range == nil)
+                        .disabled(!PlaybackPolicy.canSeek(status))
                         .help("Forward 10 seconds").accessibilityLabel("Forward 10 seconds")
 
                         if let queue = status.queue {
@@ -246,10 +253,10 @@ struct ControllerView: View {
                     }
                     .controlSize(.regular)
                     .frame(maxWidth: .infinity)
-                    .padding(.top, 8)
-                    .padding(.bottom, 8)
+                    .padding(.top, 4)
+                    .padding(.bottom, 4)
                     }
-                    .frame(maxWidth: .infinity)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
 
                 Group {
@@ -259,6 +266,8 @@ struct ControllerView: View {
                             Text(message)
                                 .lineLimit(4)
                                 .fixedSize(horizontal: false, vertical: true)
+                                .help(message)
+                                .textSelection(.enabled)
                             Spacer(minLength: 0)
                             if status.error == nil {
                                 Button { controller.clearNotice() } label: { Image(systemName: "xmark") }
@@ -353,9 +362,13 @@ struct ControllerView: View {
         panel.allowedContentTypes = ["mp4", "m4v", "mov", "mkv", "webm"].compactMap {
             UTType(filenameExtension: $0)
         }
-        guard panel.runModal() == .OK, let file = panel.url else { return }
-        url = file.path
-        load()
+        let completion: (NSApplication.ModalResponse) -> Void = { response in
+            guard response == .OK, let file = panel.url else { return }
+            url = file.path
+            load()
+        }
+        if let window = NSApp.keyWindow { panel.beginSheetModal(for: window, completionHandler: completion) }
+        else { panel.begin(completionHandler: completion) }
     }
     private func acceptDrop(_ sources: [URL]) -> Bool {
         for source in sources {

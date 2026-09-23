@@ -3,80 +3,52 @@ import SwiftUI
 import AirThrowCore
 #endif
 
-private typealias ChooserState<Value> = SwiftUI.State<Value>
-
-/// A small native inspector for the current item's discovered presentations.
+/// Quality belongs to the loaded item, beside its playback details.
 struct SourceChooserView: View {
     @ObservedObject var controller: PlaybackController
-    let dismiss: () -> Void
-    @ChooserState private var error: String?
-
     private var status: PlaybackSnapshot { controller.snapshot }
-    private var busy: Bool { status.state == .loading || status.loadingPhase != nil }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Quality and source").font(.headline)
-            Text("Choosing a source reloads this item from the start, paused.")
-                .font(.caption).foregroundStyle(.secondary)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 8) {
-                    choice("Automatic", detail: "Prefer less processing, then the best available quality.",
-                           id: "automatic", selected: status.selectedSourceID == nil)
-                    Divider()
-                    ForEach(status.sources ?? []) { source in
-                        choice(source.quality, detail: [source.playbackPath.label, source.audio].compactMap { $0 }.joined(separator: " · "),
-                               id: source.id, selected: status.selectedSourceID == source.id,
-                               unavailable: source.unavailableReason)
-                    }
-                }
-                .padding(2)
-            }
-            .frame(maxHeight: 270)
-            Divider()
-            Toggle("Avoid video conversion", isOn: Binding(
-                get: { !controller.allowVideoConversion },
-                set: { controller.setVideoConversionAllowed(!$0) }))
-            Text("Audio conversion preserves the video. Video conversion uses more processing and may take longer; output is SDR, up to 1080p. Adaptive quality is a maximum, not the current rendition.")
-                .font(.caption).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            if let error {
-                Text(error).font(.callout).foregroundStyle(.primary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+    private var selection: String { status.selectedSourceID ?? "automatic" }
+    private var label: String {
+        guard let id = status.selectedSourceID,
+              let source = status.sources?.first(where: { $0.id == id }) else {
+            return status.quality.map { "Automatic · \($0)" } ?? "Automatic"
         }
-        .padding(16)
-        .frame(width: 420)
+        return status.quality ?? source.quality.replacingOccurrences(of: " maximum (adaptive)", with: "")
     }
 
-    private func choice(_ title: String, detail: String, id: String, selected: Bool,
-                        unavailable: String? = nil) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Button {
-                do { try controller.selectSource(id); dismiss() }
-                catch { self.error = (error as? AppFailure)?.message ?? "Could not choose this source." }
-            } label: {
-                HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(title).font(.body)
-                        Text(detail).font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer(minLength: 0)
+    var body: some View {
+        Menu {
+            Text("Choosing quality reloads from the start, paused.")
+            Picker("Quality", selection: Binding(get: { selection }, set: choose)) {
+                Text("Automatic").tag("automatic")
+                ForEach(status.sources ?? []) { source in
+                    Text([source.quality, source.playbackPath.label, source.audio,
+                          source.unavailableReason].compactMap { $0 }.joined(separator: " · "))
+                        .tag(source.id)
+                        .disabled(source.unavailableReason != nil)
                 }
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .disabled(busy || unavailable != nil)
-            .accessibilityLabel("\(title), \(detail)")
-            .accessibilityHint(unavailable ?? "")
-            .accessibilityValue(selected ? "Selected" : "Not selected")
-            if let unavailable {
-                Text(unavailable).font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.leading, 24)
-            }
+            .pickerStyle(.inline)
+            Divider()
+            Text(controller.preferQuality
+                 ? "Automatic prefers higher quality."
+                 : "Automatic prefers less processing.")
+            Text("Adaptive quality is the available maximum.")
+        } label: {
+            Text("Quality: \(label)").lineLimit(1)
         }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .controlSize(.small)
+        .disabled(PlaybackPolicy.isBusy(status))
+        .help("Choose playback quality. Changing it reloads this item from the start, paused. Set conversion preferences in Settings.")
+        .accessibilityLabel("Playback quality")
+        .accessibilityValue(label)
+    }
+
+    private func choose(_ id: String) {
+        guard id != selection || status.state == .failed else { return }
+        do { try controller.selectSource(id) }
+        catch { controller.displayError(error) }
     }
 }

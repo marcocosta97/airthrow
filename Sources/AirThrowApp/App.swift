@@ -19,8 +19,8 @@ struct AirThrowMain {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate, NSToolbarDelegate {
-    // Content needs ~395pt; the unified toolbar adds a 52pt top safe-area inset.
-    private static let controllerHeight: CGFloat = 438
+    // Fixed playback surface reserves room for a two-line title and warning.
+    private static let controllerHeight: CGFloat = 464
     private let controller = PlaybackController()
     private let cookieStatus = CookieStatusModel()
     private let presentation = ControllerPresentation()
@@ -37,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var menuIsOpen = false
     private var menuCardView: MenuCardView?
     private var menuControlRow: MenuControlRow?
+    private var menuControlsItem: NSMenuItem?
     private var terminating = false
     private var didFinishLaunching = false
     private var pendingOpenURLs: [URL] = []
@@ -199,8 +200,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     @objc private func showSettings() {
         if settingsWindow == nil {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 560),
-                                  styleMask: [.titled, .closable], backing: .buffered, defer: false)
+                                  styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
             window.title = "AirThrow Settings"
+            window.backgroundColor = .textBackgroundColor
+            window.titlebarAppearsTransparent = true
+            window.titlebarSeparatorStyle = .none
             window.isReleasedWhenClosed = false
             window.contentView = NSHostingView(rootView: SettingsView(controller: controller, cookieStatus: cookieStatus))
             window.center()
@@ -217,8 +221,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if !terminating {
             terminating = true
-            server.stop()
             Task { @MainActor in
+                // A client may still be waiting for a main-actor reply. Drain
+                // the command queue without blocking that reply or the UI.
+                await Task.detached { [server] in server.stop() }.value
                 await controller.shutdownAndWait()
                 sender.reply(toApplicationShouldTerminate: true)
             }
@@ -228,6 +234,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     func applicationWillTerminate(_ notification: Notification) { server.stop(); controller.shutdown() }
 
     private func handle(_ request: Request) -> Response {
+        guard !terminating else {
+            return Response(error: AppFailure(.appUnavailable, "AirThrow is shutting down."))
+        }
         do {
             switch request.command {
             case .open:
@@ -345,7 +354,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 item.setAccessibilityLabel("Playback controls")
                 menu.addItem(item)
                 menuControlRow = row
+                menuControlsItem = item
             case .command(let command):
+                if command == .quit {
+                    let settings = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
+                    settings.target = self
+                    menu.addItem(settings)
+                }
                 let item = NSMenuItem(title: menuTitle(command),
                     action: #selector(runMenuCommand(_:)), keyEquivalent: "")
                 item.target = self
@@ -365,6 +380,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menuIsOpen = false
         menuCardView = nil
         menuControlRow = nil
+        menuControlsItem = nil
     }
 
     /// Keeps the already-open menu's card and controls in step with playback,
@@ -376,7 +392,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             case .card(let title, let status):
                 menuCardView?.update(title: title, status: status)
             case .controls(let controls):
-                menuControlRow?.update(controls: controls)
+                if menuControlRow?.commands != MenuModel.controlCommands(for: controls) {
+                    let row = MenuControlRow(controls: controls, target: self,
+                                             action: #selector(runMenuControl(_:)))
+                    menuControlsItem?.view = row
+                    menuControlRow = row
+                } else {
+                    menuControlRow?.update(controls: controls)
+                }
             default:
                 break
             }
@@ -412,12 +435,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         do {
             switch command {
             case .previous: try controller.previous()
-            case .skipBackward: try skip(by: -MenuModel.skipInterval)
+            case .skipBackward: try controller.skip(by: -MenuModel.skipInterval)
             case .togglePlayback:
                 if PlaybackPolicy.isPlaying(controller.snapshot) { controller.pause() }
                 else { try controller.play() }
             case .stop: controller.stop()
-            case .skipForward: try skip(by: MenuModel.skipInterval)
+            case .skipForward: try controller.skip(by: MenuModel.skipInterval)
             case .next: try controller.next()
             case .showController: showWindow()
             case .quit: NSApp.terminate(nil)
@@ -427,14 +450,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
     }
 
-    private func skip(by delta: Double) throws {
-        let snapshot = controller.snapshot
-        guard let range = PlaybackPolicy.activeSeekRange(snapshot) else {
-            throw AppFailure(.unsupportedOperation, "This video does not currently support seeking.")
-        }
-        let position = snapshot.position ?? range.start
-        try controller.seek(min(max(position + delta, range.start), range.end))
-    }
 }
 
 @MainActor
@@ -454,9 +469,11 @@ private final class MenuCardView: NSView {
         super.init(frame: NSRect(x: 0, y: 0, width: MenuMetrics.width, height: 46))
         titleLabel.font = .preferredFont(forTextStyle: .headline)
         titleLabel.lineBreakMode = .byTruncatingMiddle
+        titleLabel.toolTip = title
         statusLabel.font = .preferredFont(forTextStyle: .subheadline)
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.toolTip = status
         let stack = NSStackView(views: [titleLabel, statusLabel])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -478,6 +495,8 @@ private final class MenuCardView: NSView {
     func update(title: String, status: String) {
         titleLabel.stringValue = title
         statusLabel.stringValue = status
+        titleLabel.toolTip = title
+        statusLabel.toolTip = status
     }
 }
 
@@ -485,9 +504,10 @@ private final class MenuCardView: NSView {
 @MainActor
 private final class MenuControlRow: NSView {
     private var buttons: [MenuCommand: MenuControlButton] = [:]
+    let commands: [MenuCommand]
 
     init(controls: MenuControlState, target: AnyObject, action: Selector) {
-        let commands = MenuModel.controlCommands(for: controls)
+        commands = MenuModel.controlCommands(for: controls)
         let controlsWidth = CGFloat(commands.count) * Self.buttonWidth
         super.init(frame: NSRect(x: 0, y: 0, width: max(MenuMetrics.width, controlsWidth), height: 36))
         let stack = NSStackView()
