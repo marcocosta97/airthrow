@@ -2,7 +2,7 @@ import Foundation
 import AVFoundation
 
 public enum ResolutionFailure: Error, Sendable {
-    case unavailable, failed, timedOut, tooMuchOutput, unsupportedPage, preparationRequired, protectedMedia, signInRequired
+    case unavailable, failed, timedOut, tooMuchOutput, unsupportedPage, preparationRequired, protectedMedia, signInRequired, liveUnsupported
 
     public var reason: MediaFailureReason {
         switch self {
@@ -13,6 +13,7 @@ public enum ResolutionFailure: Error, Sendable {
         case .preparationRequired: .preparationRequired
         case .protectedMedia: .protectedMedia
         case .signInRequired: .signInRequired
+        case .liveUnsupported: .liveUnsupported
         }
     }
 }
@@ -135,15 +136,18 @@ struct YouTubeSourceAdapter: Sendable {
          "youtube-nocookie.com", "www.youtube-nocookie.com"].contains(url.host?.lowercased() ?? "")
     }
 
-    /// Dedicated playlist pages opt into queue playback. A watch URL carrying
+    /// Dedicated playlist pages opt into queue playback. A Mix (`list=RD...`) is
+    /// an algorithmic radio queue and is accepted from either its dedicated page
+    /// or the watch URL YouTube shares it as. A watch URL carrying any other
     /// `list=` remains a single-video request.
     public static func playlistPage(_ url: URL) -> URL? {
-        guard isWebsite(url), url.host?.lowercased() != "youtu.be", url.path == "/playlist",
+        guard isWebsite(url), url.host?.lowercased() != "youtu.be",
+              url.path == "/playlist" || url.path == "/watch",
               let list = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
                 .first(where: { $0.name == "list" })?.value,
               (10...200).contains(list.count),
               list.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") }),
-              !list.hasPrefix("RD") else { return nil }
+              url.path != "/watch" || list.hasPrefix("RD") else { return nil }
         var components = URLComponents(string: "https://www.youtube.com/playlist")!
         components.queryItems = [URLQueryItem(name: "list", value: list)]
         return components.url
@@ -157,7 +161,7 @@ struct YouTubeSourceAdapter: Sendable {
         if url.host?.lowercased() == "youtu.be", parts.count == 1 { id = parts[0] }
         else if url.path == "/watch" {
             id = components?.queryItems?.first(where: { $0.name == "v" })?.value
-        } else if parts.count == 2, ["shorts", "embed"].contains(parts[0]) { id = parts[1] }
+        } else if parts.count == 2, ["shorts", "embed", "live"].contains(parts[0]) { id = parts[1] }
         else { id = nil }
         guard isWebsite(url), let id, id.count == 11,
               id.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") }) else {
@@ -238,6 +242,12 @@ struct YouTubeSourceAdapter: Sendable {
             }
         }
         try Task.checkCancellation()
+        // Live media has no finite duration and can never be prepared. When no
+        // native presentation was found, refuse it here instead of letting the
+        // selector offer a preparation path that cannot succeed.
+        if info.isIndefiniteLive, !candidates.contains(where: { !$0.source.needsPreparation }) {
+            throw ResolutionFailure.liveUnsupported
+        }
         return candidates
     }
 
@@ -278,13 +288,15 @@ struct YouTubeSourceAdapter: Sendable {
                                      unavailableReason: "This playlist entry is unavailable.")
             }
             let title = cleanTitle(entry.title) ?? "Playlist item \(offset + 1)"
-            let live = entry.is_live == true || (entry.live_status != nil && entry.live_status != "not_live" && entry.live_status != "was_live")
+            // A live entry is playable through the native HLS path; only a
+            // not-yet-started premiere has no stream to load.
+            let upcoming = entry.live_status == "is_upcoming"
             let unavailable = entry.availability.map { !["public", "unlisted"].contains($0) } ?? false
             let id = entry.id ?? entry.url
             let validID = id.map { value in
                 value.count == 11 && value.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") }
             } ?? false
-            if live { return PlaylistEntry(url: nil, title: title, unavailableReason: "Live playlist entries are not supported.") }
+            if upcoming { return PlaylistEntry(url: nil, title: title, unavailableReason: "This playlist entry has not started yet.") }
             if unavailable || !validID { return PlaylistEntry(url: nil, title: title, unavailableReason: "This playlist entry is unavailable.") }
             return PlaylistEntry(url: URL(string: "https://www.youtube.com/watch?v=\(id!)"), title: title)
         }
@@ -301,7 +313,7 @@ struct YouTubeSourceAdapter: Sendable {
         do { info = try JSONDecoder().decode(Info.self, from: data) }
         catch { throw ResolutionFailure.failed }
         guard info._type == nil || info._type == "video", info.entries == nil,
-              info.is_live != true, info.live_status == nil || info.live_status == "not_live" || info.live_status == "was_live",
+              info.live_status != "is_upcoming",
               info.availability == nil || info.availability == "public" || info.availability == "unlisted" else {
             throw ResolutionFailure.unsupportedPage
         }
@@ -321,6 +333,7 @@ struct YouTubeSourceAdapter: Sendable {
         guard let formats = info.formats, !formats.isEmpty else { throw ResolutionFailure.failed }
         let title = cleanTitle(info.title)
         let infoHeaders = info.http_headers ?? [:]
+        let live = info.isIndefiniteLive
         // Info-level custom request headers would apply to every presentation.
         guard infoHeaders.keys.allSatisfy({ defaultHeaders.contains($0.lowercased()) }) else { return [] }
 
@@ -350,9 +363,10 @@ struct YouTubeSourceAdapter: Sendable {
 
         // Whole presentations that need remuxing or conversion. Because this set
         // is capped, a flood of high-resolution AV1/VP9 video-conversion formats
-        // must not displace a cheaper H.264 remux.
+        // must not displace a cheaper H.264 remux. Live media is indefinite and
+        // cannot be prepared, so these plans are skipped entirely.
         let conversions = formats
-            .filter { !isDirectCombined($0) && isConversionCombined($0) }
+            .filter { !live && !isDirectCombined($0) && isConversionCombined($0) }
             .compactMap { format -> MediaCandidate? in
                 guard let whole = wholePresentation(format) else { return nil }
                 return MediaCandidate(
@@ -371,36 +385,40 @@ struct YouTubeSourceAdapter: Sendable {
         // Separate video and audio presentations combined into one plan. Actual
         // codecs/profile and stream indices are re-verified by ffprobe. Videos
         // rank by plan cost before resolution so a compatible H.264 remux
-        // survives a flood of high-resolution AV1/VP9 conversion videos.
-        let videos = formats
-            .filter(isSimpleVideoOnly)
-            .sorted(by: videoCostFirst)
-            .prefix(maximumPairedVideos)
-        var audioByLanguage: [String: [Format]] = [:]
-        for format in formats where isSimpleAudioOnly(format) {
-            audioByLanguage[languageKey(format.language), default: []].append(format)
-        }
-        let languages = audioByLanguage.keys.sorted { left, right in
-            languagePriority(left, right, tracks: audioByLanguage)
-        }.prefix(maximumAudioLanguages)
+        // survives a flood of high-resolution AV1/VP9 conversion videos. Live
+        // media is indefinite and cannot be prepared, so paired tracks are
+        // skipped just like whole-presentation conversions.
         var pairs: [MediaCandidate] = []
-        for video in videos {
-            guard let videoURL = try? MediaInput.url(video.url ?? "") else { continue }
-            let videoHeaders = infoHeaders.merging(video.http_headers ?? [:]) { _, rhs in rhs }
-            for key in languages {
-                guard let audio = preferredAudio(audioByLanguage[key] ?? []),
-                      let audioURL = try? MediaInput.url(audio.url ?? "") else { continue }
-                let audioHeaders = infoHeaders.merging(audio.http_headers ?? [:]) { _, rhs in rhs }
-                pairs.append(MediaCandidate(
-                    source: ResolvedSource(url: videoURL, title: title, headers: videoHeaders,
-                                           audio: MediaTrack(url: audioURL, headers: audioHeaders),
-                                           needsPreparation: true, delivery: .file, videoKnownPresent: true,
-                                           plannedPath: pairedPlan(video, audio: audio)),
-                    id: pairIdentifier(video, audio),
-                    height: video.height, bitrate: video.tbr,
-                    frameRate: video.fps,
-                    audioDescription: audioDescription(audio),
-                    unavailableReason: preparationLimitReason(video)))
+        if !live {
+            let videos = formats
+                .filter(isSimpleVideoOnly)
+                .sorted(by: videoCostFirst)
+                .prefix(maximumPairedVideos)
+            var audioByLanguage: [String: [Format]] = [:]
+            for format in formats where isSimpleAudioOnly(format) {
+                audioByLanguage[languageKey(format.language), default: []].append(format)
+            }
+            let languages = audioByLanguage.keys.sorted { left, right in
+                languagePriority(left, right, tracks: audioByLanguage)
+            }.prefix(maximumAudioLanguages)
+            for video in videos {
+                guard let videoURL = try? MediaInput.url(video.url ?? "") else { continue }
+                let videoHeaders = infoHeaders.merging(video.http_headers ?? [:]) { _, rhs in rhs }
+                for key in languages {
+                    guard let audio = preferredAudio(audioByLanguage[key] ?? []),
+                          let audioURL = try? MediaInput.url(audio.url ?? "") else { continue }
+                    let audioHeaders = infoHeaders.merging(audio.http_headers ?? [:]) { _, rhs in rhs }
+                    pairs.append(MediaCandidate(
+                        source: ResolvedSource(url: videoURL, title: title, headers: videoHeaders,
+                                               audio: MediaTrack(url: audioURL, headers: audioHeaders),
+                                               needsPreparation: true, delivery: .file, videoKnownPresent: true,
+                                               plannedPath: pairedPlan(video, audio: audio)),
+                        id: pairIdentifier(video, audio),
+                        height: video.height, bitrate: video.tbr,
+                        frameRate: video.fps,
+                        audioDescription: audioDescription(audio),
+                        unavailableReason: preparationLimitReason(video)))
+                }
             }
         }
 
@@ -696,6 +714,12 @@ struct YouTubeSourceAdapter: Sendable {
         let availability: String?
         let http_headers: [String: String]?
         let title: String?
+        /// A currently-live presentation has no finite duration and cannot be
+        /// prepared; only native delivery is eligible. `was_live` replays are
+        /// finite and are prepared like any on-demand source.
+        var isIndefiniteLive: Bool {
+            is_live == true || live_status == "is_live" || live_status == "post_live"
+        }
     }
     private struct PlaylistInfo: Decodable {
         let _type: String?

@@ -135,15 +135,21 @@ struct ResolverChecks {
         try check(!unknownHLS.videoKnownPresent, "An HLS extension invented video evidence")
         try check(try await absent.resolve(direct).url == direct, "Direct URL invoked a helper")
         try check(!SourceResolver.isWebsite(URL(string: "https://youtube.com.evil.example/watch?v=BaW_jenozKc")!), "Host suffix spoof accepted")
-        for link in [page, URL(string: "https://youtu.be/BaW_jenozKc")!, URL(string: "https://youtube.com/shorts/BaW_jenozKc")!] {
+        for link in [page, URL(string: "https://youtu.be/BaW_jenozKc")!, URL(string: "https://youtube.com/shorts/BaW_jenozKc")!,
+                     URL(string: "https://www.youtube.com/live/BaW_jenozKc")!] {
             try check(try SourceResolver.videoPage(link).absoluteString == "https://www.youtube.com/watch?v=BaW_jenozKc", "Video link was not normalized")
         }
         let playlistPage = URL(string: "https://youtube.com/playlist?list=PL12345678&feature=share")!
         try check(SourceResolver.playlistPage(playlistPage)?.absoluteString == "https://www.youtube.com/playlist?list=PL12345678",
                   "Dedicated playlist was not normalized")
-        try check(SourceResolver.playlistPage(page) == nil, "Watch URL with playlist context became a queue")
-        try check(SourceResolver.playlistPage(URL(string: "https://youtube.com/playlist?list=RD12345678")!) == nil,
-                  "YouTube Mix was accepted")
+        try check(SourceResolver.playlistPage(page) == nil, "Watch URL with a non-Mix playlist context became a queue")
+        try check(SourceResolver.playlistPage(URL(string: "https://youtube.com/playlist?list=RD12345678")!)?
+            .absoluteString == "https://www.youtube.com/playlist?list=RD12345678", "YouTube Mix page was not accepted")
+        let mixWatch = URL(string: "https://www.youtube.com/watch?v=BaW_jenozKc&list=RD12345678&start_radio=1")!
+        try check(SourceResolver.playlistPage(mixWatch)?.absoluteString == "https://www.youtube.com/playlist?list=RD12345678",
+                  "YouTube Mix watch link was not normalized to its playlist page")
+        try check(SourceResolver.playlistPage(URL(string: "https://www.youtube.com/watch?v=BaW_jenozKc&list=PL12345678")!) == nil,
+                  "Watch URL with a regular playlist context became a queue")
         try await expect(.unsupportedPage) { _ = try await absent.resolve(URL(string: "https://youtube.com/playlist?list=x")!) }
         try await expect(.unavailable) { _ = try await absent.resolve(page) }
         print("PASS local delivery selection, direct bypass, exact hosts, video-only normalization and missing helpers")
@@ -188,11 +194,28 @@ struct ResolverChecks {
             _ = try SourceResolver.select(metadata([separateVideo, separateAudio], extra: ["http_headers": ["Cookie": "secret"]]))
         }
         try await expect(.protectedMedia) { _ = try SourceResolver.select(metadata([combined], extra: ["has_drm": true])) }
-        for extra: [String: Any] in [["_type": "playlist", "entries": []], ["is_live": true], ["availability": "needs_auth"]] {
+        for extra: [String: Any] in [["_type": "playlist", "entries": []], ["live_status": "is_upcoming"], ["availability": "needs_auth"]] {
             try await expect(.unsupportedPage) { _ = try SourceResolver.select(metadata([combined], extra: extra)) }
         }
+        // Native live is accepted and selected directly; a live source that would
+        // need preparation is refused instead of failing later in the preparer.
+        let liveHLS = combined.merging(["protocol": "m3u8_native", "url": "https://cdn.example/live.m3u8"]) { _, rhs in rhs }
+        let livePick = try SourceResolver.select(metadata([liveHLS, videoOnly, separateAudio], extra: ["is_live": true]))
+        try check(livePick.delivery == .hls && !livePick.needsPreparation && livePick.url.path == "/live.m3u8",
+                  "Native live HLS was not selected directly")
+        try await expect(.preparationRequired) {
+            _ = try SourceResolver.select(metadata([videoOnly, separateAudio], extra: ["live_status": "is_live"]))
+        }
+        // The full resolver path refuses a live source with no native presentation
+        // instead of offering a preparation that cannot succeed.
+        try await expect(.liveUnsupported) {
+            _ = try await SourceResolver.selectWithHLS(metadata([videoOnly, separateAudio], extra: ["is_live": true])) { _ in
+                try check(false, "A live source without a native presentation fetched a master")
+                return Data()
+            }
+        }
         try await expect(.failed) { _ = try SourceResolver.select(Data("broken JSON with secret URL".utf8)) }
-        print("PASS combined/HLS selection; separate tracks, unknown codecs, custom headers, DRM and live/playlist restrictions")
+        print("PASS combined/HLS selection; separate tracks, unknown codecs, custom headers, DRM, upcoming rejection and native-live selection")
 
         // Cost-aware selection, conversion policy, stable identity and audio metadata.
         let nativeCombined: [String: Any] = ["format_id": "native", "url": "https://media.example/direct?signature=secret",
@@ -532,9 +555,10 @@ struct ResolverChecks {
         var playlistEntries: [[String: Any]] = [
             ["id": "BaW_jenozKc", "title": " First "],
             ["id": "jNQXAC9IVRw", "title": "Live", "is_live": true],
-            ["id": "aqz-KE-bpKQ", "title": "Private", "availability": "private"]
+            ["id": "aqz-KE-bpKQ", "title": "Premiere", "live_status": "is_upcoming"],
+            ["id": "dQw4w9WgXcQ", "title": "Private", "availability": "private"]
         ]
-        playlistEntries += (3...SourceResolver.maximumPlaylistEntries).map {
+        playlistEntries += (4...SourceResolver.maximumPlaylistEntries).map {
             ["id": String(format: "item%07d", $0), "title": "Item \($0)"]
         }
         let playlistData = try JSONSerialization.data(withJSONObject: [
@@ -545,7 +569,9 @@ struct ResolverChecks {
                   "Playlist title/order/limit was not preserved")
         try check(playlist.entries[0].url?.absoluteString == "https://www.youtube.com/watch?v=BaW_jenozKc",
                   "Playlist entry was not normalized")
-        try check(playlist.entries[1].url == nil && playlist.entries[2].url == nil && playlist.truncated,
+        try check(playlist.entries[1].url?.absoluteString == "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+                  "Live playlist entry was not made playable")
+        try check(playlist.entries[2].url == nil && playlist.entries[3].url == nil && playlist.truncated,
                   "Unsupported playlist entries or truncation were not recorded")
         let playlistHelper = try helper("playlist", "printf '%s\\n' \"$@\" > '\(temp.path)/playlist-args'\ncat <<'JSON'\n\(String(decoding: playlistData, as: UTF8.self))\nJSON\n")
         let playlistResolver = SourceResolver(environment: ["AIRTHROW_YTDLP": playlistHelper, "AIRTHROW_DENO": "/usr/bin/true"])
@@ -553,7 +579,7 @@ struct ResolverChecks {
         let playlistArgs = try String(contentsOf: temp.appendingPathComponent("playlist-args"), encoding: .utf8)
         try check(playlistArgs.contains("--flat-playlist") && playlistArgs.contains("--playlist-end"),
                   "Playlist helper was not bounded to flat metadata extraction")
-        print("PASS dedicated playlist parsing, ordering, unavailable entries, Mix rejection and queue limit")
+        print("PASS dedicated playlist parsing, ordering, unavailable entries, Mix acceptance, live entries and queue limit")
 
         try check(YouTubeCookies.fromEnvironment(["AIRTHROW_YTDLP_COOKIES": "/tmp/x.txt"]) == .file(URL(fileURLWithPath: "/tmp/x.txt")),
                   "Cookie file override was not parsed")
