@@ -33,6 +33,7 @@ final class PlaybackController: ObservableObject {
     private var loadingAsset: AVURLAsset?
     private var timeoutTask: Task<Void, Never>?
     private var probeTask: Task<Void, Never>?
+    private var probeRestoreTask: Task<Void, Never>?
     private var generation = UUID()
     private var seekID: UUID?
     private var probeID = UUID()
@@ -61,6 +62,8 @@ final class PlaybackController: ObservableObject {
     private var ended = false
     private var hasPlayed = false
     private var probing = false
+    private var probeRestoring = false
+    private var probeRestoreFailed = false
     private var hasOpenedPicker = false
     private var pickerIsOpen = false
     private var probeWhenReady = false
@@ -507,6 +510,12 @@ final class PlaybackController: ObservableObject {
         guard item.status == .readyToPlay, !loading else {
             throw AppFailure(.unsupportedOperation, "The video is still loading.")
         }
+        guard !probing && !probeRestoring else {
+            throw AppFailure(.unsupportedOperation, "Wait for the receiver connection to finish.")
+        }
+        guard !probeRestoreFailed else {
+            throw AppFailure(.unsupportedOperation, "Seek to the beginning or reload before playing.")
+        }
         guard player.isExternalPlaybackActive else {
             throw AppFailure(.routeRequired, "Choose a video receiver using the AirPlay button, then press Play.")
         }
@@ -600,11 +609,12 @@ final class PlaybackController: ObservableObject {
         seekID = requestID
         player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600),
                     toleranceBefore: CMTime(seconds: 0.5, preferredTimescale: 600),
-                    toleranceAfter: CMTime(seconds: 0.5, preferredTimescale: 600)) { [weak self] _ in
+                    toleranceAfter: CMTime(seconds: 0.5, preferredTimescale: 600)) { [weak self] finished in
             Task { @MainActor in
                 guard let self, self.generation == id, self.seekID == requestID else { return }
                 self.seekID = nil
                 self.pendingSeek = nil
+                if finished { self.probeRestoreFailed = false }
                 self.refresh()
             }
         }
@@ -645,7 +655,7 @@ final class PlaybackController: ObservableObject {
     }
 
     private func beginProbeIfReady() {
-        guard probeWhenReady, mediaItem?.status == .readyToPlay, !loading else { return }
+        guard probeWhenReady, mediaItem?.status == .readyToPlay, !loading, !probeRestoring else { return }
         if failure != nil {
             probeWhenReady = false
             return
@@ -708,15 +718,54 @@ final class PlaybackController: ObservableObject {
     }
 
     private func cancelProbe(restorePosition: Bool) {
+        // A receiver-side Pause can arrive while the seek is in flight. Do not
+        // invalidate that rewind and expose Play before it actually completes.
+        if probeRestoring && restorePosition {
+            player.pause()
+            return
+        }
         probeID = UUID()
         probeTask?.cancel()
         probeTask = nil
+        probeRestoreTask?.cancel()
+        probeRestoreTask = nil
+        probeRestoring = false
         player.cancelPendingPrerolls()
         guard probing else { return }
         probing = false
         player.pause()
         if restorePosition, player.currentItem?.status == .readyToPlay {
-            player.seek(to: CMTime(seconds: probePosition, preferredTimescale: 600))
+            probeRestoring = true
+            let id = generation
+            let restoreID = probeID
+            let position = CMTime(seconds: probePosition, preferredTimescale: 600)
+            player.seek(to: position, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
+                Task { @MainActor in
+                    guard let self, self.generation == id, self.probeID == restoreID,
+                          self.probeRestoring else { return }
+                    self.probeRestoreTask?.cancel()
+                    self.probeRestoreTask = nil
+                    self.probeRestoring = false
+                    if finished {
+                        self.probeRestoreFailed = false
+                    } else {
+                        self.probeRestoreFailed = true
+                        self.playWhenReady = false
+                        self.notice = "Could not return to the start. Seek to the beginning before playing."
+                    }
+                    self.refresh()
+                }
+            }
+            probeRestoreTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(8))
+                guard !Task.isCancelled, let self, self.generation == id,
+                      self.probeID == restoreID, self.probeRestoring else { return }
+                self.probeRestoring = false
+                self.probeRestoreFailed = true
+                self.playWhenReady = false
+                self.notice = "Could not return to the start. Seek to the beginning before playing."
+                self.refresh()
+            }
         }
     }
 
@@ -788,6 +837,7 @@ final class PlaybackController: ObservableObject {
         ended = false; hasPlayed = false; failure = nil; failureReason = nil
         playWhenReady = false
         pendingInitialSeek = false
+        probeRestoreFailed = false
         hasAudio = nil
         hasVideo = false
         wasExternal = player.isExternalPlaybackActive
@@ -931,10 +981,10 @@ final class PlaybackController: ObservableObject {
         }
         beginProbeIfReady()
         if retiredPreparedMedia != nil, !loading, item?.status == .readyToPlay,
-           !probing && !probeWhenReady {
+           !probing && !probeRestoring && !probeWhenReady {
             stopRetiredPreparedMedia()
         }
-        if playWhenReady, !loading, item?.status == .readyToPlay {
+        if playWhenReady, !loading, item?.status == .readyToPlay, !probeRestoring && !probeRestoreFailed {
             if external && !probing {
                 playWhenReady = false
                 probeWhenReady = false
@@ -978,7 +1028,7 @@ final class PlaybackController: ObservableObject {
         // the muted route probe, report the pre-probe position so the timeline
         // does not visibly scrub.
         next.position = (item == nil || loading || resolving || preparing) ? nil
-            : (probing ? probePosition : finite(player.currentTime().seconds))
+            : ((probing || probeRestoring) ? probePosition : finite(player.currentTime().seconds))
         next.seekableRanges = (item?.seekableTimeRanges ?? []).compactMap {
             let range = $0.timeRangeValue
             guard let start = finite(range.start.seconds), let end = finite(CMTimeRangeGetEnd(range).seconds), end > start else { return nil }
@@ -1030,7 +1080,7 @@ final class PlaybackController: ObservableObject {
         }
         next.state = PlaybackPolicy.state(hasItem: item != nil || loading || failure != nil,
             failed: failure != nil, ready: item?.status == .readyToPlay && !loading,
-            connecting: probing, external: external, ended: ended,
+            connecting: probing || probeRestoring, external: external, ended: ended,
             playing: player.timeControlStatus == .playing, waiting: player.timeControlStatus == .waitingToPlayAtSpecifiedRate,
             hasPlayed: hasPlayed)
         if snapshot != next {
