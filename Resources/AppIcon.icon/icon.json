@@ -89,7 +89,7 @@
         }
       ],
       "position" : {
-        "scale" : 1.15,
+        "scale" : 1.12,
         "translation-in-points" : [
           0,
           0
@@ -102,7 +102,7 @@
       },
       "shadow" : {
         "kind" : "layer-color",
-        "opacity" : 0.15
+        "opacity" : 0.12
       },
       "specular" : true,
       "translucency-specializations" : [
@@ -197,7 +197,7 @@
         }
       ],
       "position" : {
-        "scale" : 1.15,
+        "scale" : 0.88,
         "translation-in-points" : [
           0,
           0
@@ -205,7 +205,7 @@
       },
       "shadow" : {
         "kind" : "layer-color",
-        "opacity" : 0.18
+        "opacity" : 0.12
       },
       "specular" : true,
       "translucency-specializations" : [
