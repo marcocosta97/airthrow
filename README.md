@@ -114,4 +114,10 @@ Prepared media is served on the Mac’s active Wi-Fi/Ethernet IPv4 address and a
 
 The app stores no media history or pairing credentials of its own. Media URLs and local paths stay in memory and are omitted from status and errors; shell history is managed by your shell. macOS manages pairing and may save window geometry.
 
+## License
+
+AirThrow's source code is licensed under the [Apache License 2.0](LICENSE).
+
+This license covers AirThrow's own code only. It does not grant rights to third-party media, to Apple frameworks and services (AVFoundation, AirPlay), or to external tools such as FFmpeg/ffprobe and yt-dlp, which remain subject to their own licenses and terms.
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for tests, project layout, and packaging details.

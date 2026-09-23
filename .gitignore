@@ -9,8 +9,21 @@ __pycache__/
 
 # Local development context and editor state
 AGENTS.override.md
+old.AGENTS.md
 .impeccable/
 .vscode/
+.codex/
+.cursor/
+.opencode/
+.idea/
+
+# Private planning documents. PRODUCT.md is a symlink into a private vault, so
+# committing it would also expose that path. Kept here, not only in the
+# local, unpublishable .git/info/exclude.
+/PRODUCT.md
+/DESIGN.md
+/PLAN.md
+/development-guide.md
 
 # Exported YouTube cookies are session credentials; never commit them
 cookies.txt
