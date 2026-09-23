@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: Build and core checks
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          swift --version
+          xcodebuild -version
+
+      - name: Build
+        run: swift build --disable-sandbox
+
+      - name: Core checks
+        run: .build/debug/CoreChecks
+
+      - name: Resolver checks
+        run: |
+          swiftc -swift-version 6 -parse-as-library \
+            Sources/AirThrowCore/Protocol.swift \
+            Sources/AirThrowCore/MediaSelection.swift \
+            Sources/AirThrowCore/SourceResolver.swift \
+            Sources/AirThrowCore/HelperProcess.swift \
+            Sources/AirThrowCore/YouTubeCookies.swift \
+            Tests/ResolverChecks/main.swift \
+            -o .build/ResolverChecks
+          .build/ResolverChecks
+
+      - name: Settings checks
+        run: |
+          swiftc -swift-version 6 -parse-as-library \
+            Sources/AirThrowCore/*.swift \
+            Sources/AirThrowApp/MediaDiagnostics.swift \
+            Sources/AirThrowApp/PlaybackController.swift \
+            Sources/AirThrowApp/SettingsView.swift \
+            Tests/SettingsChecks/main.swift \
+            -o .build/SettingsChecks
+          .build/SettingsChecks
+
+      - name: Packaging script and CLI smoke
+        run: |
+          bash scripts/build.sh
+          codesign --verify --strict build/AirThrow.app
+          ./build/athrow --help
+
+  media:
+    name: Media checks (optional helpers)
+    runs-on: macos-15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install helpers
+        run: brew install ffmpeg yt-dlp deno
+
+      - name: Build
+        run: swift build --disable-sandbox
+
+      - name: Source-choice controller checks
+        run: python3 scripts/source-choice-checks.py
+
+      - name: Preparation and HTTP delivery checks
+        run: python3 scripts/preparation-checks.py
+
+      - name: Native media matrix
+        run: python3 scripts/native-media-checks.py
