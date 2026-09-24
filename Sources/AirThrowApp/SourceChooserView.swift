@@ -19,7 +19,7 @@ struct SourceChooserView: View {
     var body: some View {
         Menu {
             Text("Choosing quality reloads from the start, paused.")
-            Picker("Quality", selection: Binding(get: { selection }, set: choose)) {
+            Picker("Quality", selection: Binding(get: { selection }, set: { id in choose(id) })) {
                 Text("Automatic").tag("automatic")
                 ForEach(status.sources ?? []) { source in
                     Text([source.quality, source.playbackPath.label, source.audio,
