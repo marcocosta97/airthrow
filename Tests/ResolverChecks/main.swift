@@ -217,10 +217,27 @@ struct ResolverChecks {
         let hlsRemux = try SourceResolver.select(metadata([liveHLSVideo, liveHLSAudio], extra: ["is_live": true]))
         try check(hlsRemux.isLive && hlsRemux.delivery == .hls && hlsRemux.playbackPath == .remux,
                   "HLS fragments metadata blocked a compatible live remux")
-        // Live inputs that need encoding are still rejected before handoff.
+        let liveOpus = separateAudio.merging(["acodec": "opus", "ext": "webm"]) { _, rhs in rhs }
+        let liveAudio = try SourceResolver.select(metadata([separateVideo, liveOpus], extra: ["is_live": true]))
+        try check(liveAudio.isLive && liveAudio.playbackPath == .audioConversion,
+                  "Live audio conversion was not offered by default")
+        let liveVP9 = separateVideo.merging(["vcodec": "vp9", "ext": "webm"]) { _, rhs in rhs }
+        let liveVideoData = try metadata([liveVP9, liveOpus], extra: ["is_live": true])
+        try await expect(.preparationRequired) { _ = try SourceResolver.select(liveVideoData) }
+        let liveVideo = try SourceResolver.select(liveVideoData, policy: .allowVideo)
+        try check(liveVideo.isLive && liveVideo.playbackPath == .videoConversion,
+                  "Opt-in live video conversion was not offered")
+        let liveVideoCandidates = try await YouTubeSourceAdapter.candidatesWithHLS(liveVideoData) { _ in
+            try check(false, "Video conversion fetched an HLS master")
+            return Data()
+        }
+        try check(try MediaSelector.select(liveVideoCandidates, policy: .allowVideo).playbackPath == .videoConversion,
+                  "The full resolver discarded an eligible live video-conversion candidate")
+        // A delivery protocol that the preparer cannot read remains excluded.
         let liveFetchCounter = ManifestCounter()
+        let unsupportedLive = incompatible.merging(["protocol": "http_dash_segments"]) { _, rhs in rhs }
         try await expect(.liveUnsupported) {
-            _ = try await SourceResolver.selectWithHLS(metadata([incompatible], extra: ["is_live": true])) { _ in
+            _ = try await SourceResolver.selectWithHLS(metadata([unsupportedLive], extra: ["is_live": true])) { _ in
                 await liveFetchCounter.increment()
                 return Data()
             }
@@ -228,7 +245,7 @@ struct ResolverChecks {
         try check(await liveFetchCounter.count == 0,
                   "An unsupported live source fetched a master")
         try await expect(.failed) { _ = try SourceResolver.select(Data("broken JSON with secret URL".utf8)) }
-        print("PASS combined/HLS selection; separate tracks, custom headers, DRM, native-live and live-remux selection")
+        print("PASS combined/HLS selection; native live, live remux, audio conversion and opt-in video conversion")
 
         // Cost-aware selection, conversion policy, stable identity and audio metadata.
         let nativeCombined: [String: Any] = ["format_id": "native", "url": "https://media.example/direct?signature=secret",

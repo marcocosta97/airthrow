@@ -161,7 +161,7 @@ public enum MediaFailureReason: String, Codable, Sendable {
         case .resolutionTimedOut: "Finding the video timed out. Check the connection and try again."
         case .unsupportedWebsite: "Choose a public YouTube video, playlist, Mix or live stream. Sign-in and not-yet-started premieres are not supported."
         case .signInRequired: "YouTube asked for sign-in verification. Add or refresh cookies in Settings → YouTube access, then load again. A cookies file is a snapshot and can expire; a browser source stays current."
-        case .liveUnsupported: "This live stream has no supported native or H.264/AAC remux presentation. Live conversion, protected media and some delivery methods are unsupported."
+        case .liveUnsupported: "This live stream has no supported presentation. Protected media, unsafe tracks and some delivery methods are unsupported."
         case .preparationRequired: "This source cannot use the current preparation settings. Allow video conversion for supported SDR sources, or choose another source. HDR, protected media and some delivery methods are unsupported."
         case .preparerUnavailable: "Preparing this video needs FFmpeg and ffprobe. Install FFmpeg with Homebrew, then load the link again."
         case .preparationFailed: "Could not prepare the video. Check the source, connection and available disk space, then load it again."

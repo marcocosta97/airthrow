@@ -246,7 +246,8 @@ struct YouTubeSourceAdapter: Sendable {
             }
         }
         try Task.checkCancellation()
-        if info.isIndefiniteLive, !candidates.contains(where: { $0.unavailableReason == nil }) {
+        if info.isIndefiniteLive,
+           !candidates.contains(where: { $0.unavailableReason(for: .allowVideo) == nil }) {
             throw ResolutionFailure.liveUnsupported
         }
         return candidates
@@ -362,12 +363,11 @@ struct YouTubeSourceAdapter: Sendable {
             .sorted(by: costFirst)
             .prefix(maximumDirectCombined)
 
-        // Live presentations can be remuxed when both tracks can be copied.
-        // Conversion remains limited to finite media.
+        // Live presentations use the same processing tiers as finite media;
+        // the selector still requires explicit permission for video conversion.
         let conversions = formats
             .filter { !isDirectCombined($0) && isConversionCombined($0)
-                && (live || !isHLSContainer($0))
-                && (!live || combinedPlan($0) == .remux) }
+                && (live || !isHLSContainer($0)) }
             .compactMap { format -> MediaCandidate? in
                 guard let whole = wholePresentation(format) else { return nil }
                 return MediaCandidate(
@@ -389,8 +389,7 @@ struct YouTubeSourceAdapter: Sendable {
         // survives a flood of high-resolution AV1/VP9 conversion videos.
         var pairs: [MediaCandidate] = []
         let videos = formats
-            .filter { isSimpleVideoOnly($0) && (live || !isHLSContainer($0))
-                && (!live || !needsVideoConversion($0)) }
+            .filter { isSimpleVideoOnly($0) && (live || !isHLSContainer($0)) }
             .sorted(by: videoCostFirst)
             .prefix(maximumPairedVideos)
         var audioByLanguage: [String: [Format]] = [:]
@@ -405,7 +404,6 @@ struct YouTubeSourceAdapter: Sendable {
             let videoHeaders = infoHeaders.merging(video.http_headers ?? [:]) { _, rhs in rhs }
             for key in languages {
                 guard let audio = preferredAudio(audioByLanguage[key] ?? []),
-                      !live || isAAC(audioCodec(audio)),
                       let audioURL = try? MediaInput.url(audio.url ?? "") else { continue }
                 let audioHeaders = infoHeaders.merging(audio.http_headers ?? [:]) { _, rhs in rhs }
                 pairs.append(MediaCandidate(

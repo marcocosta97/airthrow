@@ -80,17 +80,18 @@ public final class PreparedMedia {
     }
 
     fileprivate func produceLive(executable: String, arguments: [String], workspace: PreparationWorkspace,
-                                 maximumBytes: Int64) {
+                                 maximumBytes: Int64, videoConversion: Bool) {
+        workspace.startLiveProgress()
         isProducing = true
         producer = Task { [weak self] in
             let activity = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled],
-                                                                 reason: "Remuxing AirPlay live video")
+                                                                 reason: "Preparing AirPlay live video")
             defer { ProcessInfo.processInfo.endActivity(activity) }
             do {
                 _ = try await HelperProcess.run(executable: executable, arguments: arguments,
                     timeout: nil, outputLimit: 64 * 1024, monitor: {
                         try workspace.checkSize(maximumBytes)
-                        try workspace.checkLiveProgress()
+                        try workspace.checkLiveProgress(videoConversion: videoConversion)
                     })
                 let playlist = try HLSPlaylist(directory: workspace.directory)
                 guard playlist.complete else { throw PreparationFailure.failed }
@@ -123,8 +124,10 @@ private final class PreparationWorkspace: @unchecked Sendable {
     let directory: URL
     private let lease: Int32
     private let progressLock = NSLock()
-    private var lastPlaylistModification: Date?
+    private var liveStarted = Date()
     private var lastProgress = Date()
+    private var publishedEndSequence: Int?
+    private var publishedSeconds = 0.0
     init() throws {
         Self.cleanAbandoned()
         directory = Self.root.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -154,17 +157,42 @@ private final class PreparationWorkspace: @unchecked Sendable {
               free > 64 * 1024 * 1024 else { throw PreparationFailure.limit }
     }
 
-    func checkLiveProgress() throws {
-        let playlist = directory.appendingPathComponent("media.m3u8")
-        let modification = (try? playlist.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-        let stalled = progressLock.withLock { () -> Bool in
-            if let modification, modification != lastPlaylistModification {
-                lastPlaylistModification = modification
-                lastProgress = Date()
-            }
-            return Date().timeIntervalSince(lastProgress) > 60
+    func startLiveProgress() {
+        progressLock.withLock {
+            liveStarted = Date()
+            lastProgress = liveStarted
+            publishedEndSequence = nil
+            publishedSeconds = 0
         }
-        if stalled { throw PreparationFailure.failed }
+    }
+
+    func checkLiveProgress(videoConversion: Bool) throws {
+        let playlist = try? HLSPlaylist(directory: directory)
+        let behind = progressLock.withLock { () -> Bool in
+            let now = Date()
+            if let playlist {
+                let end = playlist.mediaSequence + playlist.count
+                if let previous = publishedEndSequence {
+                    if end > previous {
+                        let missed = max(0, playlist.mediaSequence - previous)
+                        publishedSeconds += Double(missed) * playlist.duration / Double(playlist.count)
+                        publishedSeconds += playlist.segmentDurations.enumerated()
+                            .filter { playlist.mediaSequence + $0.offset >= previous }
+                            .reduce(0) { $0 + $1.element }
+                        publishedEndSequence = end
+                        lastProgress = now
+                    }
+                } else {
+                    publishedSeconds = playlist.duration
+                    publishedEndSequence = end
+                    lastProgress = now
+                }
+            }
+            let elapsed = now.timeIntervalSince(liveStarted)
+            return now.timeIntervalSince(lastProgress) > 60
+                || (videoConversion && elapsed > 12 && elapsed - publishedSeconds > 10)
+        }
+        if behind { throw PreparationFailure.failed }
     }
 
     static func cleanAbandoned() {
@@ -185,6 +213,8 @@ private struct HLSPlaylist {
     let duration: Double
     let count: Int
     let complete: Bool
+    let mediaSequence: Int
+    let segmentDurations: [Double]
     /// Completed segment names in playlist order. The first entry is safe to
     /// probe: `-hls_flags temp_file` only publishes atomically renamed files.
     let segments: [String]
@@ -204,8 +234,13 @@ private struct HLSPlaylist {
                       && ((try? FileManager.default.attributesOfItem(atPath: directory.appendingPathComponent(name).path)[.size]
                            as? NSNumber)?.int64Value ?? 0) > 0
               }) else { throw PreparationFailure.failed }
+        let sequence = lines.first(where: { $0.hasPrefix("#EXT-X-MEDIA-SEQUENCE:") })
+            .flatMap { Int($0.dropFirst("#EXT-X-MEDIA-SEQUENCE:".count)) } ?? 0
+        guard sequence >= 0 else { throw PreparationFailure.failed }
         duration = durations.reduce(0, +)
         count = names.count
+        mediaSequence = sequence
+        segmentDurations = durations
         segments = names
         complete = lines.contains("#EXT-X-ENDLIST")
     }
@@ -271,7 +306,6 @@ public struct MediaPreparer: Sendable {
             // explicitly allows it.
             let plan = try Self.plan(videoInput: videoInput, audioInput: audioInput,
                                      separateAudio: source.audio != nil, policy: source.conversionPolicy)
-            if source.isLive, plan.path != .remux { throw PreparationFailure.unsupported }
             let videoDuration = source.isLive ? nil : try videoInput.finiteDuration
             let audioDuration = source.isLive ? nil : try audioInput.finiteDuration
             if let videoDuration, let audioDuration, abs(videoDuration - audioDuration) > 2 {
@@ -318,7 +352,7 @@ public struct MediaPreparer: Sendable {
                 if source.isLive {
                     return try await live(workspace: workspace, arguments: arguments, executable: ffmpeg,
                                           host: host, playbackPath: plan.path, plan: plan,
-                                          maximumBytes: liveLimit)
+                                          maximumBytes: liveLimit, ffprobe: ffprobe)
                 }
                 if mode == .progressiveHLS {
                     do {
@@ -389,7 +423,7 @@ public struct MediaPreparer: Sendable {
     @MainActor
     private func live(workspace: PreparationWorkspace, arguments: [String], executable: String,
                       host: String, playbackPath: PlaybackPath, plan: PreparationPlan,
-                      maximumBytes: Int64) async throws -> PreparedMedia {
+                      maximumBytes: Int64, ffprobe: String) async throws -> PreparedMedia {
         let playlist = workspace.directory.appendingPathComponent("media.m3u8")
         let arguments = arguments + ["-f", "hls", "-hls_segment_type", "mpegts", "-hls_time", "2",
             "-hls_list_size", "6", "-hls_delete_threshold", "3",
@@ -400,7 +434,7 @@ public struct MediaPreparer: Sendable {
         let prepared = PreparedMedia(server: server, workspace: workspace, playbackPath: playbackPath,
                                      videoHeight: plan.video.height, videoFrameRate: plan.video.frameRate)
         prepared.produceLive(executable: executable, arguments: arguments, workspace: workspace,
-                             maximumBytes: maximumBytes)
+                             maximumBytes: maximumBytes, videoConversion: plan.videoAction == .convert)
         let started = ContinuousClock.now
         do {
             while true {
@@ -409,7 +443,19 @@ public struct MediaPreparer: Sendable {
                 if let manifest = try? HLSPlaylist(directory: workspace.directory),
                    (manifest.count >= 3 && manifest.duration >= 6)
                     || (manifest.complete && manifest.count > 0) {
+                    let elapsed = started.duration(to: .now)
+                    let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+                    if plan.videoAction == .convert && !manifest.complete && seconds - manifest.duration > 4 {
+                        throw PreparationFailure.failed
+                    }
+                    if plan.videoAction == .convert || plan.audioAction == .convert {
+                        guard let segment = manifest.segments.last else { throw PreparationFailure.failed }
+                        let probed = try await probe(workspace.directory.appendingPathComponent(segment),
+                                                     headers: [:], executable: ffprobe, local: true, mpegts: true)
+                        try Self.validateConverted(probed, plan: plan)
+                    }
                     try Task.checkCancellation()
+                    if let failure = prepared.productionFailure { throw failure }
                     return prepared
                 }
                 guard prepared.isProducing, started.duration(to: .now) < startupTimeout else {

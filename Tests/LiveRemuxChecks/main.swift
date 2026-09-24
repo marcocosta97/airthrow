@@ -89,5 +89,60 @@ struct LiveRemuxChecks {
                   "Live remux did not load paused with a live timeline: \(controller.snapshot.state)")
         controller.stop()
         print("PASS controller live timeline, paused readiness and Stop cleanup")
+
+        func saveSegment(_ prepared: PreparedMedia, as name: String) async throws {
+            let (playlist, response) = try await fetch(prepared.url)
+            let text = String(decoding: playlist, as: UTF8.self)
+            guard let segment = text.split(separator: "\n").first(where: { !$0.hasPrefix("#") }) else {
+                throw NSError(domain: "LiveRemuxChecks", code: 2)
+            }
+            let (bytes, segmentResponse) = try await fetch(prepared.url.deletingLastPathComponent()
+                .appendingPathComponent(String(segment)))
+            try check(response.statusCode == 200 && segmentResponse.statusCode == 200 && bytes.count > 1000,
+                      "Converted live segment was unavailable")
+            try bytes.write(to: directory.appendingPathComponent(name))
+        }
+
+        let audioSource = ResolvedSource(url: URL(string: base + "/video.m3u8")!,
+            audio: MediaTrack(url: URL(string: base + "/audio-opus.webm")!),
+            delivery: .hls, videoKnownPresent: true, isLive: true, plannedPath: .audioConversion)
+        let audioConverted = try await MediaPreparer(environment: environment).prepare(audioSource)
+        try check(audioConverted.isProducing && audioConverted.playbackPath == .audioConversion,
+                  "Live audio conversion did not hand off while producing")
+        try await saveSegment(audioConverted, as: "live-audio-converted.ts")
+        audioConverted.stop()
+        await audioConverted.waitForProducer()
+        print("PASS live audio conversion starts before source completion")
+
+        var softwareEnvironment = environment
+        softwareEnvironment["AIRTHROW_FFMPEG"] = directory.appendingPathComponent("software-ffmpeg").path
+        let videoSource = ResolvedSource(url: URL(string: base + "/video-vp9.webm")!,
+            audio: MediaTrack(url: URL(string: base + "/audio.m3u8")!),
+            delivery: .hls, videoKnownPresent: true, isLive: true,
+            conversionPolicy: .allowVideo, plannedPath: .videoConversion)
+        do {
+            _ = try await MediaPreparer(environment: softwareEnvironment).prepare(
+                videoSource.withConversionPolicy(.avoidVideo))
+            try check(false, "Live video conversion ignored the opt-in policy")
+        } catch PreparationFailure.videoConversionRequired {}
+        let videoConverted = try await MediaPreparer(environment: softwareEnvironment).prepare(videoSource)
+        try check(videoConverted.isProducing && videoConverted.playbackPath == .videoConversion,
+                  "Live video conversion did not hand off while producing")
+        try await saveSegment(videoConverted, as: "live-video-converted.ts")
+        videoConverted.stop()
+        await videoConverted.waitForProducer()
+        print("PASS opt-in live video conversion verifies its first segment")
+
+        var slowEnvironment = environment
+        slowEnvironment["AIRTHROW_FFMPEG"] = directory.appendingPathComponent("slow-ffmpeg").path
+        let slowStarted = Date()
+        do {
+            _ = try await MediaPreparer(environment: slowEnvironment).prepare(videoSource)
+            try check(false, "Slow live encoder reached player handoff")
+        } catch let failure as PreparationFailure {
+            try check(failure == .failed && Date().timeIntervalSince(slowStarted) < 25,
+                      "Slow live encoder was not rejected promptly")
+        }
+        print("PASS live video conversion rejects insufficient sustained speed")
     }
 }
