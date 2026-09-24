@@ -26,7 +26,7 @@ enum HelperProcess {
         let succeeded: Bool
     }
 
-    static func run(executable: String, arguments: [String], timeout: Duration = .seconds(40),
+    static func run(executable: String, arguments: [String], timeout: Duration? = .seconds(40),
                     outputLimit: Int = 8 * 1024 * 1024,
                     monitor: (@Sendable () throws -> Void)? = nil) async throws -> Data {
         let result = try await execute(executable: executable, arguments: arguments, timeout: timeout,
@@ -42,7 +42,7 @@ enum HelperProcess {
                           outputLimit: outputLimit, monitor: monitor)
     }
 
-    private static func execute(executable: String, arguments: [String], timeout: Duration,
+    private static func execute(executable: String, arguments: [String], timeout: Duration?,
                                 outputLimit: Int, monitor: (@Sendable () throws -> Void)?) async throws -> Result {
         try Task.checkCancellation()
         var output: [Int32] = [0, 0]
@@ -93,7 +93,7 @@ enum HelperProcess {
             guard fcntl(fd, F_SETFL, O_NONBLOCK) != -1 else { throw ResolutionFailure.failed }
         }
         let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: timeout)
+        let deadline = timeout.map { clock.now.advanced(by: $0) }
         var nextMonitor = clock.now
         var data = Data()
         var stderrData = Data()
@@ -102,7 +102,7 @@ enum HelperProcess {
         var status: Int32 = 0
         while true {
             try Task.checkCancellation()
-            guard clock.now < deadline else { throw ResolutionFailure.timedOut }
+            if let deadline, clock.now >= deadline { throw ResolutionFailure.timedOut }
             if clock.now >= nextMonitor {
                 try monitor?()
                 nextMonitor = clock.now.advanced(by: .milliseconds(250))

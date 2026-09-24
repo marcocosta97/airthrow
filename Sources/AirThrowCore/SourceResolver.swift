@@ -37,6 +37,8 @@ public struct ResolvedSource: Sendable {
     public let delivery: MediaDelivery
     /// Positive video evidence from an inspected presentation, not its URL or extension.
     public let videoKnownPresent: Bool
+    /// The source is an indefinite presentation; preparation must use a rolling playlist.
+    public let isLive: Bool
     /// The conversion preference in force when this plan was chosen.
     public let conversionPolicy: ConversionPolicy
     /// A concrete processing tier chosen by the selector. Nil means the tier is
@@ -46,13 +48,15 @@ public struct ResolvedSource: Sendable {
     public var needsPreparationPipeline: Bool { needsPreparation || needsDelivery }
     public init(url: URL, title: String? = nil, headers: [String: String] = [:], audio: MediaTrack? = nil,
                 needsPreparation: Bool = false, needsDelivery: Bool = false, delivery: MediaDelivery = .unknown,
-                videoKnownPresent: Bool = false, conversionPolicy: ConversionPolicy = .avoidVideo,
+                videoKnownPresent: Bool = false, isLive: Bool = false,
+                conversionPolicy: ConversionPolicy = .avoidVideo,
                 plannedPath: PlaybackPath? = nil) {
         self.url = url; self.title = title; self.headers = headers; self.audio = audio
         self.needsPreparation = needsPreparation || audio != nil || (plannedPath.map { $0 != .direct } ?? false)
         self.needsDelivery = needsDelivery
         self.delivery = delivery
         self.videoKnownPresent = videoKnownPresent
+        self.isLive = isLive
         self.conversionPolicy = conversionPolicy
         self.plannedPath = plannedPath
     }
@@ -62,7 +66,7 @@ public struct ResolvedSource: Sendable {
     public func withConversionPolicy(_ policy: ConversionPolicy) -> ResolvedSource {
         ResolvedSource(url: url, title: title, headers: headers, audio: audio,
                        needsPreparation: needsPreparation, needsDelivery: needsDelivery,
-                       delivery: delivery, videoKnownPresent: videoKnownPresent,
+                       delivery: delivery, videoKnownPresent: videoKnownPresent, isLive: isLive,
                        conversionPolicy: policy, plannedPath: plannedPath)
     }
 }
@@ -229,7 +233,7 @@ struct YouTubeSourceAdapter: Sendable {
                 if let quality = HLSMaster.quality(manifest, at: master) {
                     candidates.append(MediaCandidate(
                         source: ResolvedSource(url: master, title: cleanTitle(info.title), delivery: .hls,
-                                               videoKnownPresent: true),
+                                               videoKnownPresent: true, isLive: info.isIndefiniteLive),
                         id: formatIdentifier(format, role: "hls"),
                         height: quality.height, bitrate: quality.bitrate,
                         audioDescription: audioDescription(format)))
@@ -242,10 +246,7 @@ struct YouTubeSourceAdapter: Sendable {
             }
         }
         try Task.checkCancellation()
-        // Live media has no finite duration and can never be prepared. When no
-        // native presentation was found, refuse it here instead of letting the
-        // selector offer a preparation path that cannot succeed.
-        if info.isIndefiniteLive, !candidates.contains(where: { !$0.source.needsPreparation }) {
+        if info.isIndefiniteLive, !candidates.contains(where: { $0.unavailableReason == nil }) {
             throw ResolutionFailure.liveUnsupported
         }
         return candidates
@@ -352,7 +353,7 @@ struct YouTubeSourceAdapter: Sendable {
                 return MediaCandidate(
                     source: ResolvedSource(url: whole.url, title: title, headers: whole.headers,
                                            delivery: isHLSContainer(format) ? .hls : .file,
-                                           videoKnownPresent: true),
+                                           videoKnownPresent: true, isLive: live),
                     id: formatIdentifier(format, role: "direct"),
                     height: format.height, bitrate: format.tbr,
                     frameRate: format.fps,
@@ -361,18 +362,18 @@ struct YouTubeSourceAdapter: Sendable {
             .sorted(by: costFirst)
             .prefix(maximumDirectCombined)
 
-        // Whole presentations that need remuxing or conversion. Because this set
-        // is capped, a flood of high-resolution AV1/VP9 video-conversion formats
-        // must not displace a cheaper H.264 remux. Live media is indefinite and
-        // cannot be prepared, so these plans are skipped entirely.
+        // Live presentations can be remuxed when both tracks can be copied.
+        // Conversion remains limited to finite media.
         let conversions = formats
-            .filter { !live && !isDirectCombined($0) && isConversionCombined($0) }
+            .filter { !isDirectCombined($0) && isConversionCombined($0)
+                && (live || !isHLSContainer($0))
+                && (!live || combinedPlan($0) == .remux) }
             .compactMap { format -> MediaCandidate? in
                 guard let whole = wholePresentation(format) else { return nil }
                 return MediaCandidate(
                     source: ResolvedSource(url: whole.url, title: title, headers: whole.headers,
                                            needsPreparation: true, delivery: .file,
-                                           videoKnownPresent: true, plannedPath: combinedPlan(format)),
+                                           videoKnownPresent: true, isLive: live, plannedPath: combinedPlan(format)),
                     id: formatIdentifier(format, role: "convert"),
                     height: format.height, bitrate: format.tbr,
                     frameRate: format.fps,
@@ -385,40 +386,40 @@ struct YouTubeSourceAdapter: Sendable {
         // Separate video and audio presentations combined into one plan. Actual
         // codecs/profile and stream indices are re-verified by ffprobe. Videos
         // rank by plan cost before resolution so a compatible H.264 remux
-        // survives a flood of high-resolution AV1/VP9 conversion videos. Live
-        // media is indefinite and cannot be prepared, so paired tracks are
-        // skipped just like whole-presentation conversions.
+        // survives a flood of high-resolution AV1/VP9 conversion videos.
         var pairs: [MediaCandidate] = []
-        if !live {
-            let videos = formats
-                .filter(isSimpleVideoOnly)
-                .sorted(by: videoCostFirst)
-                .prefix(maximumPairedVideos)
-            var audioByLanguage: [String: [Format]] = [:]
-            for format in formats where isSimpleAudioOnly(format) {
-                audioByLanguage[languageKey(format.language), default: []].append(format)
-            }
-            let languages = audioByLanguage.keys.sorted { left, right in
-                languagePriority(left, right, tracks: audioByLanguage)
-            }.prefix(maximumAudioLanguages)
-            for video in videos {
-                guard let videoURL = try? MediaInput.url(video.url ?? "") else { continue }
-                let videoHeaders = infoHeaders.merging(video.http_headers ?? [:]) { _, rhs in rhs }
-                for key in languages {
-                    guard let audio = preferredAudio(audioByLanguage[key] ?? []),
-                          let audioURL = try? MediaInput.url(audio.url ?? "") else { continue }
-                    let audioHeaders = infoHeaders.merging(audio.http_headers ?? [:]) { _, rhs in rhs }
-                    pairs.append(MediaCandidate(
-                        source: ResolvedSource(url: videoURL, title: title, headers: videoHeaders,
-                                               audio: MediaTrack(url: audioURL, headers: audioHeaders),
-                                               needsPreparation: true, delivery: .file, videoKnownPresent: true,
-                                               plannedPath: pairedPlan(video, audio: audio)),
-                        id: pairIdentifier(video, audio),
-                        height: video.height, bitrate: video.tbr,
-                        frameRate: video.fps,
-                        audioDescription: audioDescription(audio),
-                        unavailableReason: preparationLimitReason(video)))
-                }
+        let videos = formats
+            .filter { isSimpleVideoOnly($0) && (live || !isHLSContainer($0))
+                && (!live || !needsVideoConversion($0)) }
+            .sorted(by: videoCostFirst)
+            .prefix(maximumPairedVideos)
+        var audioByLanguage: [String: [Format]] = [:]
+        for format in formats where isSimpleAudioOnly(format) && (live || !isHLSContainer(format)) {
+            audioByLanguage[languageKey(format.language), default: []].append(format)
+        }
+        let languages = audioByLanguage.keys.sorted { left, right in
+            languagePriority(left, right, tracks: audioByLanguage)
+        }.prefix(maximumAudioLanguages)
+        for video in videos {
+            guard let videoURL = try? MediaInput.url(video.url ?? "") else { continue }
+            let videoHeaders = infoHeaders.merging(video.http_headers ?? [:]) { _, rhs in rhs }
+            for key in languages {
+                guard let audio = preferredAudio(audioByLanguage[key] ?? []),
+                      !live || isAAC(audioCodec(audio)),
+                      let audioURL = try? MediaInput.url(audio.url ?? "") else { continue }
+                let audioHeaders = infoHeaders.merging(audio.http_headers ?? [:]) { _, rhs in rhs }
+                pairs.append(MediaCandidate(
+                    source: ResolvedSource(url: videoURL, title: title, headers: videoHeaders,
+                                           audio: MediaTrack(url: audioURL, headers: audioHeaders),
+                                           needsPreparation: true,
+                                           delivery: isHLSContainer(video) || isHLSContainer(audio) ? .hls : .file,
+                                           videoKnownPresent: true, isLive: live,
+                                           plannedPath: pairedPlan(video, audio: audio)),
+                    id: pairIdentifier(video, audio),
+                    height: video.height, bitrate: video.tbr,
+                    frameRate: video.fps,
+                    audioDescription: audioDescription(audio),
+                    unavailableReason: preparationLimitReason(video)))
             }
         }
 
@@ -523,7 +524,8 @@ struct YouTubeSourceAdapter: Sendable {
     }
 
     private static func isDemuxable(_ format: Format) -> Bool {
-        ["mp4", "m4a", "webm", "mkv"].contains(format.ext ?? "")
+        isHLSContainer(format) || (["mp4", "m4a", "webm", "mkv"].contains(format.ext ?? "")
+            && isSimpleHTTP(format))
     }
 
     private static func headersAreDefault(_ format: Format) -> Bool {
@@ -561,32 +563,32 @@ struct YouTubeSourceAdapter: Sendable {
     }
 
     private static func isDirectCombined(_ format: Format) -> Bool {
-        format.has_drm != true && format.fragments == nil
-            && format.ext == "mp4" && (isSimpleHTTP(format) || isHLSContainer(format))
+        format.has_drm != true && (format.fragments == nil || isHLSContainer(format))
+            && (format.ext == "mp4" && isSimpleHTTP(format) || isHLSContainer(format))
             && isH264(format) && isAAC(audioCodec(format))
             && format.url.flatMap { try? MediaInput.url($0) } != nil
             && headersAreDefault(format)
     }
 
     private static func isConversionCombined(_ format: Format) -> Bool {
-        format.has_drm != true && format.fragments == nil
-            && isDemuxable(format) && isSimpleHTTP(format)
+        format.has_drm != true && (format.fragments == nil || isHLSContainer(format))
+            && isDemuxable(format)
             && videoCodec(format) != nil && audioCodec(format) != nil
             && format.url.flatMap { try? MediaInput.url($0) } != nil
             && headersAreDefault(format)
     }
 
     private static func isSimpleVideoOnly(_ format: Format) -> Bool {
-        format.has_drm != true && format.fragments == nil
-            && isDemuxable(format) && isSimpleHTTP(format)
+        format.has_drm != true && (format.fragments == nil || isHLSContainer(format))
+            && isDemuxable(format)
             && videoCodec(format) != nil && audioCodec(format) == nil
             && format.url.flatMap { try? MediaInput.url($0) } != nil
             && headersAreDefault(format)
     }
 
     private static func isSimpleAudioOnly(_ format: Format) -> Bool {
-        format.has_drm != true && format.fragments == nil
-            && isDemuxable(format) && isSimpleHTTP(format)
+        format.has_drm != true && (format.fragments == nil || isHLSContainer(format))
+            && isDemuxable(format)
             && videoCodec(format) == nil && audioCodec(format) != nil
             && format.url.flatMap { try? MediaInput.url($0) } != nil
             && headersAreDefault(format)

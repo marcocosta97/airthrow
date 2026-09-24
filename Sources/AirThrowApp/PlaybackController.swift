@@ -391,14 +391,13 @@ final class PlaybackController: ObservableObject {
                 self.hasAudio = detectedAudio
                 if source.title == nil, let metadataTitle { self.title = metadataTitle }
                 let item = AVPlayerItem(asset: asset)
-                // EVENT is finite here, but AVPlayer initially treats its growing
-                // playlist as live. Keep fetching updates while Load stays paused.
-                if self.preparedMedia?.sourceDuration != nil {
+                // Keep local HLS updates flowing while Load stays paused.
+                if self.preparedMedia?.url.pathExtension == "m3u8" {
                     item.canUseNetworkResourcesForLiveStreamingWhilePaused = true
                 }
                 // A growing EVENT playlist can open at its live edge; seek the
                 // prepared item back to the start once it is ready.
-                self.pendingInitialSeek = self.preparedMedia != nil
+                self.pendingInitialSeek = self.preparedMedia?.sourceDuration != nil
                 self.itemObservations = [
                     item.observe(\.status, options: [.new]) { [weak self] _, _ in
                         Task { @MainActor in

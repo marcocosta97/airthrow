@@ -197,28 +197,38 @@ struct ResolverChecks {
         for extra: [String: Any] in [["_type": "playlist", "entries": []], ["live_status": "is_upcoming"], ["availability": "needs_auth"]] {
             try await expect(.unsupportedPage) { _ = try SourceResolver.select(metadata([combined], extra: extra)) }
         }
-        // Native live is accepted and selected directly; a live source that would
-        // need preparation is refused instead of failing later in the preparer.
+        // Native live remains first; compatible separate tracks can be remuxed.
         let liveHLS = combined.merging(["protocol": "m3u8_native", "url": "https://cdn.example/live.m3u8"]) { _, rhs in rhs }
         let livePick = try SourceResolver.select(metadata([liveHLS, videoOnly, separateAudio], extra: ["is_live": true]))
-        try check(livePick.delivery == .hls && !livePick.needsPreparation && livePick.url.path == "/live.m3u8",
+        try check(livePick.delivery == .hls && !livePick.needsPreparation && livePick.isLive
+                  && livePick.url.path == "/live.m3u8",
                   "Native live HLS was not selected directly")
-        try await expect(.preparationRequired) {
-            _ = try SourceResolver.select(metadata([videoOnly, separateAudio], extra: ["live_status": "is_live"]))
-        }
-        // The full resolver path refuses a live source with no native presentation
-        // instead of offering a preparation that cannot succeed.
+        let hlsExtension = liveHLS.merging(["ext": "m3u8", "fragments": [[:]]]) { _, rhs in rhs }
+        try check(try SourceResolver.select(metadata([hlsExtension], extra: ["is_live": true])).delivery == .hls,
+                  "HLS extension or segment metadata blocked native live playback")
+        let liveRemux = try SourceResolver.select(metadata([separateVideo, separateAudio],
+            extra: ["live_status": "is_live"]))
+        try check(liveRemux.isLive && liveRemux.playbackPath == .remux && liveRemux.audio != nil,
+                  "Compatible live tracks were not offered for remux")
+        let liveHLSVideo = separateVideo.merging(["protocol": "m3u8_native", "url": "https://media.example/video.m3u8",
+            "fragments": [[:]]]) { _, rhs in rhs }
+        let liveHLSAudio = separateAudio.merging(["protocol": "m3u8_native", "url": "https://media.example/audio.m3u8",
+            "fragments": [[:]]]) { _, rhs in rhs }
+        let hlsRemux = try SourceResolver.select(metadata([liveHLSVideo, liveHLSAudio], extra: ["is_live": true]))
+        try check(hlsRemux.isLive && hlsRemux.delivery == .hls && hlsRemux.playbackPath == .remux,
+                  "HLS fragments metadata blocked a compatible live remux")
+        // Live inputs that need encoding are still rejected before handoff.
         let liveFetchCounter = ManifestCounter()
         try await expect(.liveUnsupported) {
-            _ = try await SourceResolver.selectWithHLS(metadata([videoOnly, separateAudio], extra: ["is_live": true])) { _ in
+            _ = try await SourceResolver.selectWithHLS(metadata([incompatible], extra: ["is_live": true])) { _ in
                 await liveFetchCounter.increment()
                 return Data()
             }
         }
         try check(await liveFetchCounter.count == 0,
-                  "A live source without a native presentation fetched a master")
+                  "An unsupported live source fetched a master")
         try await expect(.failed) { _ = try SourceResolver.select(Data("broken JSON with secret URL".utf8)) }
-        print("PASS combined/HLS selection; separate tracks, unknown codecs, custom headers, DRM, upcoming rejection and native-live selection")
+        print("PASS combined/HLS selection; separate tracks, custom headers, DRM, native-live and live-remux selection")
 
         // Cost-aware selection, conversion policy, stable identity and audio metadata.
         let nativeCombined: [String: Any] = ["format_id": "native", "url": "https://media.example/direct?signature=secret",

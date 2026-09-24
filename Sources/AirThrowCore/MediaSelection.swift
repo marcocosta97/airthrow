@@ -165,7 +165,7 @@ public enum MediaSelector {
         return ResolvedSource(url: source.url, title: source.title, headers: source.headers,
                               audio: source.audio, needsPreparation: true, needsDelivery: source.needsDelivery,
                               delivery: source.delivery, videoKnownPresent: source.videoKnownPresent,
-                              conversionPolicy: source.conversionPolicy)
+                              isLive: source.isLive, conversionPolicy: source.conversionPolicy)
     }
 
     /// When a native presentation fails and the source must be remuxed, prefer
