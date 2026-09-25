@@ -9,7 +9,7 @@
     },
     {
       "appearance" : "dark",
-      "value" : "system-dark"
+      "value" : "automatic"
     }
   ],
   "groups" : [
@@ -24,6 +24,10 @@
               "value" : "normal"
             },
             {
+              "appearance" : "dark",
+              "value" : "normal"
+            },
+            {
               "appearance" : "tinted",
               "value" : "normal"
             }
@@ -31,23 +35,50 @@
           "fill-specializations" : [
             {
               "value" : {
-                "solid" : "extended-srgb:0.00000,0.53333,1.00000,1.00000"
+                "linear-gradient" : [
+                  "srgb:0.28627,0.25490,0.54510,0.80000",
+                  "srgb:0.25490,0.50980,0.54510,0.85000"
+                ]
               }
             },
             {
               "appearance" : "dark",
               "value" : {
-                "solid" : "display-p3:0.46000,0.76000,1.00000,1.00000"
+                "linear-gradient" : [
+                  "srgb:0.65520,0.81536,0.84000,1.00000",
+                  "srgb:0.67368,0.65520,0.84000,1.00000"
+                ],
+                "orientation" : {
+                  "start" : {
+                    "x" : 0.5,
+                    "y" : 1
+                  },
+                  "stop" : {
+                    "x" : 0.5,
+                    "y" : 0
+                  }
+                }
               }
             },
             {
               "appearance" : "tinted",
               "value" : {
-                "solid" : "extended-gray:1.00000,1.00000"
+                "linear-gradient" : [
+                  "extended-gray:0.75000,1.00000",
+                  "extended-gray:1.00000,1.00000"
+                ]
               }
             }
           ],
-          "glass" : true,
+          "glass-specializations" : [
+            {
+              "value" : true
+            },
+            {
+              "appearance" : "dark",
+              "value" : true
+            }
+          ],
           "hidden" : false,
           "image-name" : "01-drop-frame.svg",
           "name" : "Drop Frame",
@@ -68,7 +99,7 @@
             "scale" : 1,
             "translation-in-points" : [
               0,
-              0
+              29.285714285714334
             ]
           }
         }
@@ -132,6 +163,10 @@
               "value" : "normal"
             },
             {
+              "appearance" : "dark",
+              "value" : "normal"
+            },
+            {
               "appearance" : "tinted",
               "value" : "normal"
             }
@@ -139,23 +174,50 @@
           "fill-specializations" : [
             {
               "value" : {
-                "solid" : "extended-srgb:0.00000,0.53333,1.00000,1.00000"
+                "linear-gradient" : [
+                  "srgb:0.28627,0.25490,0.54510,0.80000",
+                  "srgb:0.25490,0.50980,0.54510,0.85000"
+                ]
               }
             },
             {
               "appearance" : "dark",
               "value" : {
-                "solid" : "display-p3:0.38000,0.70000,1.00000,1.00000"
+                "linear-gradient" : [
+                  "srgb:0.65520,0.81536,0.84000,1.00000",
+                  "srgb:0.67368,0.65520,0.84000,1.00000"
+                ],
+                "orientation" : {
+                  "start" : {
+                    "x" : 0.5,
+                    "y" : 1
+                  },
+                  "stop" : {
+                    "x" : 0.5,
+                    "y" : 0
+                  }
+                }
               }
             },
             {
               "appearance" : "tinted",
               "value" : {
-                "solid" : "extended-gray:1.00000,1.00000"
+                "linear-gradient" : [
+                  "extended-gray:0.75000,1.00000",
+                  "extended-gray:1.00000,1.00000"
+                ]
               }
             }
           ],
-          "glass" : true,
+          "glass-specializations" : [
+            {
+              "value" : true
+            },
+            {
+              "appearance" : "dark",
+              "value" : true
+            }
+          ],
           "hidden" : false,
           "image-name" : "02-throw-triangle.svg",
           "name" : "Throw Triangle",
@@ -176,7 +238,7 @@
             "scale" : 1,
             "translation-in-points" : [
               0,
-              0
+              37.272727272727366
             ]
           }
         }
