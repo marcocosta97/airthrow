@@ -79,7 +79,7 @@ struct ControllerView: View {
         if let activeEnhancement { parts.append(activeEnhancement.label) }
         if let path = status.playbackPath { parts.append(path.label) }
         if let quality = status.quality {
-            parts.append(activeEnhancement == nil ? quality : "Source \(quality)")
+            parts.append(quality)
         }
         return parts.joined(separator: " · ")
     }

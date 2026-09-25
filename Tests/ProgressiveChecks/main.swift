@@ -150,6 +150,13 @@ struct ProgressiveChecks {
             .appendingPathComponent("segment000000.ts"))
         try convertedSegment.write(to: directory.appendingPathComponent("converted.ts"))
         converting.stop()
+        let highRate = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/highfps.mkv")!,
+            needsPreparation: true, conversionPolicy: .allowVideo))
+        try check(highRate.playbackPath == .videoConversion
+                  && (highRate.videoFrameRate ?? 0) > 0
+                  && (highRate.videoFrameRate ?? 0) <= 60.5,
+                  "Progressive conversion reported the 100 fps source instead of bounded output")
+        highRate.stop()
         print("PASS startup deadline, unfinished-segment and source-size headroom limits, short separate-track and validated opt-in converted HLS")
 
         // Native readiness must stay paused and finite while the producer is active.

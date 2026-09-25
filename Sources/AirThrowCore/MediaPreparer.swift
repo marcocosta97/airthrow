@@ -32,8 +32,8 @@ public final class PreparedMedia {
     /// local delivery, otherwise the inspected remux/audio/video conversion.
     public let playbackPath: PlaybackPath
     /// Prepared video height observed by ffprobe, or source height for a copy.
-    public let videoHeight: Int?
-    public let videoFrameRate: Double?
+    public private(set) var videoHeight: Int?
+    public private(set) var videoFrameRate: Double?
     public private(set) var productionFailure: PreparationFailure?
     public private(set) var isProducing = false
     public var onFailure: (@MainActor (PreparationFailure) -> Void)?
@@ -107,6 +107,13 @@ public final class PreparedMedia {
 
     public func waitForProducer() async { await producer?.value }
     deinit { producer?.cancel() }
+    /// Replaces the planned height and rate with the observed output once a
+    /// converted segment has been probed. Live and progressive jobs share this
+    /// so they report the same output quality as the complete-file path.
+    fileprivate func recordInspectedVideo(height: Int?, frameRate: Double?) {
+        if let height { videoHeight = height }
+        if let frameRate { videoFrameRate = frameRate }
+    }
     /// Halt conversion during a player-item handoff while keeping its delivery
     /// server alive until AVPlayer has received the replacement item.
     public func cancelProduction() { producer?.cancel() }
@@ -461,6 +468,10 @@ public struct MediaPreparer: Sendable {
                         let probed = try await probe(workspace.directory.appendingPathComponent(segment),
                                                      headers: [:], executable: ffprobe, local: true, mpegts: true)
                         try Self.validateConverted(probed, plan: plan)
+                        if plan.videoAction == .convert {
+                            let video = probed.streams.first(where: { $0.codec_type == "video" })
+                            prepared.recordInspectedVideo(height: video?.height, frameRate: video?.frameRate)
+                        }
                     }
                     try Task.checkCancellation()
                     if let failure = prepared.productionFailure { throw failure }
@@ -511,6 +522,10 @@ public struct MediaPreparer: Sendable {
                             let probed = try await probe(workspace.directory.appendingPathComponent(segment),
                                                          headers: [:], executable: ffprobe, local: true, mpegts: true)
                             try Self.validateConverted(probed, plan: plan)
+                            if plan.videoAction == .convert {
+                                let video = probed.streams.first(where: { $0.codec_type == "video" })
+                                prepared.recordInspectedVideo(height: video?.height, frameRate: video?.frameRate)
+                            }
                         }
                         try Task.checkCancellation()
                         if let failure = prepared.productionFailure { throw failure }
