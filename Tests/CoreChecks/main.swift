@@ -41,6 +41,18 @@ let tests: [(String, () throws -> Void)] = [
             try check(JSONDecoder().decode(PlaybackSnapshot.self, from: data).playbackPath == path, "Playback path lost on wire")
         }
     }),
+    ("video enhancement protocol compatibility", {
+        let idle = try JSONEncoder().encode(PlaybackSnapshot())
+        try check(!String(decoding: idle, as: UTF8.self).contains("videoEnhancement"),
+                  "Idle status exposed an enhancement")
+        for choice in VideoEnhancement.allCases {
+            var status = PlaybackSnapshot()
+            status.videoEnhancement = choice
+            let data = try JSONEncoder().encode(status)
+            try check(JSONDecoder().decode(PlaybackSnapshot.self, from: data).videoEnhancement == choice,
+                      "Enhancement choice was lost on the wire")
+        }
+    }),
     ("signed URL preservation", {
         let value = "https://cdn.example.com/a%2Fb/movie.m3u8?token=a%2Bb%3D&expires=123&x=1&x=2"
         try check(MediaInput.url("  \(value)\n").absoluteString == value, "Signed URL changed")

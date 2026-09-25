@@ -194,22 +194,44 @@ struct PreparationChecks {
                                                         onPlan: { await videoRecorder.record($0) })
         try check(videoConverted.playbackPath == .videoConversion,
                   "VP9/Opus source was not reported as video conversion")
-        try check(videoConverted.videoHeight != nil, "Converted source resolution was not retained")
+        try check(videoConverted.videoHeight != nil, "Converted output resolution was not reported")
         try check(await videoRecorder.paths() == [.videoConversion],
                   "onPlan did not publish the video-conversion path before processing")
         let (videoConvertedData, _) = try await fetch(videoConverted.url)
         try videoConvertedData.write(to: directory.appendingPathComponent("video-converted.mp4"))
         videoConverted.stop()
 
-        // A 4K source is downscaled and a 100 fps source is capped at 60 fps,
-        // rather than being refused for exceeding the copy bounds.
+        // Compatible 4K SDR video is copied through a remux. An explicitly
+        // requested 1080p enhancement may still downscale it.
         let uhdSource = ResolvedSource(url: URL(string: base + "/uhd.mkv")!,
                                        needsPreparation: true, conversionPolicy: .allowVideo)
         let uhdConverted = try await preparer.prepare(uhdSource, mode: .completeFile)
-        try check(uhdConverted.playbackPath == .videoConversion, "High-resolution source was not converted")
+        try check(uhdConverted.playbackPath == .remux && uhdConverted.videoHeight == 2160,
+                  "Compatible 4K source was not remuxed at native resolution")
         let (uhdData, _) = try await fetch(uhdConverted.url)
         try uhdData.write(to: directory.appendingPathComponent("uhd-converted.mp4"))
         uhdConverted.stop()
+        let hevcCopy = try await preparer.prepare(
+            ResolvedSource(url: URL(string: base + "/hevc-sdr.mkv")!, needsPreparation: true))
+        try check(hevcCopy.playbackPath == .remux && hevcCopy.videoHeight == 180,
+                  "Compatible SDR HEVC was not remuxed")
+        let (hevcData, _) = try await fetch(hevcCopy.url)
+        try hevcData.write(to: directory.appendingPathComponent("hevc-remuxed.mp4"))
+        hevcCopy.stop()
+        let uhdDownscaled = try await preparer.prepare(uhdSource.withEnhancement(.upscale1080))
+        try check(uhdDownscaled.playbackPath == .videoConversion && uhdDownscaled.videoHeight == 1080,
+                  "Explicit 1080p preparation did not downscale a 4K source")
+        uhdDownscaled.stop()
+        for choice in [VideoEnhancement.upscale1080, .cleanup1080, .upscale4K, .cleanup4K] {
+            print("Checking enhancement \(choice.rawValue)")
+            let enhanced = try await preparer.prepare(source.withEnhancement(choice))
+            try check(enhanced.playbackPath == .videoConversion
+                      && enhanced.videoHeight == choice.targetHeight,
+                      "Enhancement did not produce its selected output height")
+            let (data, _) = try await fetch(enhanced.url)
+            try data.write(to: directory.appendingPathComponent("\(choice.rawValue).mp4"))
+            enhanced.stop()
+        }
         let highFpsSource = ResolvedSource(url: URL(string: base + "/highfps.mkv")!,
                                            needsPreparation: true, conversionPolicy: .allowVideo)
         let highFpsConverted = try await preparer.prepare(highFpsSource, mode: .completeFile)
@@ -222,6 +244,10 @@ struct PreparationChecks {
         try await expect(.preparationRequired) {
             _ = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/tenbit.mkv")!,
                                                           needsPreparation: true, conversionPolicy: .allowVideo))
+        }
+        try await expect(.preparationRequired) {
+            _ = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/hdr.mkv")!)
+                .withEnhancement(.upscale4K))
         }
 
         // A helper that refuses the hardware preflight still converts in software;
@@ -236,6 +262,12 @@ struct PreparationChecks {
         let (softwareData, _) = try await fetch(softwareConverted.url)
         try softwareData.write(to: directory.appendingPathComponent("software-converted.mp4"))
         softwareConverted.stop()
+        let software4K = try await MediaPreparer(environment: softwareEnvironment)
+            .prepare(source.withEnhancement(.upscale4K))
+        try check(software4K.videoHeight == 2160, "4K software fallback did not upscale")
+        let (software4KData, _) = try await fetch(software4K.url)
+        try software4KData.write(to: directory.appendingPathComponent("software-4k.mp4"))
+        software4K.stop()
         var noEncoderEnvironment = environment
         noEncoderEnvironment["AIRTHROW_FFMPEG"] = directory.appendingPathComponent("no-encoder-ffmpeg").path
         try await expect(.preparationFailed) {

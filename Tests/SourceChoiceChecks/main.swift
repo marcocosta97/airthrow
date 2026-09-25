@@ -47,6 +47,17 @@ private actor PreparationRequests {
     func record(_ source: ResolvedSource) { urls.append(source.url) }
 }
 
+private actor EnhancementRequests {
+    private(set) var choices: [VideoEnhancement] = []
+    private(set) var policies: [ConversionPolicy] = []
+    private(set) var urls: [URL] = []
+    func record(_ source: ResolvedSource) {
+        choices.append(source.enhancement)
+        policies.append(source.conversionPolicy)
+        urls.append(source.url)
+    }
+}
+
 private actor FailureRequests {
     private(set) var count = 0
     func fail() throws -> [MediaCandidate] {
@@ -162,7 +173,77 @@ struct SourceChoiceChecks {
         try await delayedDiscoveryCapturesPreference(website: website, remux: remux1080, native: native720, prepareSource: prepareSource)
         try await explicitFallbackPreservesChoice(website: website, videoURL: videoURL, audioURL: audioURL, prepareSource: prepareSource)
         try await automaticFallbackUpgradesToBestRemux(website: website, audioURL: audioURL, prepareSource: prepareSource)
-        print("16/16 source-choice controller checks passed (no physical receiver)")
+        let alternate = candidate(videoURL, title: "Alternate remux", id: "alternate-remux",
+                                  height: 2160, plannedPath: .remux)
+        try await enhancementReload(website: website, source: native1080,
+                                    alternate: alternate, preparer: preparer)
+        print("17/17 source-choice controller checks passed (no physical receiver)")
+    }
+
+    static func enhancementReload(website: URL, source: MediaCandidate,
+                                  alternate: MediaCandidate, preparer: MediaPreparer) async throws {
+        let resolver = ScriptedResolver([website.absoluteString: [.init(candidates: [source, alternate])]])
+        let requests = EnhancementRequests()
+        let controller = PlaybackController(resolveCandidates: { try await resolver.candidates(for: $0) },
+                                            allowVideoConversion: false,
+                                            preferQuality: false,
+                                            prepareSource: { selected in
+            await requests.record(selected)
+            return try await preparer.prepare(selected)
+        })
+        try controller.load(website.absoluteString)
+        let original = try await settle(controller)
+        let sharedPlayer = controller.player
+        try check(original.videoEnhancement == .original && original.playbackPath == .direct,
+                  "Original load claimed enhancement or preparation")
+        try check(!controller.enhancementOutput4K, "New item did not default to 1080p enhancement")
+        controller.setPreferQuality(true)
+        try controller.selectEnhancement(.cleanup1080)
+        let enhanced = try await settle(controller, seconds: 35)
+        try check(controller.player === sharedPlayer && controller.player.rate == 0,
+                  "Enhancement replaced or started the persistent player")
+        try check(enhanced.videoEnhancement == .cleanup1080 && enhanced.playbackPath == .videoConversion,
+                  "Enhanced path or status was not reported")
+        try check(!controller.allowVideoConversion,
+                  "Per-item enhancement changed the global conversion preference")
+        let recordedChoices = await requests.choices
+        let recordedPolicies = await requests.policies
+        let recordedURLs = await requests.urls
+        try check(recordedChoices == [.cleanup1080] && recordedPolicies == [.allowVideo]
+                  && recordedURLs == [source.source.url],
+                  "Enhancement did not preserve Automatic's source and authorize one video preparation")
+        try controller.selectEnhancement(.original)
+        let restored = try await settle(controller)
+        try check(restored.videoEnhancement == .original && restored.playbackPath == .direct,
+                  "Original did not restore the direct source")
+        let callsBeforeSwitch = await resolver.count()
+        try controller.setEnhancementOutput4K(true)
+        let callsAfterSwitch = await resolver.count()
+        try check(controller.enhancementOutput4K && callsAfterSwitch == callsBeforeSwitch,
+                  "Changing the target on Original reloaded the item")
+        guard let originalSourceOption = restored.sources?.first(where: { $0.quality == "1080p" }) else {
+            throw NSError(domain: "SourceChoiceChecks", code: 8,
+                          userInfo: [NSLocalizedDescriptionKey: "Original source option was not published"])
+        }
+        try controller.selectSource(originalSourceOption.id)
+        _ = try await settle(controller)
+        try check(controller.enhancementOutput4K,
+                  "Changing source reset the chosen enhancement target")
+        try controller.selectEnhancement(.upscale4K)
+        let upscaled4K = try await settle(controller, seconds: 45)
+        try check(upscaled4K.videoEnhancement == .upscale4K && controller.enhancementOutput4K,
+                  "4K target was not applied to the selected action")
+        try controller.setEnhancementOutput4K(false)
+        let upscaled1080 = try await settle(controller, seconds: 45)
+        try check(upscaled1080.videoEnhancement == .upscale1080 && !controller.enhancementOutput4K,
+                  "Switching target did not reload the active enhancement at 1080p")
+        try controller.selectEnhancement(.original)
+        _ = try await settle(controller)
+        controller.stop()
+        try check(controller.snapshot.videoEnhancement == nil && !controller.enhancementOutput4K,
+                  "Stop retained a per-item enhancement target")
+        print("PASS enhancement target switch preserves Original, reloads active output, and resets on Stop")
+        await controller.shutdownAndWait()
     }
 
     // Automatic selection prefers native playback even when a remux candidate

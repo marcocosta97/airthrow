@@ -82,13 +82,13 @@ struct SettingsView: View {
                 Toggle("Avoid video conversion", isOn: Binding(
                     get: { !controller.allowVideoConversion },
                     set: { controller.setVideoConversionAllowed(!$0) }))
-                Text("Copy compatible video; convert audio when needed. Turn off to allow SDR video conversion up to 1080p.")
+                Text("Copy compatible video, and convert audio when needed. This preference governs automatic source selection: when on, automatic choice avoids video encoding. Choosing an enhancement in the Video menu authorizes encoding for that item, whatever this setting is.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Toggle("Prefer higher quality", isOn: Binding(
                     get: { controller.preferQuality },
                     set: { controller.setPreferQuality($0) }))
-                Text("Automatic chooses higher quality even when it requires more processing. Both preferences apply to the next load or quality choice.")
+                Text("Automatic chooses higher quality even when it requires more processing. Applies to the next load or source change; an explicit enhancement is unaffected.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }

@@ -43,10 +43,12 @@ ffmpeg('-i', OUT / 'combined.mp4', '-f', 'lavfi', '-i', 'sine=frequency=330:samp
        '-c:v', 'copy', '-c:a:0', 'pcm_s16le', '-c:a:1', 'aac', '-ac:a:1', '2', OUT / 'multitrack.mkv')
 ffmpeg('-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
        '-t', '2', '-c:v', 'libvpx-vp9', '-b:v', '0', '-crf', '30', '-c:a', 'libopus', OUT / 'vp9-opus.mkv')
-# 4K and 100 fps inputs are converted down to the bounded 1080p/60 H.264 output.
+# Compatible 4K H.264 is remuxed; 100 fps still requires bounded conversion.
 ffmpeg('-f', 'lavfi', '-i', 'testsrc2=size=3840x2160:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
        '-t', '2', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ac', '2',
        OUT / 'uhd.mkv')
+ffmpeg('-i', OUT / 'combined.mkv', '-c:v', 'libx265', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+       '-c:a', 'copy', OUT / 'hevc-sdr.mkv')
 ffmpeg('-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=100', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
        '-t', '2', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ac', '2',
        OUT / 'highfps.mkv')
@@ -77,7 +79,7 @@ oversized.write_text('#!/usr/bin/python3\nimport pathlib, sys, time\np = pathlib
 oversized.chmod(0o700)
 # Refuses the hardware preflight, so conversion must succeed through libx264.
 software = OUT / 'software-ffmpeg'
-software.write_text('#!/usr/bin/python3\nimport os, sys\na = sys.argv[1:]\nif "h264_videotoolbox" in a: sys.exit(1)\nos.execv(' + repr(FFMPEG) + ', [' + repr(FFMPEG) + '] + a)\n')
+software.write_text('#!/usr/bin/python3\nimport os, sys\na = sys.argv[1:]\nif "h264_videotoolbox" in a or "hevc_videotoolbox" in a: sys.exit(1)\nos.execv(' + repr(FFMPEG) + ', [' + repr(FFMPEG) + '] + a)\n')
 software.chmod(0o700)
 # Refuses every H.264 preflight so no encoder can be prepared.
 no_encoder = OUT / 'no-encoder-ffmpeg'
@@ -90,7 +92,7 @@ hardware_failure.write_text('#!/usr/bin/python3\nimport os, pathlib, sys\na = sy
 hardware_failure.chmod(0o700)
 FILES = {f'/{name}': (OUT / name).read_bytes() for name in ['combined.mp4', 'combined.mkv', 'video.mp4', 'audio.m4a',
                                                             'flac.mkv', 'multitrack.mkv', 'long.mp4', 'vp9-opus.mkv',
-                                                            'hdr.mkv', 'uhd.mkv', 'highfps.mkv', 'tenbit.mkv']}
+                                                            'hdr.mkv', 'uhd.mkv', 'hevc-sdr.mkv', 'highfps.mkv', 'tenbit.mkv']}
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -145,6 +147,8 @@ try:
         expected = packets(OUT / 'combined.mp4')
         for name in ['remuxed.mp4', 'joined.mp4', 'local-remuxed.mp4']:
             assert packets(OUT / name) == expected, f'{name}: compressed media changed'
+        assert packets(OUT / 'hevc-remuxed.mp4') == packets(OUT / 'hevc-sdr.mkv'), \
+            'HEVC remux changed compressed packets'
         # Audio conversion must preserve the H.264 packets and only re-encode audio.
         audio_converted = packets(OUT / 'audio-converted.mp4')
         assert audio_converted[0] == expected[0], 'audio conversion changed the video packets'
@@ -154,7 +158,7 @@ try:
         # Validate the actual converted output profile, not just the reported path.
         def streams(path):
             return json.loads(run([FFPROBE, '-v', 'error', '-show_entries',
-                'stream=codec_name,codec_type,pix_fmt,width,height,avg_frame_rate,channels,sample_rate',
+                'stream=codec_name,codec_type,codec_tag_string,pix_fmt,width,height,avg_frame_rate,channels,sample_rate',
                 '-of', 'json', path]).stdout)['streams']
 
         video_converted = streams(OUT / 'video-converted.mp4')
@@ -170,16 +174,27 @@ try:
         audio_only = [s for s in streams(OUT / 'audio-converted.mp4') if s['codec_type'] == 'audio']
         assert audio_only and audio_only[0]['codec_name'] == 'aac', 'audio-only conversion did not produce AAC'
         uhd_video = [s for s in streams(OUT / 'uhd-converted.mp4') if s['codec_type'] == 'video']
-        assert uhd_video and int(uhd_video[0]['width']) <= 1920 and int(uhd_video[0]['height']) <= 1080, \
-            '4K input was not downscaled into the 1080p bound'
+        assert uhd_video and int(uhd_video[0]['width']) == 3840 and int(uhd_video[0]['height']) == 2160, \
+            '4K input was not retained by remux'
+        for preset, height, codec in [('upscale_1080', 1080, 'h264'), ('cleanup_1080', 1080, 'h264'),
+                                      ('upscale_4k', 2160, 'hevc'), ('cleanup_4k', 2160, 'hevc')]:
+            enhanced = [s for s in streams(OUT / f'{preset}.mp4') if s['codec_type'] == 'video']
+            assert enhanced and int(enhanced[0]['height']) == height and enhanced[0]['codec_name'] == codec, \
+                f'{preset} did not produce expected SDR output'
+        hevc_copy = [s for s in streams(OUT / 'hevc-remuxed.mp4') if s['codec_type'] == 'video']
+        assert hevc_copy and hevc_copy[0]['codec_name'] == 'hevc' and hevc_copy[0]['codec_tag_string'] == 'hvc1', \
+            'SDR HEVC was not remuxed as hvc1'
         high_fps = [s for s in streams(OUT / 'highfps-converted.mp4') if s['codec_type'] == 'video']
         assert high_fps and fraction(high_fps[0].get('avg_frame_rate')) <= 60, '100 fps input was not capped at 60 fps'
         software = [s for s in streams(OUT / 'software-converted.mp4') if s['codec_type'] == 'video']
         assert software and software[0]['codec_name'] == 'h264', 'software fallback did not produce H.264'
+        software_4k = [s for s in streams(OUT / 'software-4k.mp4') if s['codec_type'] == 'video']
+        assert software_4k and software_4k[0]['codec_name'] == 'hevc' and int(software_4k[0]['height']) == 2160, \
+            '4K software fallback did not produce HEVC'
         tenbit = [s for s in streams(OUT / 'tenbit.mkv') if s['codec_type'] == 'video']
         assert tenbit and tenbit[0]['pix_fmt'] == 'yuv420p10le', '10-bit fixture is not 10-bit'
         print('PASS converted output is SDR H.264 yuv420p <=1080p/60 and AAC LC <=48 kHz mono/stereo')
-        print('PASS high-resolution downscale, 100->60 fps cap, software fallback and 10-bit refusal')
+        print('PASS 4K remux, four enhancement presets, 100->60 fps cap, software fallback and 10-bit refusal')
     progressive = OUT / 'ProgressiveChecks'
     run(['swiftc', '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
          ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/PlaybackController.swift',

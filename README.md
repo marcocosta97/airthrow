@@ -54,8 +54,15 @@ containers may be prepared or converted on the Mac first.
 
 ## Limitations
 
-- Video conversion is optional and off by default; HDR/Dolby Vision, subtitle
-  burn-in, and surround preservation are not supported yet.
+- Video conversion is optional and off by default. For finite SDR video, the
+  loaded item's **Video** menu offers a 1080p/4K switch and **Upscale** or
+  **Clean up and upscale**. The Mac prepares a new file before playback;
+  choosing a preset reloads from the start, paused. 4K output uses HEVC and
+  requires a compatible receiver. Compatible 4K H.264 or 8-bit SDR HEVC can
+  also pass through a remux without downscaling.
+- HDR/Dolby Vision enhancement or tone mapping, AI Super Resolution, subtitle
+  burn-in, and surround preservation are not supported yet. A prepared file
+  passing local checks does not guarantee playback on a particular receiver.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for project layout, architecture, and
 testing details.

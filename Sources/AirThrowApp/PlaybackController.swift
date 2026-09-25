@@ -11,6 +11,13 @@ final class PlaybackController: ObservableObject {
     private struct LoadPreferences {
         let conversion: ConversionPolicy
         let preferQuality: Bool
+        /// Captured with the load so a delayed resolution uses the enhancement
+        /// chosen when the user asked for it, not a later UI change.
+        let enhancement: VideoEnhancement
+        let enhancementOutput4K: Bool
+        /// Keeps Automatic's current presentation while its processing preset
+        /// changes, without turning it into an explicit source choice in status.
+        let pinnedSourceID: String?
     }
     private struct QueueState {
         let title: String
@@ -43,6 +50,10 @@ final class PlaybackController: ObservableObject {
     private var preparing = false
     private var selectedSource: ResolvedSource?
     private var selectedQuality: String?
+    /// Per-item enhancement preference captured for the current item. Reset to
+    /// `.original` for every new item; a source-quality change keeps it.
+    private var videoEnhancement: VideoEnhancement = .original
+    @Published private(set) var enhancementOutput4K = false
     private var originalSourceURL: URL?
     private var sourceCandidates: [MediaCandidate] = []
     private var sourceChoice: String?
@@ -146,6 +157,13 @@ final class PlaybackController: ObservableObject {
 
     private var conversionPolicy: ConversionPolicy { allowVideoConversion ? .allowVideo : .avoidVideo }
 
+    /// An explicit enhancement authorizes a video encode for the current item
+    /// only. The global preference is untouched and still governs automatic
+    /// compatibility conversion.
+    private var effectiveConversionPolicy: ConversionPolicy {
+        videoEnhancement == .original ? conversionPolicy : .allowVideo
+    }
+
     /// A new source choice must not start a competing load while any phase of the
     /// current load is still running: candidate discovery, preparation, or the
     /// native asset load that follows. A direct URL skips discovery, so the plain
@@ -180,13 +198,60 @@ final class PlaybackController: ObservableObject {
             guard sourceCandidates.filter({ $0.id == candidate.id }).count == 1 else {
                 throw AppFailure(.unsupportedOperation, "This source cannot be identified uniquely. Choose Automatic.")
             }
-            if let reason = candidate.unavailableReason(for: conversionPolicy) {
+            if let reason = candidate.unavailableReason(for: effectiveConversionPolicy) {
                 throw AppFailure(.unsupportedOperation, reason)
             }
             candidateID = candidate.id
         }
         startLoad(url, preservingQueue: queue != nil, titleOverride: title, sourceChoice: candidateID,
-                  changingSource: true)
+                  changingSource: true, enhancement: videoEnhancement,
+                  enhancementOutput4K: enhancementOutput4K)
+    }
+
+    /// The menu's one resolution switch. On Original it only selects the
+    /// resolution for the next enhancement. On an active preset it prepares the
+    /// matching output and reloads paused through the existing item path.
+    func setEnhancementOutput4K(_ enabled: Bool) throws {
+        guard originalSourceURL != nil, !loadInProgress else {
+            throw AppFailure(.unsupportedOperation, "Wait for the video to finish loading.")
+        }
+        guard !snapshot.isLive, selectedSource?.isLive != true else {
+            throw AppFailure(.unsupportedOperation, "Enhancement is available for on-demand video, not live streams.")
+        }
+        guard enabled != enhancementOutput4K else { return }
+        switch videoEnhancement {
+        case .original:
+            enhancementOutput4K = enabled
+        case .upscale1080, .upscale4K:
+            try selectEnhancement(enabled ? .upscale4K : .upscale1080)
+        case .cleanup1080, .cleanup4K:
+            try selectEnhancement(enabled ? .cleanup4K : .cleanup1080)
+        }
+    }
+
+    /// A per-item enhancement: prepare this item's video on the Mac (upscale or
+    /// clean up) and reload paused, keeping the receiver and queue. The current
+    /// source choice is preserved when it still resolves; a stale identity fails
+    /// closed. Live sources and any busy load phase are refused, matching the
+    /// source chooser. `.original` restores the untouched source.
+    func selectEnhancement(_ enhancement: VideoEnhancement) throws {
+        guard let url = originalSourceURL, !loadInProgress else {
+            throw AppFailure(.unsupportedOperation, "Wait for loading, source discovery, and preparation to finish.")
+        }
+        guard !snapshot.isLive, selectedSource?.isLive != true else {
+            throw AppFailure(.unsupportedOperation, "Enhancement is available for on-demand video, not live streams.")
+        }
+        guard enhancement != videoEnhancement else { return }
+        let pinnedSourceID: String?
+        if sourceChoice == nil, let selectedSource {
+            pinnedSourceID = sourceCandidates.first(where: {
+                $0.source.url == selectedSource.url && $0.source.audio?.url == selectedSource.audio?.url
+            })?.id
+        } else { pinnedSourceID = nil }
+        startLoad(url, preservingQueue: queue != nil, titleOverride: title, sourceChoice: sourceChoice,
+                  changingSource: true, enhancement: enhancement,
+                  enhancementOutput4K: enhancement.targetHeight.map { $0 == 2160 } ?? enhancementOutput4K,
+                  pinnedSourceID: pinnedSourceID)
     }
 
     private func sourceOptionID(_ index: Int) -> String { "\(sourceOptionsGeneration.uuidString)-\(index)" }
@@ -224,7 +289,7 @@ final class PlaybackController: ObservableObject {
                 audio: candidate.audioDescription, playbackPath: candidate.source.playbackPath,
                 unavailableReason: sourceCandidates.filter({ $0.id == candidate.id }).count > 1
                     ? "This source cannot be identified uniquely. Choose Automatic."
-                    : candidate.unavailableReason(for: conversionPolicy))
+                    : candidate.unavailableReason(for: effectiveConversionPolicy))
         }
     }
 
@@ -262,12 +327,20 @@ final class PlaybackController: ObservableObject {
     private func startLoad(_ url: URL, retry: Bool = false, fallback: ResolvedSource? = nil,
                            preservingQueue: Bool = false, autoplay: Bool = false,
                            titleOverride: String? = nil, sourceChoice: String? = nil,
-                           changingSource: Bool = false, preferences: LoadPreferences? = nil) {
-        let preferences = preferences ?? LoadPreferences(conversion: conversionPolicy, preferQuality: preferQuality)
+                           changingSource: Bool = false, enhancement: VideoEnhancement? = nil,
+                           enhancementOutput4K: Bool? = nil,
+                           pinnedSourceID: String? = nil,
+                           preferences: LoadPreferences? = nil) {
+        let preferences = preferences ?? LoadPreferences(conversion: conversionPolicy, preferQuality: preferQuality,
+                                                         enhancement: enhancement ?? .original,
+                                                         enhancementOutput4K: enhancementOutput4K ?? false,
+                                                         pinnedSourceID: pinnedSourceID)
         let retryRoute = hasOpenedPicker || player.isExternalPlaybackActive
         let retainedCandidates = fallback == nil ? [] : sourceCandidates
         resetItem(keepPlayerItem: true, preserveQueue: preservingQueue)
         loadPreferences = preferences
+        videoEnhancement = preferences.enhancement
+        self.enhancementOutput4K = preferences.enhancementOutput4K
         originalSourceURL = url
         self.sourceChoice = sourceChoice
         self.changingSource = changingSource
@@ -284,11 +357,14 @@ final class PlaybackController: ObservableObject {
         if !preservingQueue { notice = nil }
         refresh()
         let resolver = resolveCandidates
-        let policy = preferences.conversion
+        // An explicit enhancement authorizes a video encode for this item, so
+        // selection may consider video-conversion presentations even while the
+        // global preference avoids them.
+        let policy = preferences.enhancement == .original ? preferences.conversion : .allowVideo
         loadTask = Task { [weak self] in
             defer { self?.drainingLoads.removeValue(forKey: id) }
             do {
-                let source: ResolvedSource
+                var source: ResolvedSource
                 if let fallback { source = fallback }
                 else {
                     let candidates = try await resolver(url)
@@ -311,8 +387,14 @@ final class PlaybackController: ObservableObject {
                             throw AppFailure(.unsupportedOperation, "This source cannot be identified uniquely. Choose Automatic.")
                         }
                     }
-                    source = try MediaSelector.select(candidates, policy: policy, sourceID: sourceChoice,
+                    source = try MediaSelector.select(candidates, policy: policy,
+                                                      sourceID: sourceChoice ?? preferences.pinnedSourceID,
                                                       preferQuality: preferences.preferQuality)
+                }
+                // An explicit enhancement prepares this item's video on the Mac;
+                // the source choice above is preserved and only the plan changes.
+                if preferences.enhancement != .original {
+                    source = source.withEnhancement(preferences.enhancement)
                 }
                 guard let self, !Task.isCancelled, self.generation == id else { return }
                 self.selectedSource = source
@@ -837,6 +919,8 @@ final class PlaybackController: ObservableObject {
         loading = false; resolving = false; preparing = false; websiteURL = nil; retriedResolution = false
         selectedSource = nil
         selectedQuality = nil
+        videoEnhancement = .original
+        enhancementOutput4K = false
         originalSourceURL = nil
         sourceCandidates = []
         sourceChoice = nil
@@ -1027,6 +1111,10 @@ final class PlaybackController: ObservableObject {
             next.selectedSourceID = sourceOptionID(index)
         }
         next.allowVideoConversion = allowVideoConversion
+        // A per-item preference, independent of the global conversion policy.
+        // Reported only while an item is loaded (or attempted) so an idle
+        // controller does not claim an enhancement.
+        next.videoEnhancement = (mediaItem == nil && !loading && failure == nil) ? nil : videoEnhancement
         next.hasAudio = hasAudio
         if let queue {
             next.queue = PlaybackQueueSnapshot(title: queue.title, currentIndex: queue.currentIndex,

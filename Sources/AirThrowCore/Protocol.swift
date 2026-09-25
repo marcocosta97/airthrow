@@ -69,9 +69,37 @@ public enum PlaybackPath: String, Codable, Sendable {
         case .direct: "Tier 1: Plays the source directly — the receiver fetches a remote URL, or this Mac serves a local file in place — with no prepared copy."
         case .remux: "Tier 2: Copies audio and video into compatible media on this Mac without re-encoding. Preparation may continue during playback."
         case .audioConversion: "Tier 3: Copies the video and converts audio to AAC on this Mac. Preparation may continue during playback."
-        case .videoConversion: "Tier 4: Converts video to SDR H.264 on this Mac, up to 1080p and 60 fps. Uses more processing and may take longer to start."
+        case .videoConversion: "Tier 4: Converts SDR video on this Mac. Automatic conversion is H.264 up to 1080p; an explicit enhancement may produce 1080p H.264 or 4K HEVC. Uses more processing and may take longer to start."
         }
     }
+}
+
+/// An explicit, per-item finite SDR processing choice. Original keeps the
+/// source selection and conversion preference unchanged.
+public enum VideoEnhancement: String, Codable, Sendable, CaseIterable {
+    case original
+    case upscale1080 = "upscale_1080"
+    case cleanup1080 = "cleanup_1080"
+    case upscale4K = "upscale_4k"
+    case cleanup4K = "cleanup_4k"
+
+    public var label: String {
+        switch self {
+        case .original: "Original"
+        case .upscale1080: "Upscale to 1080p"
+        case .cleanup1080: "Clean up & upscale to 1080p"
+        case .upscale4K: "Upscale to 4K"
+        case .cleanup4K: "Clean up & upscale to 4K"
+        }
+    }
+    public var targetHeight: Int? {
+        switch self {
+        case .original: nil
+        case .upscale1080, .cleanup1080: 1080
+        case .upscale4K, .cleanup4K: 2160
+        }
+    }
+    public var cleansUp: Bool { self == .cleanup1080 || self == .cleanup4K }
 }
 
 public struct SeekRange: Codable, Sendable, Equatable {
@@ -209,6 +237,8 @@ public struct PlaybackSnapshot: Codable, Sendable, Equatable {
     /// nil means automatic selection; explicit IDs expire when the item changes.
     public var selectedSourceID: String?
     public var allowVideoConversion: Bool?
+    /// Per-item request, absent when no item is loaded.
+    public var videoEnhancement: VideoEnhancement?
     public init() {}
 }
 

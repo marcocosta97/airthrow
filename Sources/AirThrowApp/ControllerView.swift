@@ -66,6 +66,29 @@ struct ControllerView: View {
     private var range: SeekRange? { PlaybackPolicy.activeSeekRange(status) }
     private var canControl: Bool { PlaybackPolicy.canControl(status) }
     private var isPlaying: Bool { PlaybackPolicy.isPlaying(status) }
+    /// Source quality and enhancement belong to any loaded item, including a
+    /// single-file source. The item is still shown after a failure so the
+    /// enhancement can be reverted without retyping the URL.
+    private var showsVideoMenu: Bool { status.state != .idle }
+    private var activeEnhancement: VideoEnhancement? {
+        guard let value = status.videoEnhancement, value != .original else { return nil }
+        return value
+    }
+    private var playbackDetail: String {
+        var parts: [String] = []
+        if let activeEnhancement { parts.append(activeEnhancement.label) }
+        if let path = status.playbackPath { parts.append(path.label) }
+        if let quality = status.quality {
+            parts.append(activeEnhancement == nil ? quality : "Source \(quality)")
+        }
+        return parts.joined(separator: " · ")
+    }
+    private var playbackDetailHelp: String {
+        if let activeEnhancement {
+            return "\(activeEnhancement.label): prepared on this Mac. Changing it reloads from the start, paused. 4K needs a compatible receiver."
+        }
+        return status.playbackPath?.explanation ?? "Inspected source resolution"
+    }
 
     var body: some View {
         ZStack {
@@ -138,21 +161,18 @@ struct ControllerView: View {
                                 .lineLimit(2)
                                 .frame(maxWidth: .infinity, alignment: .center)
                                 .textSelection(.enabled)
-                            if status.playbackPath != nil || status.quality != nil || (status.sources?.count ?? 0) > 1 {
+                            if showsVideoMenu {
                                 HStack(spacing: 8) {
-                                    if status.playbackPath != nil || status.quality != nil {
-                                        let detail = [status.playbackPath?.label, status.quality].compactMap { $0 }.joined(separator: " · ")
-                                        Text(detail)
+                                    if !playbackDetail.isEmpty {
+                                        Text(playbackDetail)
                                             .font(.caption).foregroundStyle(.secondary)
                                             .lineLimit(1)
-                                            .help(status.playbackPath?.explanation ?? "Inspected source resolution")
-                                            .accessibilityLabel("Playback: \(detail)")
-                                            .accessibilityHint(status.playbackPath?.explanation ?? "Inspected source resolution")
+                                            .help(playbackDetailHelp)
+                                            .accessibilityLabel("Playback: \(playbackDetail)")
+                                            .accessibilityHint(playbackDetailHelp)
                                     }
                                     Spacer(minLength: 0)
-                                    if (status.sources?.count ?? 0) > 1 {
-                                        SourceChooserView(controller: controller)
-                                    }
+                                    VideoMenuView(controller: controller)
                                 }
                             }
                             if status.hasAudio == false {

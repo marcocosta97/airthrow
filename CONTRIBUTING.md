@@ -52,17 +52,28 @@ actual path.
 **Avoid video conversion** is on by default. Audio conversion is allowed under
 it; turn it off to permit supported SDR video conversion. Changes apply to the
 next load or source choice; an in-flight preparation keeps its captured
-settings. Conversion produces H.264/AAC up to 1080p/60 without upscaling,
-prefers hardware encoding, and has a software fallback. HDR/Dolby Vision tone
-mapping, subtitle burn-in, surround preservation, and arbitrary seeking into
-unprepared media are unsupported.
+settings. Automatic compatibility conversion produces H.264/AAC up to 1080p/60
+without upscaling. The loaded item's **Video** menu has a 1080p/4K output
+switch and three enhancement choices: Original, Upscale, and Clean up and
+upscale. The switch selects a target for the next enhancement while Original is
+active; on an active enhancement it reloads the item at the new resolution. An
+explicit preset authorizes a video encode only for that item, even when the
+global preference avoids conversion. It reloads from the start, paused, on the
+same player and route; Stop, replacement, and playlist navigation reset it to
+Original. Finite SDR preparation uses Lanczos
+scaling, with restrained denoise and deband for the clean-up presets. 1080p
+output is H.264; 4K output is 8-bit SDR HEVC tagged `hvc1`. Hardware encoding
+is preflighted, with a bounded software fallback before handoff. AI Super
+Resolution, HDR/Dolby Vision tone mapping, subtitle burn-in, surround
+preservation, and arbitrary seeking into unprepared media are unsupported.
 
 ### Source quality
 
-When a source offers multiple presentations, use the **Quality** menu beside the
-playback details. **Automatic** prefers less processing, then higher known
+When a source offers multiple presentations, use the **Source** group in the
+loaded item's **Video** menu beside the playback details. **Automatic** prefers less processing, then higher known
 quality within that tier; **Prefer higher quality** in Settings changes that
-priority. A single file has no meaningful alternate quality. Explicitly choosing
+priority. A single file has no meaningful alternate source presentation but
+still offers the enhancement presets. Explicitly choosing
 a higher-quality remuxed presentation over a lower-quality direct source is
 allowed. Choosing an option re-resolves the original source, reloads the item
 from the start, and leaves it paused; receiver selection and the playlist are
@@ -126,10 +137,11 @@ folders/playlists, directory browsing, and local playlists are unsupported.
 
 ### Preparation limits
 
-Preparation accepts finite media up to four hours. Compatible H.264 SDR up to
-1080p/60 and AAC-LC mono/stereo are copied; other supported tracks are converted
+Preparation accepts finite media up to four hours. Compatible H.264 or 8-bit HEVC Main SDR up to
+3840×2160/60 and AAC-LC mono/stereo are copied; other supported tracks are converted
 as described above. Video conversion accepts known SDR inputs through 3840×2160
-at 120 fps and produces at most 1080p/60. Preparation requires disk headroom,
+at 120 fps. Automatic conversion produces at most 1080p/60; explicit presets
+produce at most 1080p or 3840×2160/60, according to the choice. Preparation requires disk headroom,
 monitors a 2 GiB temporary-media limit, and allows ten minutes per processing
 attempt. The app waits for a finalized MP4 before handing prepared media to the
 receiver, so finite videos have a finite timeline; loading stays paused.
@@ -280,7 +292,7 @@ The app defaults to finalized MP4 preparation so finite videos are not presented
 
 For a bounded live website check, the generated `PreparationChecks` binary also accepts `--website URL`. It resolves, prepares when required, checks native audio/video tracks, and removes its temporary result. This downloads the selected media; use a short public test clip. It does not verify receiver playback.
 
-Preparation probes actual streams and maps one video and one audio stream. Compatible tracks are copied independently; supported incompatible audio is encoded to AAC, and incompatible SDR video is encoded only under `.allowVideo`. Video conversion is bounded to known SDR inputs through 3840×2160 at 120 fps, with output no larger than 1920×1080 at 60 fps. Hardware H.264 is capability-tested before use, with a bounded software fallback before handoff. No encoder restart occurs after handoff. HDR/Dolby Vision, unknown unsafe color metadata, protected media, and missing audio/video are rejected. Native direct playback retains its broader capabilities.
+Preparation probes actual streams and maps one video and one audio stream. Compatible tracks are copied independently, including 4K SDR H.264 or 8-bit HEVC Main up to 60 fps; supported incompatible audio is encoded to AAC. HEVC copies are tagged `hvc1` in the MP4. Incompatible SDR video is encoded under `.allowVideo`, and an explicit enhancement forces encoding for a finite item. Input is bounded to known SDR through 3840×2160 at 120 fps. Automatic output remains H.264 no larger than 1920×1080 at 60 fps; explicit enhancement targets 1080p H.264 or 4K HEVC at no more than 60 fps. Hardware encoding is capability-tested before use, with a bounded software fallback before handoff. No encoder restart occurs after handoff. HDR/Dolby Vision, unknown unsafe color metadata, protected media, and missing audio/video are rejected. Native direct playback retains its broader capabilities.
 
 Finite inputs are restricted to HTTP(S) or local MP4/M4A and Matroska/WebM demuxing. Live preparation also accepts HTTP(S) HLS video and audio playlists. Only locally generated segments permit MPEG-TS probing for converted-output validation. Output metadata/chapters/extra tracks are omitted. The complete-file path uses a 2 GiB output limit and final size/duration checks. Progressive HLS reserves headroom below the same cap during the source-size pre-check because MPEG-TS packetization inflates the remux, then monitors aggregate temporary size (including unfinished segments) every 250 ms, so brief overshoot is possible, and validates final playlist duration and ENDLIST after FFmpeg succeeds. ffprobe has a bounded inspection deadline, finite FFmpeg jobs have ten minutes per attempt, and network reads have a 15-second inactivity limit. Finite preparation requires a duration of at most four hours. Live preparation uses a six-segment playlist with three retained older segments, a 512 MiB workspace cap and a 60-second output-progress deadline. Video conversion must also sustain the live output rate, and its first published segment is inspected before handoff. AAC-LC output is limited to stereo/48 kHz, with disk headroom required. The finite path remains full-source preparation; the live path evicts old segments.
 

@@ -41,6 +41,7 @@ public struct ResolvedSource: Sendable {
     public let isLive: Bool
     /// The conversion preference in force when this plan was chosen.
     public let conversionPolicy: ConversionPolicy
+    public let enhancement: VideoEnhancement
     /// A concrete processing tier chosen by the selector. Nil means the tier is
     /// derived from `needsPreparation`; set it to request audio/video conversion.
     public let plannedPath: PlaybackPath?
@@ -50,7 +51,8 @@ public struct ResolvedSource: Sendable {
                 needsPreparation: Bool = false, needsDelivery: Bool = false, delivery: MediaDelivery = .unknown,
                 videoKnownPresent: Bool = false, isLive: Bool = false,
                 conversionPolicy: ConversionPolicy = .avoidVideo,
-                plannedPath: PlaybackPath? = nil) {
+                plannedPath: PlaybackPath? = nil,
+                enhancement: VideoEnhancement = .original) {
         self.url = url; self.title = title; self.headers = headers; self.audio = audio
         self.needsPreparation = needsPreparation || audio != nil || (plannedPath.map { $0 != .direct } ?? false)
         self.needsDelivery = needsDelivery
@@ -58,6 +60,7 @@ public struct ResolvedSource: Sendable {
         self.videoKnownPresent = videoKnownPresent
         self.isLive = isLive
         self.conversionPolicy = conversionPolicy
+        self.enhancement = enhancement
         self.plannedPath = plannedPath
     }
 
@@ -67,7 +70,17 @@ public struct ResolvedSource: Sendable {
         ResolvedSource(url: url, title: title, headers: headers, audio: audio,
                        needsPreparation: needsPreparation, needsDelivery: needsDelivery,
                        delivery: delivery, videoKnownPresent: videoKnownPresent, isLive: isLive,
-                       conversionPolicy: policy, plannedPath: plannedPath)
+                       conversionPolicy: policy, plannedPath: plannedPath, enhancement: enhancement)
+    }
+
+    public func withEnhancement(_ choice: VideoEnhancement) -> ResolvedSource {
+        ResolvedSource(url: url, title: title, headers: headers, audio: audio,
+                       needsPreparation: needsPreparation || choice != .original,
+                       needsDelivery: needsDelivery, delivery: delivery,
+                       videoKnownPresent: videoKnownPresent, isLive: isLive,
+                       conversionPolicy: choice == .original ? conversionPolicy : .allowVideo,
+                       plannedPath: choice == .original ? plannedPath : .videoConversion,
+                       enhancement: choice)
     }
 }
 
@@ -508,6 +521,11 @@ struct YouTubeSourceAdapter: Sendable {
         return codec == "h264" || codec.hasPrefix("avc1")
     }
 
+    private static func isHEVC(_ format: Format) -> Bool {
+        guard let codec = videoCodec(format) else { return false }
+        return codec == "hevc" || codec.hasPrefix("hvc1") || codec.hasPrefix("hev1")
+    }
+
     private static func isAAC(_ codec: String?) -> Bool {
         guard let codec else { return false }
         return codec == "aac" || codec.hasPrefix("mp4a")
@@ -597,9 +615,9 @@ struct YouTubeSourceAdapter: Sendable {
     /// `.allowVideo` permits as a downscale. Direct native candidates keep their
     /// existing latitude because they never pass through preparation.
     private static func needsVideoConversion(_ video: Format) -> Bool {
-        if !isH264(video) { return true }
-        if let width = video.width, width > 1920 { return true }
-        if let height = video.height, height > 1080 { return true }
+        if !isH264(video) && !isHEVC(video) { return true }
+        if let width = video.width, width > 3840 { return true }
+        if let height = video.height, height > 2160 { return true }
         if let fps = video.fps, fps > 60 { return true }
         return false
     }

@@ -31,7 +31,7 @@ public final class PreparedMedia {
     /// The tier actually used to produce this media: `.direct` for in-place
     /// local delivery, otherwise the inspected remux/audio/video conversion.
     public let playbackPath: PlaybackPath
-    /// Source-video quality observed by ffprobe, not a receiver rendition.
+    /// Prepared video height observed by ffprobe, or source height for a copy.
     public let videoHeight: Int?
     public let videoFrameRate: Double?
     public private(set) var productionFailure: PreparationFailure?
@@ -272,8 +272,11 @@ public struct MediaPreparer: Sendable {
         // A growing EVENT playlist is presented as live by AirPlay receivers,
         // even when its source duration is known. Hand off a finalized VOD file
         // for finite media so receiver seeking and host controls remain usable.
-        let mode = mode ?? (environment["AIRTHROW_PREPARATION_MODE"] == "progressive-hls" ? .progressiveHLS : .completeFile)
+        let mode = source.enhancement == .original
+            ? (mode ?? (environment["AIRTHROW_PREPARATION_MODE"] == "progressive-hls" ? .progressiveHLS : .completeFile))
+            : .completeFile
         try Task.checkCancellation()
+        guard source.enhancement == .original || !source.isLive else { throw PreparationFailure.unsupported }
         // Resolve a LAN address before downloading. Loopback requires an explicit test override.
         let host = try environment["AIRTHROW_MEDIA_HOST"] ?? MediaHTTPServer.localAddress()
         do {
@@ -305,7 +308,8 @@ public struct MediaPreparer: Sendable {
             // and unknown tracks, and refuses video conversion unless the source
             // explicitly allows it.
             let plan = try Self.plan(videoInput: videoInput, audioInput: audioInput,
-                                     separateAudio: source.audio != nil, policy: source.conversionPolicy)
+                                     separateAudio: source.audio != nil, policy: source.conversionPolicy,
+                                     enhancement: source.enhancement)
             let videoDuration = source.isLive ? nil : try videoInput.finiteDuration
             let audioDuration = source.isLive ? nil : try audioInput.finiteDuration
             if let videoDuration, let audioDuration, abs(videoDuration - audioDuration) > 2 {
@@ -339,7 +343,8 @@ public struct MediaPreparer: Sendable {
                                                          hls: source.delivery == .hls)
                 }
                 arguments += ["-map", "0:\(plan.video.index)", "-map", "\(plan.audioInput):\(plan.audio.index)"]
-                    + Self.videoArguments(stream: plan.video, action: plan.videoAction, encoder: encoder)
+                    + Self.videoArguments(stream: plan.video, action: plan.videoAction,
+                                          encoder: encoder, enhancement: plan.enhancement)
                     + Self.audioArguments(stream: plan.audio, action: plan.audioAction)
                     + ["-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn"]
                 return arguments
@@ -392,7 +397,9 @@ public struct MediaPreparer: Sendable {
                 try Self.validateConverted(verified, plan: plan)
                 let duration = try verified.finiteDuration
                 guard verified.streams.count == 2,
-                      verified.streams.contains(where: { $0.copyableVideo }),
+                      verified.streams.contains(where: {
+                          $0.codec_type == "video" && (plan.videoAction == .convert || $0.copyableVideo)
+                      }),
                       verified.streams.contains(where: { $0.copyableAudio }),
                       duration >= videoDuration! - completionTolerance(for: videoDuration!),
                       duration <= videoDuration! + 2 else { throw PreparationFailure.failed }
@@ -400,17 +407,18 @@ public struct MediaPreparer: Sendable {
                 do { try Task.checkCancellation() }
                 catch { await server.stop(); throw error }
                 return await PreparedMedia(server: server, workspace: workspace, playbackPath: plan.path,
-                                           videoHeight: plan.video.height, videoFrameRate: plan.video.frameRate)
+                                           videoHeight: verified.streams.first(where: { $0.codec_type == "video" })?.height,
+                                           videoFrameRate: verified.streams.first(where: { $0.codec_type == "video" })?.frameRate)
             }
             let encoder = plan.videoAction == .convert
-                ? try await Self.selectEncoder(stream: plan.video, executable: ffmpeg)
+                ? try await Self.selectEncoder(stream: plan.video, enhancement: plan.enhancement, executable: ffmpeg)
                 : "copy"
             do {
                 return try await produce(encoder: encoder)
             } catch {
-                guard encoder == "h264_videotoolbox", Self.retryableHardwareFailure(error) else { throw error }
+                guard encoder.hasSuffix("_videotoolbox"), Self.retryableHardwareFailure(error) else { throw error }
                 try Task.checkCancellation()
-                return try await produce(encoder: "libx264")
+                return try await produce(encoder: plan.enhancement.targetHeight == 2160 ? "libx265" : "libx264")
             }
         } catch is CancellationError { throw CancellationError() }
         catch let error as PreparationFailure { throw error }
@@ -536,6 +544,7 @@ public struct MediaPreparer: Sendable {
         let audioInput: Int
         let videoAction: TrackAction
         let audioAction: TrackAction
+        let enhancement: VideoEnhancement
         var path: PlaybackPath {
             if videoAction == .convert { return .videoConversion }
             if audioAction == .convert { return .audioConversion }
@@ -546,38 +555,51 @@ public struct MediaPreparer: Sendable {
     /// Chooses the copied tracks first and only falls back to encoding what is
     /// missing. Video encoding requires an explicit `.allowVideo` policy.
     private static func plan(videoInput: Probe, audioInput: Probe, separateAudio: Bool,
-                             policy: ConversionPolicy) throws -> PreparationPlan {
+                             policy: ConversionPolicy, enhancement: VideoEnhancement) throws -> PreparationPlan {
         let video = videoInput.streams.first(where: { $0.copyableVideo })
             ?? videoInput.streams.first(where: { $0.convertibleVideo })
         guard let video else { throw PreparationFailure.unsupported }
         let audio = audioInput.streams.first(where: { $0.copyableAudio })
             ?? audioInput.streams.first(where: { $0.convertibleAudio })
         guard let audio else { throw PreparationFailure.unsupported }
-        let videoAction: TrackAction = video.copyableVideo ? .copy : .convert
+        let videoAction: TrackAction = enhancement == .original && video.copyableVideo ? .copy : .convert
         guard videoAction == .copy || policy == .allowVideo else {
             throw PreparationFailure.videoConversionRequired(height: video.height, frameRate: video.frameRate)
         }
+        if videoAction == .convert && !video.convertibleVideo { throw PreparationFailure.unsupported }
         return PreparationPlan(video: video, audio: audio, audioInput: separateAudio ? 1 : 0,
-                               videoAction: videoAction, audioAction: audio.copyableAudio ? .copy : .convert)
+                               videoAction: videoAction, audioAction: audio.copyableAudio ? .copy : .convert,
+                               enhancement: enhancement)
     }
 
-    /// Bounded H.264 output shared by the preflight and the real job: never
-    /// upscale past 1080p, never exceed 60 fps, cap the bitrate and force a
-    /// keyframe every two seconds so progressive segmenting does not wait for a
-    /// default long GOP.
-    private static func videoArguments(stream: Stream, action: TrackAction, encoder: String) -> [String] {
-        guard action == .convert else { return ["-c:v", "copy"] }
-        var arguments = ["-c:v", encoder, "-pix_fmt", "yuv420p", "-profile:v", "high", "-level:v", "4.2",
-                         "-b:v", "4000k", "-maxrate", "4000k", "-bufsize", "8000k",
+    /// Bounded SDR output shared by the preflight and real job. Automatic
+    /// conversion stays at or below 1080p H.264; explicit presets target 1080p
+    /// H.264 or 4K HEVC. All cap frame rate at 60 and use a two-second GOP.
+    private static func videoArguments(stream: Stream, action: TrackAction, encoder: String,
+                                       enhancement: VideoEnhancement) -> [String] {
+        guard action == .convert else {
+            return stream.codec_name == "hevc" ? ["-c:v", "copy", "-tag:v", "hvc1"] : ["-c:v", "copy"]
+        }
+        let fourK = enhancement.targetHeight == 2160
+        let bitrate = fourK ? "14000k" : "4000k"
+        let buffer = fourK ? "28000k" : "8000k"
+        var arguments = ["-c:v", encoder, "-pix_fmt", "yuv420p", "-profile:v", fourK ? "main" : "high",
+                         "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", buffer,
                          "-color_range", "tv", "-g", "120", "-keyint_min", "120", "-sc_threshold", "0",
                          "-force_key_frames", "expr:gte(t,n_forced*2)",
-                         "-vf", Self.scaleFilter(for: stream)]
-        arguments += encoder == "h264_videotoolbox" ? ["-allow_sw", "0"] : ["-preset", "veryfast"]
+                         "-vf", Self.scaleFilter(for: stream, enhancement: enhancement)]
+        if fourK { arguments += ["-tag:v", "hvc1"] }
+        else { arguments += ["-level:v", "4.2"] }
+        arguments += encoder.hasSuffix("_videotoolbox") ? ["-allow_sw", "0"] : ["-preset", "veryfast"]
         return arguments
     }
 
-    private static func scaleFilter(for stream: Stream) -> String {
-        var filter = "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"
+    private static func scaleFilter(for stream: Stream, enhancement: VideoEnhancement) -> String {
+        let dimensions = enhancement.targetHeight == 2160 ? "w=3840:h=2160"
+            : enhancement == .original ? "w='min(1920,iw)':h='min(1080,ih)'" : "w=1920:h=1080"
+        var filter = ""
+        if enhancement.cleansUp { filter = "hqdn3d=1.5:1.5:4:4,deband=1thr=0.02:2thr=0.02:3thr=0.02," }
+        filter += "scale=\(dimensions):flags=lanczos:force_original_aspect_ratio=decrease:force_divisible_by=2"
         // Full-range VP9 can otherwise retain a yuvj420p output despite
         // -pix_fmt yuv420p. Normalize it to the bounded SDR output range.
         if stream.color_range == "pc" { filter += ":in_range=full:out_range=tv" }
@@ -595,19 +617,25 @@ public struct MediaPreparer: Sendable {
     /// a preflight at the real bounded output size, rate and profile with
     /// `-allow_sw 0`; software is only used if it can encode that same output.
     /// Cancellation during a preflight propagates instead of being swallowed.
-    private static func selectEncoder(stream: Stream, executable: String) async throws -> String {
-        for encoder in ["h264_videotoolbox", "libx264"] {
-            if try await canEncode(stream: stream, encoder: encoder, executable: executable) {
+    private static func selectEncoder(stream: Stream, enhancement: VideoEnhancement,
+                                      executable: String) async throws -> String {
+        let encoders = enhancement.targetHeight == 2160
+            ? ["hevc_videotoolbox", "libx265"] : ["h264_videotoolbox", "libx264"]
+        for encoder in encoders {
+            if try await canEncode(stream: stream, enhancement: enhancement,
+                                   encoder: encoder, executable: executable) {
                 return encoder
             }
         }
         throw PreparationFailure.failed
     }
 
-    private static func canEncode(stream: Stream, encoder: String, executable: String) async throws -> Bool {
+    private static func canEncode(stream: Stream, enhancement: VideoEnhancement,
+                                  encoder: String, executable: String) async throws -> Bool {
         do {
             _ = try await HelperProcess.run(executable: executable,
-                                            arguments: Self.encoderPreflightArguments(stream: stream, encoder: encoder),
+                                            arguments: Self.encoderPreflightArguments(stream: stream,
+                                                enhancement: enhancement, encoder: encoder),
                                             timeout: .seconds(30), outputLimit: 4096)
             return true
         } catch is CancellationError {
@@ -617,16 +645,16 @@ public struct MediaPreparer: Sendable {
         }
     }
 
-    private static func encoderPreflightArguments(stream: Stream, encoder: String) -> [String] {
+    private static func encoderPreflightArguments(stream: Stream, enhancement: VideoEnhancement,
+                                                  encoder: String) -> [String] {
         let width = max(2, min(3840, stream.width ?? 1920))
         let height = max(2, min(2160, stream.height ?? 1080))
         let rate = min(60, max(1, stream.frameRate ?? 30))
         var arguments = ["-hide_banner", "-loglevel", "error", "-nostdin", "-f", "lavfi",
                          "-i", "color=c=black:s=\(width)x\(height):r=\(rate):d=0.1",
-                         "-frames:v", "1", "-vf", Self.scaleFilter(for: stream),
-                         "-c:v", encoder, "-pix_fmt", "yuv420p", "-profile:v", "high", "-level:v", "4.2",
-                         "-b:v", "4000k", "-maxrate", "4000k", "-bufsize", "8000k"]
-        arguments += encoder == "h264_videotoolbox" ? ["-allow_sw", "0"] : ["-preset", "veryfast"]
+                         "-frames:v", "1"]
+        arguments += Self.videoArguments(stream: stream, action: .convert,
+                                         encoder: encoder, enhancement: enhancement)
         arguments += ["-f", "null", "-"]
         return arguments
     }
@@ -649,13 +677,22 @@ public struct MediaPreparer: Sendable {
             throw PreparationFailure.failed
         }
         if plan.videoAction == .convert {
-            guard video.codec_name == "h264", video.pix_fmt == "yuv420p",
-                  (video.profile ?? "").localizedCaseInsensitiveContains("high"),
-                  video.color_range != "pc",
-                  (1...1920).contains(video.width ?? 0),
-                  (video.width ?? 0) <= min(1920, plan.video.width ?? 1920),
-                  (1...1080).contains(video.height ?? 0),
-                  (video.height ?? 0) <= min(1080, plan.video.height ?? 1080),
+            let fourK = plan.enhancement.targetHeight == 2160
+            let maxWidth = fourK ? 3840 : 1920
+            let maxHeight = fourK ? 2160 : 1080
+            let expectedCodec = fourK ? "hevc" : "h264"
+            let expectedProfile = fourK ? "main" : "high"
+            guard video.codec_name == expectedCodec, video.pix_fmt == "yuv420p",
+                  (video.profile ?? "").localizedCaseInsensitiveContains(expectedProfile),
+                  video.color_range != "pc", !video.isHDR,
+                  (1...maxWidth).contains(video.width ?? 0),
+                  (1...maxHeight).contains(video.height ?? 0),
+                  (plan.enhancement == .original
+                   ? (video.width ?? 0) <= min(maxWidth, plan.video.width ?? maxWidth)
+                   : (video.width == maxWidth || video.height == maxHeight)),
+                  (plan.enhancement == .original
+                   ? (video.height ?? 0) <= min(maxHeight, plan.video.height ?? maxHeight)
+                   : true),
                   let fps = video.frameRate, fps.isFinite, fps > 0, fps <= 60.5 else {
                 throw PreparationFailure.failed
             }
@@ -798,10 +835,12 @@ public struct MediaPreparer: Sendable {
         }
         var copyableVideo: Bool {
             guard let fps = frameRate, fps.isFinite, fps > 0 else { return false }
-            return codec_type == "video" && codec_name == "h264" && !encrypted
+            let supportedProfile = (codec_name == "h264"
+                && ["Constrained Baseline", "Baseline", "Main", "High"].contains(profile ?? ""))
+                || (codec_name == "hevc" && profile == "Main")
+            return codec_type == "video" && supportedProfile && !encrypted
                 && ["yuv420p", "yuvj420p"].contains(pix_fmt ?? "")
-                && ["Constrained Baseline", "Baseline", "Main", "High"].contains(profile ?? "")
-                && (1...1920).contains(width ?? 0) && (1...1080).contains(height ?? 0)
+                && (1...3840).contains(width ?? 0) && (1...2160).contains(height ?? 0)
                 && !isHDR && !attachedPicture && understoodSDR && fps <= 60
         }
         /// A known 8-bit SDR pixel layout. Anything outside this set (including
