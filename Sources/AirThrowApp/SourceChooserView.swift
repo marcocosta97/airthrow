@@ -6,10 +6,8 @@ import AirThrowCore
 /// The loaded item's video options: one compact, contextual popover for video
 /// source, audio track, and Mac-side enhancement. Source changes reload the
 /// item from the start, paused, on the shared player and keep the current
-/// receiver; neither asserts receiver playback. The video group appears only
-/// when the link offers more than one presentation, so a single-file load
-/// still reaches enhancement; the audio group appears only when the link
-/// offers more than one track.
+/// receiver; neither asserts receiver playback. Source shows only the selectors
+/// for which the link offers alternatives.
 struct VideoMenuView: View {
     @ObservedObject var controller: PlaybackController
     @SwiftUI.State private var showingOptions = false
@@ -20,9 +18,10 @@ struct VideoMenuView: View {
     private var enhancementAction: EnhancementAction { .from(enhancement) }
     private var audioSelection: String { status.selectedAudioID ?? "" }
 
-    /// One row per video presentation: audio-description variants of the same
-    /// quality and playback path collapse onto their first available member,
-    /// because audio variants belong to the dedicated audio picker.
+    /// Show one row per visible quality and processing path. Upstream formats
+    /// can differ by codec or bitrate while producing identical chooser labels;
+    /// their best available representative keeps the list compact. Audio variants
+    /// of one presentation also belong to the separate audio picker.
     private var videoOptions: [SourceOptionSnapshot] {
         var representatives: [SourceOptionSnapshot] = []
         var indexByPresentation: [String: Int] = [:]
@@ -41,7 +40,7 @@ struct VideoMenuView: View {
     }
 
     private func presentationKey(_ source: SourceOptionSnapshot) -> String {
-        source.videoGroupID ?? "\(source.quality)#\(source.playbackPath.rawValue)"
+        "\(source.quality)#\(source.playbackPath.rawValue)"
     }
 
     /// The chosen presentation's representative, or "automatic" when nothing
@@ -54,8 +53,8 @@ struct VideoMenuView: View {
     }
 
     private var isLive: Bool { status.isLive }
-    private var busy: Bool { PlaybackPolicy.isBusy(status) }
-    private var canChooseOutput: Bool { !isLive && enhancementAction != .original }
+    private var mediaReady: Bool { status.playbackPath != nil }
+    private var canChooseOutput: Bool { mediaReady && !isLive && enhancementAction != .original }
     private var outputHelp: String {
         if isLive { return "Enhancement is available only for on-demand video." }
         if enhancementAction == .original { return "Choose an enhancement to change the output resolution." }
@@ -96,43 +95,52 @@ struct VideoMenuView: View {
         .buttonStyle(.borderless)
         .fixedSize()
         .controlSize(.small)
-        .disabled(busy)
+        .disabled(!mediaReady && videoOptions.count < 2)
         .help(helpText)
         .accessibilityLabel("Video options")
         .accessibilityValue(menuLabel)
         .popover(isPresented: $showingOptions,
                  attachmentAnchor: .point(.bottomLeading), arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 10) {
-                if videoOptions.count > 1 {
-                    Text("Video").font(.subheadline.weight(.medium))
-                    Picker("Video", selection: Binding(get: { videoSelection }, set: { chooseSource($0) })) {
-                        Text("Automatic").tag("automatic")
-                        ForEach(videoOptions) { option in
-                            Text(videoRow(option))
-                                .tag(option.id)
-                                .disabled(option.unavailableReason != nil)
+                if videoOptions.count > 1 || audioOptions.count > 1 {
+                    Text("Source").font(.subheadline.weight(.medium))
+                    if videoOptions.count > 1 {
+                        HStack(spacing: 8) {
+                            Text("Video").font(.caption)
+                            Spacer(minLength: 0)
+                            Picker("Video", selection: Binding(get: { videoSelection }, set: { chooseSource($0) })) {
+                                Text("Automatic").tag("automatic")
+                                ForEach(videoOptions) { option in
+                                    Text(videoRow(option))
+                                        .tag(option.id)
+                                        .disabled(option.unavailableReason != nil)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
                         }
                     }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    Text("Choosing a source reloads from the start, paused.")
+                    if audioOptions.count > 1 {
+                        HStack(spacing: 8) {
+                            Text("Audio").font(.caption)
+                            Spacer(minLength: 0)
+                            Picker("Audio", selection: Binding(get: { audioSelection }, set: { chooseAudio($0) })) {
+                                if status.selectedAudioID == nil {
+                                    Text("Choose audio").tag("").disabled(true)
+                                }
+                                ForEach(audioOptions) { option in
+                                    Text(audioRow(option))
+                                        .tag(option.id)
+                                        .disabled(option.unavailableReason != nil)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
+                            .disabled(status.state == .loading)
+                        }
+                    }
+                    Text("Video changes reload paused.")
                         .font(.caption).foregroundStyle(.secondary)
-                    Divider()
-                }
-                if audioOptions.count > 1 {
-                    Text("Audio").font(.subheadline.weight(.medium))
-                    Picker("Audio", selection: Binding(get: { audioSelection }, set: { chooseAudio($0) })) {
-                        if status.selectedAudioID == nil {
-                            Text("Choose audio").tag("").disabled(true)
-                        }
-                        ForEach(audioOptions) { option in
-                            Text(audioRow(option))
-                                .tag(option.id)
-                                .disabled(option.unavailableReason != nil)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
                     Divider()
                 }
                 Text("Upscale output")
@@ -157,7 +165,7 @@ struct VideoMenuView: View {
                 }
                 .pickerStyle(.radioGroup)
                 .labelsHidden()
-                .disabled(isLive)
+                .disabled(!mediaReady || isLive)
             }
             .padding(12)
             .frame(width: 210, alignment: .leading)
@@ -165,7 +173,8 @@ struct VideoMenuView: View {
     }
 
     private func videoRow(_ source: SourceOptionSnapshot) -> String {
-        [source.quality, source.playbackPath.label, source.unavailableReason]
+        [source.quality.replacingOccurrences(of: " maximum (adaptive)", with: " max"),
+         source.playbackPath.label, source.unavailableReason]
             .compactMap { $0 }.joined(separator: " · ")
     }
 

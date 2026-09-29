@@ -175,6 +175,13 @@ struct ControllerView: View {
                                     VideoMenuView(controller: controller)
                                 }
                             }
+                            if !status.externalPlaybackActive &&
+                                (status.state == .awaitingReceiver || status.state == .connecting) {
+                                Text("Choose an AirPlay receiver to play. Video options are available above.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                             if status.hasAudio == false {
                                 Label("No audio track detected. Try a link that includes audio.", systemImage: "speaker.slash")
                                     .font(.callout)

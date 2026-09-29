@@ -26,7 +26,10 @@ Receiver selection uses Apple's system AirPlay picker and stays in the app. Ther
 is no public API to select an AirPlay route by name, so the CLI cannot choose a
 receiver: it only controls playback and observes `externalPlaybackActive`. A
 command that needs a route fails with exit code 4. The picker is usable before
-media is loaded; opening it is not evidence that a receiver was selected.
+media is loaded; opening it is not evidence that a receiver was selected. Source
+discovery and preparation can proceed without a route. Once discovery has
+provided candidates, the Video popover can change source or enhancement while
+loading; Play and seeking still require an active receiver.
 
 ### Loading, route negotiation, and playback
 
@@ -86,7 +89,9 @@ Automatic. If the requested presentation disappears, loading fails with a
 recovery message instead of silently choosing another. HLS quality describes an
 available maximum, not the current rendition.
 
-The separate **Audio** group shows tracks available for the chosen video.
+The **Source** group contains Video and Audio menus when alternatives exist.
+Video formats with identical visible quality and processing path share one
+representative row. The Audio menu shows tracks available for the chosen video.
 For an inspected direct HLS master, AirThrow prefers a rendition explicitly
 marked original, even when the master marks every rendition as non-default.
 Choosing another direct HLS audio track changes media selection on the current

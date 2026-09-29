@@ -178,11 +178,49 @@ struct SourceChoiceChecks {
         try await downscaleTargetGated(website: website, high: candidate(audioURL, title: "4K source",
                                                                    id: "native-2160", height: 2160),
                                        low: native1080)
+        try await sourceChoiceDuringPreparation(website: website, high: remux1080,
+                                                low: candidate(videoURL, title: "Remux 720",
+                                                               id: "remux-720", height: 720,
+                                                               plannedPath: .remux),
+                                                prepareSource: prepareSource)
         let alternate = candidate(videoURL, title: "Alternate remux", id: "alternate-remux",
                                   height: 2160, plannedPath: .remux)
         try await enhancementReload(website: website, source: native1080,
                                     alternate: alternate, preparer: preparer)
-        print("19/19 source-choice controller checks passed (no physical receiver)")
+        print("20/20 source-choice controller checks passed (no physical receiver)")
+    }
+
+    static func sourceChoiceDuringPreparation(
+        website: URL, high: MediaCandidate, low: MediaCandidate,
+        prepareSource: @escaping @Sendable (ResolvedSource) async throws -> PreparedMedia
+    ) async throws {
+        let resolver = ScriptedResolver([website.absoluteString: [.init(candidates: [high, low])]])
+        let highURL = high.source.url
+        let controller = PlaybackController(resolveCandidates: { try await resolver.candidates(for: $0) },
+                                            prepareSource: { source in
+            if source.url == highURL { try await Task.sleep(for: .seconds(2)) }
+            return try await prepareSource(source)
+        })
+        try controller.load(website.absoluteString)
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if controller.snapshot.loadingPhase == "preparing",
+               controller.snapshot.sources?.count == 2 { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        guard controller.snapshot.loadingPhase == "preparing",
+              let choice = controller.snapshot.sources?.first(where: { $0.quality == "720p" }) else {
+            throw NSError(domain: "SourceChoiceChecks", code: 63,
+                          userInfo: [NSLocalizedDescriptionKey: "Sources were unavailable during preparation"])
+        }
+        try controller.selectSource(choice.id)
+        let settled = try await settle(controller)
+        try check(settled.quality == "720p" && settled.selectedSourceID == settled.sources?.first(where: { $0.quality == "720p" })?.id,
+                  "Source change during preparation did not keep the new source")
+        try check(controller.player.rate == 0 && !settled.externalPlaybackActive,
+                  "Receiver-free source change started playback")
+        print("PASS source choices remain available during receiver-free preparation")
+        await controller.shutdownAndWait()
     }
 
     static func downscaleTargetGated(website: URL, high: MediaCandidate, low: MediaCandidate) async throws {

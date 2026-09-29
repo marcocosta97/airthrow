@@ -172,10 +172,9 @@ final class PlaybackController: ObservableObject {
         videoEnhancement == .original ? conversionPolicy : .allowVideo
     }
 
-    /// A new source choice must not start a competing load while any phase of the
-    /// current load is still running: candidate discovery, preparation, or the
-    /// native asset load that follows. A direct URL skips discovery, so the plain
-    /// `loading` flag is the only signal that its asset is still being loaded.
+    /// Controls that require the installed item still wait for loading. Source
+    /// and enhancement changes can cancel an in-flight load once discovery has
+    /// supplied candidates; generation guards discard its late results.
     private var loadInProgress: Bool { loading || resolving || preparing }
 
     func setVideoConversionAllowed(_ allowed: Bool) {
@@ -193,8 +192,8 @@ final class PlaybackController: ObservableObject {
     /// Choices reload paused using freshly resolved URLs and preserve the player/queue.
     /// An ID from an earlier source can never choose a different current item.
     func selectSource(_ optionID: String) throws {
-        guard let url = originalSourceURL, !loadInProgress else {
-            throw AppFailure(.unsupportedOperation, "Wait for loading, source discovery, and preparation to finish.")
+        guard let url = originalSourceURL, !sourceCandidates.isEmpty else {
+            throw AppFailure(.unsupportedOperation, "Wait for source discovery to finish.")
         }
         let candidateID: String?
         if optionID == "automatic" { candidateID = nil }
@@ -278,8 +277,8 @@ final class PlaybackController: ObservableObject {
     /// resolution for the next enhancement. On an active preset it prepares the
     /// matching output and reloads paused through the existing item path.
     func setEnhancementOutput4K(_ enabled: Bool) throws {
-        guard originalSourceURL != nil, !loadInProgress else {
-            throw AppFailure(.unsupportedOperation, "Wait for the video to finish loading.")
+        guard originalSourceURL != nil, selectedSource != nil else {
+            throw AppFailure(.unsupportedOperation, "Wait for source discovery to finish.")
         }
         guard !snapshot.isLive, selectedSource?.isLive != true else {
             throw AppFailure(.unsupportedOperation, "Enhancement is available for on-demand video, not live streams.")
@@ -301,11 +300,11 @@ final class PlaybackController: ObservableObject {
     /// A per-item enhancement: prepare this item's video on the Mac (upscale or
     /// clean up) and reload paused, keeping the receiver and queue. The current
     /// source choice is preserved when it still resolves; a stale identity fails
-    /// closed. Live sources and any busy load phase are refused, matching the
-    /// source chooser. `.original` restores the untouched source.
+    /// closed. A new choice may replace an in-flight load after source discovery.
+    /// `.original` restores the untouched source.
     func selectEnhancement(_ enhancement: VideoEnhancement) throws {
-        guard let url = originalSourceURL, !loadInProgress else {
-            throw AppFailure(.unsupportedOperation, "Wait for loading, source discovery, and preparation to finish.")
+        guard let url = originalSourceURL, selectedSource != nil else {
+            throw AppFailure(.unsupportedOperation, "Wait for source discovery to finish.")
         }
         guard !snapshot.isLive, selectedSource?.isLive != true else {
             throw AppFailure(.unsupportedOperation, "Enhancement is available for on-demand video, not live streams.")
@@ -960,6 +959,9 @@ final class PlaybackController: ObservableObject {
             try? await Task.sleep(for: .seconds(seconds))
             guard !Task.isCancelled, let self, self.probing else { return }
             self.cancelProbe(restorePosition: true)
+            // A picker opening without a chosen route must not trigger another
+            // negotiation on every later source or enhancement change.
+            self.hasOpenedPicker = false
             self.notice = "No video receiver connected. Use AirPlay to choose a TV, then try again."
             self.refresh()
         }

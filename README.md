@@ -27,10 +27,11 @@ This produces a locally signed app, a ZIP archive, and the `build/athrow` CLI.
 
 ## Play a video
 
-1. Click the AirPlay button in the app and choose a video-capable receiver.
-2. Paste a direct video URL, a YouTube link, or a local file path, or drop a
+1. Paste a direct video URL, a YouTube link, or a local file path, or drop a
    file onto the source area, then click **Load**.
-3. Press **Play** when the video and route are ready.
+2. Choose video and audio options while it loads, if the source offers them.
+3. Click the AirPlay button and choose a video-capable receiver, then press
+   **Play** when the video and route are ready.
 
 ## YouTube links (experimental)
 
@@ -62,7 +63,9 @@ containers may be prepared or converted on the Mac first.
   requires a compatible receiver. Compatible 4K H.264 or 8-bit SDR HEVC can
   also pass through a remux without downscaling. Enhancements never reduce the
   source resolution; sources above 1080p require the 4K target.
-- The Video popover separates video presentation from audio track. For direct
+- The Video popover groups video presentation and audio track under Source.
+  Multiple formats with the same visible resolution and processing path share
+  one video choice. You can choose a source before connecting a receiver. For direct
   HLS with alternate audio, AirThrow prefers a track identified as original
   and lets you switch tracks on the current player item.
 - HDR/Dolby Vision enhancement or tone mapping, AI Super Resolution, subtitle
