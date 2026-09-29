@@ -184,7 +184,7 @@ public enum MediaFailureReason: String, Codable, Sendable {
 
     public var message: String {
         switch self {
-        case .resolverUnavailable: "Website playback needs yt-dlp and Deno. Install them with Homebrew, then load the link again."
+        case .resolverUnavailable: "YouTube playback needs yt-dlp and Deno. Install them with Homebrew, then load the link again."
         case .resolutionFailed: "Could not find a playable video. The page may require sign-in, be unavailable, or need an updated yt-dlp installation."
         case .resolutionTimedOut: "Finding the video timed out. Check the connection and try again."
         case .unsupportedWebsite: "Choose a public YouTube video, playlist, Mix or live stream. Sign-in and not-yet-started premieres are not supported."

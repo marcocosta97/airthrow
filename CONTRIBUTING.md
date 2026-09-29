@@ -10,7 +10,7 @@
 
 Use Apple's public APIs and the system receiver picker. Keep one playback session shared by the UI and CLI, with no local video presentation. Derive status from observed playback state and cancel stale work when media changes.
 
-`SourceResolver` dispatches discovery to direct/YouTube/local adapters. Adapters return complete `MediaCandidate` presentations rather than selecting one: an upstream master, combined file, paired audio/video tracks, or a validated local regular file. `MediaSelector` ranks them without provider-specific logic and returns a `ResolvedSource` execution plan. Native playback wins over remuxing by default; within a tier, known resolution wins, HLS breaks resolution ties, then bitrate. HLS quality comes from eligible variants in the inspected master and is not the observed playback quality. Unknown direct media remains eligible for a native attempt without helper/network preflight, except remote MKV/WebM, which enter preparation like local MKV/WebM. Local MP4/MOV files are served in place. The shared remux fallback handles initial native format failures; HLS, network/DRM failures and already-prepared sources do not enter that fallback. `MediaPreparer` still validates actual streams before copying them.
+`SourceResolver` dispatches discovery to direct/YouTube/generic-web/local adapters. `ExtractedSourceAdapter` parses yt-dlp metadata for both website paths; YouTube keeps its own URL, playlist, and cookie handling. Adapters return complete `MediaCandidate` presentations rather than selecting one: an upstream master, combined file, paired audio/video tracks, or a validated local regular file. `MediaSelector` ranks them without provider-specific logic and returns a `ResolvedSource` execution plan. Native playback wins over remuxing by default; within a tier, known resolution wins, HLS breaks resolution ties, then bitrate. HLS quality comes from eligible variants in the inspected master and is not the observed playback quality. Recognizable direct-media extensions bypass helpers; ambiguous extensionless URLs try generic extraction and retain one native fallback when yt-dlp is missing or rejects the URL. Local MP4/MOV files are served in place. The shared remux fallback handles initial native format failures; HLS, network/DRM failures and already-prepared sources do not enter that fallback. `MediaPreparer` still validates actual streams before copying them.
 
 The additive protocol-v1 `playbackPath` reports `direct`, `remux`, `audio_conversion`, or `video_conversion`, and is absent before selection, after Stop, and on terminal failure. An unknown preparation plan remains unlabelled while inspection runs; prepared media reports the actual path used. The UI and CLI use the same snapshot. It neither exposes candidate URLs nor asserts receiver compatibility. Resolver/core checks cover ranking independently of adapter order, preserving alternatives, lower-quality HLS versus native MP4, and bounded fallback; preparation checks cover label changes and cleanup across replacement/Stop.
 
@@ -123,8 +123,12 @@ Source adapters discover candidates; one shared policy prefers native playback
 over preparation. Among native candidates it prefers higher resolution, then HLS
 at equal resolution, then bitrate. A usable H.264/AAC HLS master goes straight to
 AVPlayer, which selects and synchronizes its renditions; FFmpeg is not involved.
-Direct URLs usually supply one candidate; MKV/WebM enter inspection, while other
-unknown formats get one native attempt. Dedicated `playlist?list=…` links and
+Recognizable direct-media URLs supply one candidate; MKV/WebM enter inspection.
+Ambiguous non-YouTube URLs use only yt-dlp's generic extractor with no cookies
+or site-specific request headers. A missing helper or rejected URL gets one
+native attempt; valid metadata with no presentation fails resolution. A listed
+source that needs disabled conversion keeps its preparation error.
+Dedicated `playlist?list=…` links and
 Mixes (`list=RD…`) create a queue of up to 100 entries; entries resolve lazily, so
 signed URLs are not retained for the whole playlist, and unavailable or
 not-yet-started entries are skipped with a notice. Live entries play through the
@@ -279,7 +283,7 @@ For manual receiver checks, append `--serve --bind YOUR_MAC_LAN_IP` to keep the 
 Deterministic checks use fake helper executables and metadata; no installed yt-dlp, external site, or receiver is needed:
 
 ```bash
-swiftc -swift-version 6 -parse-as-library Sources/AirThrowCore/Protocol.swift Sources/AirThrowCore/MediaSelection.swift Sources/AirThrowCore/SourceResolver.swift Sources/AirThrowCore/HelperProcess.swift Sources/AirThrowCore/YouTubeCookies.swift Tests/ResolverChecks/main.swift -o .build/ResolverChecks
+swiftc -swift-version 6 -parse-as-library Sources/AirThrowCore/Protocol.swift Sources/AirThrowCore/MediaSelection.swift Sources/AirThrowCore/SourceResolver.swift Sources/AirThrowCore/ExtractedSourceAdapter.swift Sources/AirThrowCore/WebSourceAdapter.swift Sources/AirThrowCore/HelperProcess.swift Sources/AirThrowCore/YouTubeCookies.swift Tests/ResolverChecks/main.swift -o .build/ResolverChecks
 .build/ResolverChecks
 ```
 
@@ -299,7 +303,7 @@ For an optional metadata-only live smoke check, install `yt-dlp` and `deno`, rec
 
 This uses the same resolver as the app and prints a redacted result. Live-site results may change independently of AirThrow. Validate UI and CLI loading and receiver picture/sound separately. The result distinguishes a combined source from separate tracks selected for preparation. It is metadata-only and is not a playback pass.
 
-The subprocess runs in its own process group with a 40-second deadline, 8 MiB JSON limit, and 256 KiB discarded stderr limit. Stop/replacement kills the group and reaps the helper. Arguments disable user configuration, plugins, cache, and remote component installation. When YouTube cookies are configured, AirThrow reads the browser store or the supplied cookies file itself, keeps only `youtube.com`/`youtu.be`/`youtube-nocookie.com` records, writes them to a private `0600` temporary Netscape file, and passes that file to yt-dlp; the scratch directory is removed once the helper exits. No other site's cookies are imported, and cookie values never enter status, logs, or identifiers. JavaScript/EJS support must already be installed. Default yt-dlp browser headers are retained in memory; direct playback does not forward them, while FFmpeg/ffprobe receive them for separate HTTP tracks. Other headers remain ineligible. Even candidates with only default headers can fail if a site requires them at fetch time.
+The subprocess runs in its own process group with a 40-second deadline, 8 MiB JSON limit, and 256 KiB discarded stderr limit. Stop/replacement kills the group and reaps the helper. Arguments disable user configuration, plugins, cache, and remote component installation. Generic extraction enables only the generic extractor and does not require Deno. When YouTube cookies are configured, AirThrow reads the browser store or the supplied cookies file itself, keeps only `youtube.com`/`youtu.be`/`youtube-nocookie.com` records, writes them to a private `0600` temporary Netscape file, and passes that file to yt-dlp; the scratch directory is removed once the helper exits. No other site's cookies are imported, and cookie values never enter status, logs, or identifiers. JavaScript/EJS support must already be installed for YouTube. Default yt-dlp browser headers are retained in memory; direct playback does not forward them, while FFmpeg/ffprobe receive them for separate HTTP tracks. Other headers remain ineligible. Even candidates with only default headers can fail if a site requires them at fetch time.
 
 ## Preparation and HTTP delivery checks
 

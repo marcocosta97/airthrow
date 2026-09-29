@@ -230,7 +230,7 @@ struct ResolverChecks {
         let liveVideo = try SourceResolver.select(liveVideoData, policy: .allowVideo)
         try check(liveVideo.isLive && liveVideo.playbackPath == .videoConversion,
                   "Opt-in live video conversion was not offered")
-        let liveVideoCandidates = try await YouTubeSourceAdapter.candidatesWithHLS(liveVideoData) { _ in
+        let liveVideoCandidates = try await ExtractedSourceAdapter.candidatesWithHLS(liveVideoData) { _ in
             try check(false, "Video conversion fetched an HLS master")
             return Data()
         }
@@ -551,7 +551,7 @@ struct ResolverChecks {
             _ = try await SourceResolver.selectWithHLS(adaptiveData) { _ in throw CancellationError() }
             try check(false, "Cancelled master fetch started preparation")
         } catch is CancellationError {}
-        let discovered = try await YouTubeSourceAdapter.candidatesWithHLS(metadata([adaptiveVideo, combined, separateVideo, separateAudio])) { _ in masterData }
+        let discovered = try await ExtractedSourceAdapter.candidatesWithHLS(metadata([adaptiveVideo, combined, separateVideo, separateAudio])) { _ in masterData }
         try check(discovered.count == 3 && discovered.contains(where: { $0.source.needsPreparation }),
                   "Adapter discarded alternatives before shared selection")
         try check(try MediaSelector.select(discovered).url == masterURL, "Higher-quality native HLS was not considered alongside MP4")
@@ -584,9 +584,9 @@ struct ResolverChecks {
             return Data()
         }
         try check(await duplicateCounter.count == 1, "Master URLs were not deduplicated")
-        let firstMasterID = try await YouTubeSourceAdapter.candidatesWithHLS(metadata([adaptiveVideo, combined])) { _ in masterData }
+        let firstMasterID = try await ExtractedSourceAdapter.candidatesWithHLS(metadata([adaptiveVideo, combined])) { _ in masterData }
             .first { $0.source.delivery == .hls }?.id
-        let reorderedMasterID = try await YouTubeSourceAdapter.candidatesWithHLS(metadata([combined, adaptiveVideo])) { _ in masterData }
+        let reorderedMasterID = try await ExtractedSourceAdapter.candidatesWithHLS(metadata([combined, adaptiveVideo])) { _ in masterData }
             .first { $0.source.delivery == .hls }?.id
         try check(firstMasterID != nil && firstMasterID == reorderedMasterID,
                   "HLS master identity changed when formats were reordered")
@@ -595,7 +595,7 @@ struct ResolverChecks {
         // instead of letting one silently override the other.
         let masterA = adaptiveVideo.merging(["manifest_url": "https://media.example/masterA.m3u8"]) { _, rhs in rhs }
         let masterB = adaptiveVideo.merging(["manifest_url": "https://media.example/masterB.m3u8"]) { _, rhs in rhs }
-        let twinCandidates = try await YouTubeSourceAdapter.candidatesWithHLS(metadata([masterA, masterB])) { _ in masterData }
+        let twinCandidates = try await ExtractedSourceAdapter.candidatesWithHLS(metadata([masterA, masterB])) { _ in masterData }
         let twinMasters = twinCandidates.filter { $0.source.delivery == .hls }
         try check(twinMasters.count == 2 && Set(twinMasters.map(\.id)).count == 1,
                   "Identical-quality masters silently collapsed or got distinct identities")
@@ -789,14 +789,14 @@ private actor ManifestCounter {
 // Exercise the same adapter -> shared selector boundary with deterministic metadata.
 private extension SourceResolver {
     static func candidates(_ data: Data) throws -> [MediaCandidate] {
-        try YouTubeSourceAdapter.candidates(data)
+        try ExtractedSourceAdapter.candidates(data)
     }
     static func select(_ data: Data, policy: ConversionPolicy = .avoidVideo,
                        sourceID: String? = nil) throws -> ResolvedSource {
-        try MediaSelector.select(YouTubeSourceAdapter.candidates(data), policy: policy, sourceID: sourceID)
+        try MediaSelector.select(ExtractedSourceAdapter.candidates(data), policy: policy, sourceID: sourceID)
     }
     static func selectWithHLS(_ data: Data, fetch: @Sendable (URL) async throws -> Data) async throws -> ResolvedSource {
-        try await MediaSelector.select(YouTubeSourceAdapter.candidatesWithHLS(data, fetch: fetch))
+        try await MediaSelector.select(ExtractedSourceAdapter.candidatesWithHLS(data, fetch: fetch))
     }
     static func selectPlaylist(_ data: Data) throws -> ResolvedPlaylist {
         try YouTubeSourceAdapter.selectPlaylist(data)

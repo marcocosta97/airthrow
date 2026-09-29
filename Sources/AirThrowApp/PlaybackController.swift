@@ -511,8 +511,8 @@ final class PlaybackController: ObservableObject {
         probeWhenReady = retryRoute
         let id = generation
         loading = true
-        resolving = fallback == nil && SourceResolver.isWebsite(url)
-        websiteURL = SourceResolver.isWebsite(url) ? url : nil
+        resolving = fallback == nil && SourceResolver.needsResolution(url)
+        websiteURL = SourceResolver.needsResolution(url) ? url : nil
         retriedResolution = retry
         title = titleOverride ?? (url.isFileURL ? url.lastPathComponent : (url.host ?? "Video"))
         playWhenReady = autoplay

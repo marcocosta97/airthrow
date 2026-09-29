@@ -12,8 +12,8 @@ companion command-line tool drives the same session from a terminal or script.
 
 - macOS 14 or later.
 - Swift 6 Command Line Tools or Xcode, to build from source.
-- Optional, for YouTube links and format conversion: `ffmpeg`, `ffprobe`,
-  `yt-dlp`, and `deno` (`brew install ffmpeg yt-dlp deno`).
+- Optional: `yt-dlp` for website links, `deno` for YouTube, and `ffmpeg`/
+  `ffprobe` for preparation (`brew install ffmpeg yt-dlp deno`).
 - The Mac and the receiver must be on the same network.
 
 ## Build and run
@@ -27,7 +27,7 @@ This produces a locally signed app, a ZIP archive, and the `build/athrow` CLI.
 
 ## Play a video
 
-1. Paste a direct video URL, a YouTube link, or a local file path, or drop a
+1. Paste a direct video URL, a website link, or a local file path, or drop a
    file onto the source area, then click **Load**.
 2. Choose video and audio options while it loads, if the source offers them.
    Once ready, choose a subtitle track in **Video → Source → Subtitles** if one
@@ -35,12 +35,15 @@ This produces a locally signed app, a ZIP archive, and the `build/athrow` CLI.
 3. Click the AirPlay button and choose a video-capable receiver, then press
    **Play** when the video and route are ready.
 
-## YouTube links (experimental)
+## Website links (experimental)
 
 With `yt-dlp`, `deno`, and `ffmpeg` installed, paste a public YouTube watch,
 Shorts, `youtu.be`, playlist, or Mix link in the same field. AirThrow finds the
 best playable source, preferring one the receiver can play directly. Dedicated
 playlist links create a queue of up to 100 items.
+
+Other public video pages may work through yt-dlp's generic extractor. Site
+sign-in, DRM, and sources requiring custom request headers are unsupported.
 
 Some videos are gated by a YouTube sign-in check. In **Settings → YouTube
 access**, pick a browser or a Netscape `cookies.txt` file to supply a signed-in
