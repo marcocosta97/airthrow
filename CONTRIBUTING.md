@@ -53,10 +53,10 @@ actual path.
 it; turn it off to permit supported SDR video conversion. Changes apply to the
 next load or source choice; an in-flight preparation keeps its captured
 settings. Automatic compatibility conversion produces H.264/AAC up to 1080p/60
-without upscaling. The loaded item's **Video** menu has a 1080p/4K output
-switch and three enhancement choices: Original, Upscale, and Clean up and
-upscale. The switch selects a target for the next enhancement while Original is
-active; on an active enhancement it reloads the item at the new resolution. An
+without upscaling. The loaded item's **Video** popover has a 1080p/4K output
+segmented control and three enhancement choices: Original, Upscale, and Clean up
+and upscale. The control selects a target for the next enhancement while
+Original is active; on an active enhancement it reloads the item at the new resolution. An
 explicit preset authorizes a video encode only for that item, even when the
 global preference avoids conversion. It reloads from the start, paused, on the
 same player and route; Stop, replacement, and playlist navigation reset it to
@@ -70,8 +70,9 @@ preservation, and arbitrary seeking into unprepared media are unsupported.
 ### Source quality
 
 When a source offers multiple presentations, use the **Source** group in the
-loaded item's **Video** menu beside the playback details. **Automatic** prefers less processing, then higher known
-quality within that tier; **Prefer higher quality** in Settings changes that
+loaded item's **Video** popover beside the playback details. **Automatic**
+prefers less processing, then higher known quality within that tier;
+**Prefer higher quality** in Settings changes that
 priority. A single file has no meaningful alternate source presentation but
 still offers the enhancement presets. Explicitly choosing
 a higher-quality remuxed presentation over a lower-quality direct source is

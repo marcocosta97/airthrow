@@ -3,13 +3,14 @@ import SwiftUI
 import AirThrowCore
 #endif
 
-/// The loaded item's video options: one compact, contextual menu for source
+/// The loaded item's video options: one compact, contextual popover for source
 /// quality and Mac-side enhancement. Both reload the item from the start,
 /// paused, on the shared player and keep the current receiver; neither asserts
 /// receiver playback. The source group appears only when the link offers more
 /// than one presentation, so a single-file load still reaches enhancement.
 struct VideoMenuView: View {
     @ObservedObject var controller: PlaybackController
+    @SwiftUI.State private var showingOptions = false
     private var status: PlaybackSnapshot { controller.snapshot }
     private var sources: [SourceOptionSnapshot] { status.sources ?? [] }
     private var enhancement: VideoEnhancement { status.videoEnhancement ?? .original }
@@ -40,9 +41,25 @@ struct VideoMenuView: View {
     }
 
     var body: some View {
-        Menu {
-            if sources.count > 1 {
-                Section("Source") {
+        Button {
+            showingOptions.toggle()
+        } label: {
+            HStack(spacing: 4) {
+                Text("Video: \(menuLabel)").lineLimit(1)
+                Image(systemName: "chevron.down").font(.caption2)
+            }
+        }
+        .buttonStyle(.borderless)
+        .fixedSize()
+        .controlSize(.small)
+        .disabled(busy)
+        .help(helpText)
+        .accessibilityLabel("Video options")
+        .accessibilityValue(menuLabel)
+        .popover(isPresented: $showingOptions, arrowEdge: .leading) {
+            VStack(alignment: .leading, spacing: 12) {
+                if sources.count > 1 {
+                    Text("Source").font(.subheadline.weight(.medium))
                     Picker("Source", selection: Binding(get: { sourceSelection }, set: { chooseSource($0) })) {
                         Text("Automatic").tag("automatic")
                         ForEach(sources) { source in
@@ -51,36 +68,36 @@ struct VideoMenuView: View {
                                 .disabled(source.unavailableReason != nil)
                         }
                     }
-                    .pickerStyle(.inline)
+                    .pickerStyle(.menu)
+                    .labelsHidden()
                     Text("Choosing a source reloads from the start, paused.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Divider()
                 }
-                Divider()
-            }
-            Section("Enhancement") {
-                Toggle("Use 4K instead of 1080p",
-                       isOn: Binding(get: { controller.enhancementOutput4K },
-                                     set: { chooseOutput4K($0) }))
-                    .disabled(isLive)
-                    .help("Changing the target during enhancement reloads from the start, paused.")
+                Text("Upscale output").font(.subheadline.weight(.medium))
+                Picker("Upscale output", selection: Binding(get: { controller.enhancementOutput4K },
+                                                          set: { chooseOutput4K($0) })) {
+                    Text("1080p").tag(false)
+                    Text("4K").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .disabled(isLive)
+                .help("With an active enhancement, changing the target reloads from the start, paused.")
+                Text("Enhancement").font(.subheadline.weight(.medium))
                 Picker("Enhancement", selection: Binding(get: { enhancementAction },
                                                          set: { chooseAction($0) })) {
                     ForEach(EnhancementAction.allCases, id: \.self) { option in
                         Text(option.label).tag(option)
                     }
                 }
-                .pickerStyle(.inline)
+                .pickerStyle(.radioGroup)
+                .labelsHidden()
                 .disabled(isLive)
             }
-        } label: {
-            Text("Video: \(menuLabel)").lineLimit(1)
+            .padding(14)
+            .frame(width: 280)
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .controlSize(.small)
-        .disabled(busy)
-        .help(helpText)
-        .accessibilityLabel("Video options")
-        .accessibilityValue(menuLabel)
     }
 
     private func sourceRow(_ source: SourceOptionSnapshot) -> String {
@@ -90,20 +107,29 @@ struct VideoMenuView: View {
 
     private func chooseSource(_ id: String) {
         guard id != sourceSelection || status.state == .failed else { return }
-        do { try controller.selectSource(id) }
+        do {
+            try controller.selectSource(id)
+            showingOptions = false
+        }
         catch { controller.displayError(error) }
     }
 
     private func chooseAction(_ action: EnhancementAction) {
         guard action != enhancementAction else { return }
         let option = action.enhancement(output4K: controller.enhancementOutput4K)
-        do { try controller.selectEnhancement(option) }
+        do {
+            try controller.selectEnhancement(option)
+            showingOptions = false
+        }
         catch { controller.displayError(error) }
     }
 
     private func chooseOutput4K(_ enabled: Bool) {
         guard enabled != controller.enhancementOutput4K else { return }
-        do { try controller.setEnhancementOutput4K(enabled) }
+        do {
+            try controller.setEnhancementOutput4K(enabled)
+            if enhancementAction != .original { showingOptions = false }
+        }
         catch { controller.displayError(error) }
     }
 }

@@ -82,7 +82,7 @@ struct SettingsView: View {
                 Toggle("Avoid video conversion", isOn: Binding(
                     get: { !controller.allowVideoConversion },
                     set: { controller.setVideoConversionAllowed(!$0) }))
-                Text("Copy compatible video, and convert audio when needed. This preference governs automatic source selection: when on, automatic choice avoids video encoding. Choosing an enhancement in the Video menu authorizes encoding for that item, whatever this setting is.")
+                Text("Copy compatible video, and convert audio when needed. This preference governs automatic source selection: when on, automatic choice avoids video encoding. Choosing an enhancement in Video options authorizes encoding for that item, whatever this setting is.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Toggle("Prefer higher quality", isOn: Binding(

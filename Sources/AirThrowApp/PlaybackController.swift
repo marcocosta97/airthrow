@@ -208,7 +208,7 @@ final class PlaybackController: ObservableObject {
                   enhancementOutput4K: enhancementOutput4K)
     }
 
-    /// The menu's one resolution switch. On Original it only selects the
+    /// The popover's resolution control. On Original it only selects the
     /// resolution for the next enhancement. On an active preset it prepares the
     /// matching output and reloads paused through the existing item path.
     func setEnhancementOutput4K(_ enabled: Bool) throws {
