@@ -24,12 +24,30 @@ public struct MediaTrack: Sendable {
     public init(url: URL, headers: [String: String] = [:]) { self.url = url; self.headers = headers }
 }
 
+/// Privacy-safe metadata for an alternate audio rendition in an HLS master.
+/// The ID is derived only from its language and bounded display name.
+public struct HLSAudioOption: Sendable, Equatable {
+    public let id: String
+    public let language: String?
+    public let name: String
+    public let isOriginal: Bool
+    public let isDefault: Bool
+    public init(language: String?, name: String, isOriginal: Bool, isDefault: Bool) {
+        self.language = language
+        self.name = name
+        self.isOriginal = isOriginal
+        self.isDefault = isDefault
+        self.id = "hls-audio-" + MediaCandidate.stableHash(MediaCandidate.signature([language ?? "", name]))
+    }
+}
+
 public struct ResolvedSource: Sendable {
     public let url: URL
     public let title: String?
     // Keep request metadata in memory. Never put URLs, headers, or helper output into status/logs.
     public let headers: [String: String]
     public let audio: MediaTrack?
+    public let hlsAudioOptions: [HLSAudioOption]
     public let needsPreparation: Bool
     /// The source must be exposed through AirThrow's LAN server before AVPlayer
     /// can hand it to a receiver. This is independent of whether tracks are remuxed.
@@ -48,12 +66,14 @@ public struct ResolvedSource: Sendable {
     public var playbackPath: PlaybackPath { plannedPath ?? (needsPreparation ? .remux : .direct) }
     public var needsPreparationPipeline: Bool { needsPreparation || needsDelivery }
     public init(url: URL, title: String? = nil, headers: [String: String] = [:], audio: MediaTrack? = nil,
+                hlsAudioOptions: [HLSAudioOption] = [],
                 needsPreparation: Bool = false, needsDelivery: Bool = false, delivery: MediaDelivery = .unknown,
                 videoKnownPresent: Bool = false, isLive: Bool = false,
                 conversionPolicy: ConversionPolicy = .avoidVideo,
                 plannedPath: PlaybackPath? = nil,
                 enhancement: VideoEnhancement = .original) {
         self.url = url; self.title = title; self.headers = headers; self.audio = audio
+        self.hlsAudioOptions = hlsAudioOptions
         self.needsPreparation = needsPreparation || audio != nil || (plannedPath.map { $0 != .direct } ?? false)
         self.needsDelivery = needsDelivery
         self.delivery = delivery
@@ -68,6 +88,7 @@ public struct ResolvedSource: Sendable {
     /// planned path and every delivery flag are preserved.
     public func withConversionPolicy(_ policy: ConversionPolicy) -> ResolvedSource {
         ResolvedSource(url: url, title: title, headers: headers, audio: audio,
+                       hlsAudioOptions: hlsAudioOptions,
                        needsPreparation: needsPreparation, needsDelivery: needsDelivery,
                        delivery: delivery, videoKnownPresent: videoKnownPresent, isLive: isLive,
                        conversionPolicy: policy, plannedPath: plannedPath, enhancement: enhancement)
@@ -75,6 +96,7 @@ public struct ResolvedSource: Sendable {
 
     public func withEnhancement(_ choice: VideoEnhancement) -> ResolvedSource {
         ResolvedSource(url: url, title: title, headers: headers, audio: audio,
+                       hlsAudioOptions: hlsAudioOptions,
                        needsPreparation: needsPreparation || choice != .original,
                        needsDelivery: needsDelivery, delivery: delivery,
                        videoKnownPresent: videoKnownPresent, isLive: isLive,
@@ -245,7 +267,8 @@ struct YouTubeSourceAdapter: Sendable {
                 try Task.checkCancellation()
                 if let quality = HLSMaster.quality(manifest, at: master) {
                     candidates.append(MediaCandidate(
-                        source: ResolvedSource(url: master, title: cleanTitle(info.title), delivery: .hls,
+                        source: ResolvedSource(url: master, title: cleanTitle(info.title),
+                                               hlsAudioOptions: HLSMaster.audioOptions(manifest, at: master), delivery: .hls,
                                                videoKnownPresent: true, isLive: info.isIndefiniteLive),
                         id: formatIdentifier(format, role: "hls"),
                         height: quality.height, bitrate: quality.bitrate,
@@ -610,10 +633,9 @@ struct YouTubeSourceAdapter: Sendable {
             && headersAreDefault(format)
     }
 
-    /// Any known-compatible video that exceeds the preparation output profile
-    /// (codec, resolution or frame rate) still needs a video encode, which
-    /// `.allowVideo` permits as a downscale. Direct native candidates keep their
-    /// existing latitude because they never pass through preparation.
+    /// Video outside the copy profile needs an encode. The preparer separately
+    /// refuses a conversion that would reduce either source dimension. Direct
+    /// native candidates never pass through preparation.
     private static func needsVideoConversion(_ video: Format) -> Bool {
         if !isH264(video) && !isHEVC(video) { return true }
         if let width = video.width, width > 3840 { return true }
@@ -805,6 +827,42 @@ enum HLSMaster {
 
     static func hasAudioVideo(_ data: Data, at base: URL) -> Bool {
         quality(data, at: base) != nil
+    }
+
+    static func audioOptions(_ data: Data, at base: URL) -> [HLSAudioOption] {
+        guard quality(data, at: base) != nil,
+              let text = String(data: data, encoding: .utf8) else { return [] }
+        var options: [HLSAudioOption] = []
+        var seen = Set<String>()
+        for line in text.components(separatedBy: .newlines) where line.hasPrefix("#EXT-X-MEDIA:") {
+            guard options.count < 16,
+                  let attrs = attributes(String(line.dropFirst("#EXT-X-MEDIA:".count))),
+                  attrs["TYPE"] == "AUDIO", attrs["GROUP-ID"]?.isEmpty == false,
+                  let uri = attrs["URI"], validURI(uri, at: base),
+                  let name = safeAudioLabel(attrs["NAME"], limit: 80) else { continue }
+            let language = safeAudioLanguage(attrs["LANGUAGE"])
+            let key = MediaCandidate.signature([language ?? "", name])
+            guard seen.insert(key).inserted else { continue }
+            options.append(HLSAudioOption(language: language, name: name,
+                                          isOriginal: name.range(of: "original", options: .caseInsensitive) != nil,
+                                          isDefault: attrs["DEFAULT"] == "YES"))
+        }
+        return options
+    }
+
+    private static func safeAudioLabel(_ raw: String?, limit: Int) -> String? {
+        guard let raw else { return nil }
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, value.count <= limit,
+              !value.contains("://"), !value.contains("/"), !value.contains("?"), !value.contains("@"),
+              !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return nil }
+        return value
+    }
+
+    private static func safeAudioLanguage(_ raw: String?) -> String? {
+        guard let raw, !raw.isEmpty, raw.count <= 32,
+              raw.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }) else { return nil }
+        return raw
     }
 
     struct Quality {

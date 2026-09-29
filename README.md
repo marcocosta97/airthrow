@@ -60,7 +60,11 @@ containers may be prepared or converted on the Mac first.
   resolution control. The Mac prepares a new file before playback; choosing a
   preset reloads from the start, paused. 4K output uses HEVC and
   requires a compatible receiver. Compatible 4K H.264 or 8-bit SDR HEVC can
-  also pass through a remux without downscaling.
+  also pass through a remux without downscaling. Enhancements never reduce the
+  source resolution; sources above 1080p require the 4K target.
+- The Video popover separates video presentation from audio track. For direct
+  HLS with alternate audio, AirThrow prefers a track identified as original
+  and lets you switch tracks on the current player item.
 - HDR/Dolby Vision enhancement or tone mapping, AI Super Resolution, subtitle
   burn-in, and surround preservation are not supported yet. A prepared file
   passing local checks does not guarantee playback on a particular receiver.

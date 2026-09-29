@@ -53,7 +53,7 @@ actual path.
 it; turn it off to permit supported SDR video conversion. Changes apply to the
 next load or source choice; an in-flight preparation keeps its captured
 settings. Automatic compatibility conversion produces H.264/AAC up to 1080p/60
-without upscaling. The loaded item's **Video** popover has a 1080p/4K output
+without upscaling or downscaling. The loaded item's **Video** popover has a 1080p/4K output
 segmented control and three enhancement choices: Original, Upscale, and Clean up
 and upscale. The output control is disabled on Original and retains the last
 target. On an active enhancement it reloads the item at the new resolution. An
@@ -66,10 +66,13 @@ output is H.264; 4K output is 8-bit SDR HEVC tagged `hvc1`. Hardware encoding
 is preflighted, with a bounded software fallback before handoff. AI Super
 Resolution, HDR/Dolby Vision tone mapping, subtitle burn-in, surround
 preservation, and arbitrary seeking into unprepared media are unsupported.
+Enhancements refuse an output smaller than the inspected source. Sources above
+1080p require the 4K target; compatible 4K video can still be copied directly
+or through a remux.
 
 ### Source quality
 
-When a source offers multiple presentations, use the **Source** group in the
+When a source offers multiple presentations, use the **Video** group in the
 loaded item's **Video** popover beside the playback details. **Automatic**
 prefers less processing, then higher known quality within that tier;
 **Prefer higher quality** in Settings changes that
@@ -82,6 +85,14 @@ preserved. The choice applies only to that item, and navigation returns to
 Automatic. If the requested presentation disappears, loading fails with a
 recovery message instead of silently choosing another. HLS quality describes an
 available maximum, not the current rendition.
+
+The separate **Audio** group shows tracks available for the chosen video.
+For an inspected direct HLS master, AirThrow prefers a rendition explicitly
+marked original, even when the master marks every rendition as non-default.
+Choosing another direct HLS audio track changes media selection on the current
+AVPlayer item. Paired-file audio choices use the existing paused source reload.
+If the master identifies no original, its declared default or AVPlayer's
+automatic selection applies.
 
 `source` IDs are session-scoped and expire on reload, replacement, or Stop.
 List sources again before choosing. Status exposes optional `sources`,

@@ -89,6 +89,39 @@ struct MediaChecks {
             let url = URL(string: base + "/alternate-audio.m3u8")!
             let data = try await HLSMaster.fetch(url)
             try check(HLSMaster.hasAudioVideo(data, at: url), "Local alternate-audio master was not recognized")
+            let options = HLSMaster.audioOptions(data, at: url)
+            try check(options.count == 2 && options[1].isOriginal && options[1].language == "it",
+                      "Local master did not expose the Italian original and English dub")
+            let audioController = PlaybackController(resolveCandidates: { _ in [
+                MediaCandidate(source: ResolvedSource(url: url, hlsAudioOptions: options,
+                                                      delivery: .hls, videoKnownPresent: true),
+                               height: 180)
+            ] }, prepareSource: nil)
+            try audioController.load(url.absoluteString)
+            let deadline = Date().addingTimeInterval(25)
+            while Date() < deadline && audioController.snapshot.state != .awaitingReceiver {
+                if audioController.snapshot.state == .failed { break }
+                try await Task.sleep(for: .milliseconds(50))
+                audioController.refresh()
+            }
+            try check(audioController.snapshot.state == .awaitingReceiver,
+                      "Direct alternate-audio item did not become ready")
+            let italianID = audioController.snapshot.audioOptions?.first(where: { $0.label.contains("Italiano") })?.id
+            let englishID = audioController.snapshot.audioOptions?.first(where: { $0.label.contains("English") })?.id
+            try check(italianID != nil && englishID != nil && audioController.snapshot.selectedAudioID == italianID,
+                      "Direct HLS did not select the original Italian track by default")
+            let directItem = audioController.player.currentItem!
+            let group = try await directItem.asset.loadMediaSelectionGroup(for: .audible)
+            try check(group?.options.count == 2,
+                      "AVPlayer did not expose both direct HLS audio tracks")
+            try check(group.flatMap { directItem.currentMediaSelection.selectedMediaOption(in: $0) }?.locale?.identifier.hasPrefix("it") == true,
+                      "AVPlayer selected the English dub instead of Italian original")
+            try audioController.selectAudio(englishID!)
+            try check(audioController.player.currentItem === directItem && audioController.player.rate == 0,
+                      "Direct audio switch replaced the player item or started playback")
+            try check(group.flatMap { directItem.currentMediaSelection.selectedMediaOption(in: $0) }?.locale?.identifier.hasPrefix("en") == true,
+                      "Direct audio switch did not select the English track")
+            await audioController.shutdownAndWait()
         }
         let controller = PlaybackController(prepareSource: nil)
         defer { controller.shutdown() }

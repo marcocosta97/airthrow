@@ -89,9 +89,11 @@ for name, path, container, video, audio, options in extra:
         case('HLS without URL extension', None if reason else 'hls-no-extension', container, video, audio,
              expected='awaiting_receiver', has_audio=True, skipped=reason)
 if (out / 'silent.m3u8').exists() and (out / 'audio-only.m3u8').exists():
+    (out / 'dub-audio.m3u8').write_text((out / 'audio-only.m3u8').read_text())
     (out / 'alternate-audio.m3u8').write_text(
         '#EXTM3U\n#EXT-X-VERSION:3\n'
-        '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="Default",DEFAULT=YES,AUTOSELECT=YES,URI="audio-only.m3u8"\n'
+        '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",LANGUAGE="en-US",NAME="American English - dubbed-auto",DEFAULT=NO,AUTOSELECT=YES,URI="dub-audio.m3u8"\n'
+        '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",LANGUAGE="it",NAME="Italiano - original",DEFAULT=NO,AUTOSELECT=YES,URI="audio-only.m3u8"\n'
         '#EXT-X-STREAM-INF:BANDWIDTH=500000,CODECS="avc1.42e01e,mp4a.40.2",AUDIO="aac"\n'
         'silent.m3u8\n')
     case('HLS alternate audio', 'alternate-audio.m3u8', 'HLS / MPEG-TS', 'H.264', 'AAC',

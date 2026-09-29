@@ -173,11 +173,69 @@ struct SourceChoiceChecks {
         try await delayedDiscoveryCapturesPreference(website: website, remux: remux1080, native: native720, prepareSource: prepareSource)
         try await explicitFallbackPreservesChoice(website: website, videoURL: videoURL, audioURL: audioURL, prepareSource: prepareSource)
         try await automaticFallbackUpgradesToBestRemux(website: website, audioURL: audioURL, prepareSource: prepareSource)
+        try await videoChoiceKeepsAudioLanguage(website: website, videoURL: videoURL,
+                                                audioURL: audioURL, prepareSource: prepareSource)
+        try await downscaleTargetGated(website: website, high: candidate(audioURL, title: "4K source",
+                                                                   id: "native-2160", height: 2160),
+                                       low: native1080)
         let alternate = candidate(videoURL, title: "Alternate remux", id: "alternate-remux",
                                   height: 2160, plannedPath: .remux)
         try await enhancementReload(website: website, source: native1080,
                                     alternate: alternate, preparer: preparer)
-        print("17/17 source-choice controller checks passed (no physical receiver)")
+        print("19/19 source-choice controller checks passed (no physical receiver)")
+    }
+
+    static func downscaleTargetGated(website: URL, high: MediaCandidate, low: MediaCandidate) async throws {
+        let resolver = ScriptedResolver([website.absoluteString: [.init(candidates: [high, low])]])
+        let controller = PlaybackController(resolveCandidates: { try await resolver.candidates(for: $0) },
+                                            prepareSource: nil)
+        try controller.load(website.absoluteString)
+        let status = try await settle(controller)
+        try check(status.quality == "2160p" && controller.requires4KOutput && controller.enhancementOutput4K,
+                  "Source above 1080p did not select the 4K enhancement target")
+        try failure(.unsupportedOperation) { try controller.setEnhancementOutput4K(false) }
+        try failure(.unsupportedOperation) { try controller.selectEnhancement(.cleanup1080) }
+        try check(controller.player.rate == 0 && status.videoEnhancement == .original,
+                  "Rejected downscale changed the paused player")
+        print("PASS source above 1080p requires 4K output and rejects 1080p enhancement")
+        await controller.shutdownAndWait()
+    }
+
+    static func videoChoiceKeepsAudioLanguage(website: URL, videoURL: URL, audioURL: URL,
+                                              prepareSource: @escaping @Sendable (ResolvedSource) async throws -> PreparedMedia) async throws {
+        let english = MediaTrack(url: URL(string: audioURL.absoluteString + "?lang=en")!)
+        let italian = MediaTrack(url: URL(string: audioURL.absoluteString + "?lang=it")!)
+        func option(_ video: URL, _ audio: MediaTrack, _ id: String, _ height: Double, _ language: String) -> MediaCandidate {
+            MediaCandidate(source: ResolvedSource(url: video, audio: audio, plannedPath: .remux),
+                           id: id, height: height, audioDescription: "\(language) · AAC")
+        }
+        let candidates = [option(videoURL, english, "high-en", 1080, "en"),
+                          option(videoURL, italian, "high-it", 1080, "it"),
+                          option(audioURL, english, "low-en", 720, "en"),
+                          option(audioURL, italian, "low-it", 720, "it")]
+        let resolver = ScriptedResolver([website.absoluteString: [.init(candidates: candidates)]])
+        let controller = PlaybackController(resolveCandidates: { try await resolver.candidates(for: $0) },
+                                            prepareSource: prepareSource)
+        try controller.load(website.absoluteString)
+        let automatic = try await settle(controller)
+        guard let highItalian = automatic.sources?.first(where: { $0.quality == "1080p" && $0.audio == "it · AAC" }) else {
+            throw NSError(domain: "SourceChoiceChecks", code: 20)
+        }
+        try controller.selectSource(highItalian.id)
+        let chosen = try await settle(controller)
+        guard let lowVideo = chosen.sources?.first(where: { $0.quality == "720p" && $0.audio == "en · AAC" }) else {
+            throw NSError(domain: "SourceChoiceChecks", code: 21)
+        }
+        try check(chosen.audioOptions?.count == 2 && chosen.audioOptions?.contains(where: { $0.label == "it · AAC" }) == true,
+                  "Audio selector did not expose both tracks for the chosen video")
+        try controller.selectVideo(lowVideo.id)
+        let switched = try await settle(controller)
+        let lowItalianID = switched.sources?.first(where: { $0.quality == "720p" && $0.audio == "it · AAC" })?.id
+        try check(switched.selectedSourceID == lowItalianID
+                  && switched.selectedAudioID == switched.audioOptions?.first(where: { $0.label == "it · AAC" })?.id,
+                  "Changing video discarded the available Italian audio track")
+        print("PASS video choice preserves the selected audio language when paired tracks offer it")
+        await controller.shutdownAndWait()
     }
 
     static func enhancementReload(website: URL, source: MediaCandidate,

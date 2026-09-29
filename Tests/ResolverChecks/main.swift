@@ -8,8 +8,9 @@ struct ResolverChecks {
     nonisolated static func check(_ condition: Bool, _ message: String) throws {
         if !condition { throw NSError(domain: "ResolverChecks", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
     }
-    static func expect(_ expected: ResolutionFailure, _ action: () async throws -> Void) async throws {
-        do { try await action(); throw NSError(domain: "Expected failure", code: 1) }
+    static func expect(_ expected: ResolutionFailure, file: StaticString = #fileID, line: UInt = #line,
+                       _ action: () async throws -> Void) async throws {
+        do { try await action(); throw NSError(domain: "Expected failure at \(file):\(line)", code: 1) }
         catch let error as ResolutionFailure { try check(error.reason == expected.reason, "Unexpected failure category") }
     }
     static func metadata(_ formats: [[String: Any]], extra: [String: Any] = [:]) throws -> Data {
@@ -189,7 +190,9 @@ struct ResolverChecks {
                   "Separate tracks or their inspected video evidence were not preserved for preparation")
         try check(try !SourceResolver.select(metadata([separateVideo, separateAudio, combined])).needsPreparation,
                   "Combined source did not retain priority over preparation")
-        try await expect(.preparationRequired) { _ = try SourceResolver.select(metadata([videoOnly, separateAudio])) }
+        let uhdRemux = try SourceResolver.select(metadata([videoOnly, separateAudio]))
+        try check(uhdRemux.playbackPath == .remux && uhdRemux.audio != nil,
+                  "Compatible 4K video was not offered for copy remux")
         try await expect(.preparationRequired) {
             _ = try SourceResolver.select(metadata([separateVideo, separateAudio], extra: ["http_headers": ["Cookie": "secret"]]))
         }
@@ -339,7 +342,7 @@ struct ResolverChecks {
                   "Remux fallback lost the conversion policy")
 
         // Review follow-up: order-independent identities, collision handling,
-        // high-resolution conversion, bounded labels and candidate caps.
+        // high-resolution remux, bounded labels and candidate caps.
         let reorderedFormats: [[String: Any]] = [nativeCombined, highH264, aacTrack, opusTrack]
         let forwardIDs = Set(try SourceResolver.candidates(metadata(reorderedFormats)).map(\.id))
         let reverseIDs = Set(try SourceResolver.candidates(metadata(Array(reorderedFormats.reversed()))).map(\.id))
@@ -357,9 +360,10 @@ struct ResolverChecks {
 
         let highResolution = highH264.merging(["height": 2160]) { _, rhs in rhs }
         let highResolutionData = try metadata([highResolution, aacTrack])
-        try await expect(.preparationRequired) { _ = try SourceResolver.select(highResolutionData) }
-        try check(try SourceResolver.select(highResolutionData, policy: .allowVideo).playbackPath == .videoConversion,
-                  "High-resolution SDR H.264 was not convertible under allowVideo")
+        try check(try SourceResolver.select(highResolutionData).playbackPath == .remux,
+                  "Compatible 4K SDR H.264 was not copied under the default policy")
+        try check(try SourceResolver.select(highResolutionData, policy: .allowVideo).playbackPath == .remux,
+                  "Allow-video policy converted compatible 4K SDR H.264")
         let highFPS = highH264.merging(["fps": 120]) { _, rhs in rhs }
         try check(try SourceResolver.select(metadata([highFPS, aacTrack]), policy: .allowVideo).playbackPath == .videoConversion,
                   "High-frame-rate H.264 was not convertible under allowVideo")
@@ -389,7 +393,7 @@ struct ResolverChecks {
         }
         try check(try SourceResolver.candidates(metadata(manyCombined)).count <= 12,
                   "Combined candidates were not capped")
-        print("PASS reordered-format identity, ambiguity rejection, high-resolution conversion, label bounds and option caps")
+        print("PASS reordered-format identity, ambiguity rejection, high-resolution remux, label bounds and option caps")
 
         // Cost-first caps: a flood of expensive high-resolution formats must not
         // hide a compatible H.264 remux, and the bounded set must not depend on
@@ -474,8 +478,8 @@ struct ResolverChecks {
         }, "Wider-than-4K input was not disabled")
         try await expect(.preparationRequired) { _ = try SourceResolver.select(wideInputData, policy: .allowVideo) }
         let wideOutput = highH264.merging(["width": 2560]) { _, rhs in rhs }
-        try check(try SourceResolver.select(metadata([wideOutput, aacTrack]), policy: .allowVideo).playbackPath == .videoConversion,
-                  "Wider-than-1080 SDR H.264 was not convertible under allowVideo")
+        try check(try SourceResolver.select(metadata([wideOutput, aacTrack]), policy: .allowVideo).playbackPath == .remux,
+                  "Wider-than-1080 SDR H.264 was not copied under allowVideo")
         print("PASS cost-first caps preserve H.264 remux, bounded sets are order-independent, identities survive URL rotation, duplicates/headers are handled, and width bounds apply")
 
         let masterURL = URL(string: "https://media.example/master.m3u8?signature=secret")!
@@ -489,6 +493,24 @@ struct ResolverChecks {
         let adaptiveVideo = separateVideo.merging(["protocol": "m3u8_native", "manifest_url": masterURL.absoluteString]) { _, rhs in rhs }
         let adaptiveData = try metadata([adaptiveVideo, separateVideo, separateAudio], extra: ["title": "HLS title"])
         try check(HLSMaster.hasAudioVideo(masterData, at: masterURL), "Alternate audio master was not recognized")
+        let dubbedMaster = """
+        #EXTM3U
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",LANGUAGE="en-US",NAME="American English - dubbed-auto",DEFAULT=NO,AUTOSELECT=YES,URI="dub.m3u8"
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",LANGUAGE="it",NAME="Italiano - original",DEFAULT=NO,AUTOSELECT=YES,URI="original.m3u8"
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac2",LANGUAGE="it",NAME="Italiano - original",DEFAULT=NO,AUTOSELECT=YES,URI="original2.m3u8"
+        #EXT-X-STREAM-INF:BANDWIDTH=4000000,CODECS="avc1.64002a,mp4a.40.2",RESOLUTION=1920x1080,AUDIO="aac"
+        video.m3u8
+        """
+        let alternateAudio = HLSMaster.audioOptions(Data(dubbedMaster.utf8), at: masterURL)
+        try check(alternateAudio.count == 2 && alternateAudio[0].language == "en-US"
+                  && alternateAudio[1].language == "it" && alternateAudio[1].isOriginal
+                  && !alternateAudio[0].isOriginal && !alternateAudio[0].isDefault,
+                  "Original Italian alternate audio was not distinguished from the English dub")
+        let dubbedSource = try await SourceResolver.selectWithHLS(metadata([adaptiveVideo])) { _ in
+            Data(dubbedMaster.utf8)
+        }
+        try check(dubbedSource.hlsAudioOptions == alternateAudio,
+                  "Direct HLS source lost its alternate audio choices")
         let native = try await SourceResolver.selectWithHLS(adaptiveData) { url in
             try check(url == masterURL, "Fetched a leaf rendition instead of the master")
             return masterData

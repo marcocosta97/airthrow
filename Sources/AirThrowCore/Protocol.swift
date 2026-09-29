@@ -236,21 +236,35 @@ public struct PlaybackSnapshot: Codable, Sendable, Equatable {
     public var sources: [SourceOptionSnapshot]?
     /// nil means automatic selection; explicit IDs expire when the item changes.
     public var selectedSourceID: String?
+    /// Audio choices for the current video presentation, including native HLS renditions.
+    public var audioOptions: [AudioOptionSnapshot]?
+    public var selectedAudioID: String?
     public var allowVideoConversion: Bool?
     /// Per-item request, absent when no item is loaded.
     public var videoEnhancement: VideoEnhancement?
     public init() {}
 }
 
+public struct AudioOptionSnapshot: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let label: String
+    public let unavailableReason: String?
+    public init(id: String, label: String, unavailableReason: String? = nil) {
+        self.id = id; self.label = label; self.unavailableReason = unavailableReason
+    }
+}
+
 public struct SourceOptionSnapshot: Codable, Sendable, Equatable, Identifiable {
     public let id: String
+    /// Session-scoped identity shared by presentations with the same video stream.
+    public let videoGroupID: String?
     public let quality: String
     public let audio: String?
     public let playbackPath: PlaybackPath
     public let unavailableReason: String?
     public init(id: String, quality: String, audio: String?, playbackPath: PlaybackPath,
-                unavailableReason: String?) {
-        self.id = id; self.quality = quality; self.audio = audio
+                unavailableReason: String?, videoGroupID: String? = nil) {
+        self.id = id; self.videoGroupID = videoGroupID; self.quality = quality; self.audio = audio
         self.playbackPath = playbackPath; self.unavailableReason = unavailableReason
     }
 }

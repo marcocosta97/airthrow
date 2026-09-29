@@ -3,25 +3,63 @@ import SwiftUI
 import AirThrowCore
 #endif
 
-/// The loaded item's video options: one compact, contextual popover for source
-/// quality and Mac-side enhancement. Both reload the item from the start,
-/// paused, on the shared player and keep the current receiver; neither asserts
-/// receiver playback. The source group appears only when the link offers more
-/// than one presentation, so a single-file load still reaches enhancement.
+/// The loaded item's video options: one compact, contextual popover for video
+/// source, audio track, and Mac-side enhancement. Source changes reload the
+/// item from the start, paused, on the shared player and keep the current
+/// receiver; neither asserts receiver playback. The video group appears only
+/// when the link offers more than one presentation, so a single-file load
+/// still reaches enhancement; the audio group appears only when the link
+/// offers more than one track.
 struct VideoMenuView: View {
     @ObservedObject var controller: PlaybackController
     @SwiftUI.State private var showingOptions = false
     private var status: PlaybackSnapshot { controller.snapshot }
     private var sources: [SourceOptionSnapshot] { status.sources ?? [] }
+    private var audioOptions: [AudioOptionSnapshot] { status.audioOptions ?? [] }
     private var enhancement: VideoEnhancement { status.videoEnhancement ?? .original }
     private var enhancementAction: EnhancementAction { .from(enhancement) }
-    private var sourceSelection: String { status.selectedSourceID ?? "automatic" }
+    private var audioSelection: String { status.selectedAudioID ?? "" }
+
+    /// One row per video presentation: audio-description variants of the same
+    /// quality and playback path collapse onto their first available member,
+    /// because audio variants belong to the dedicated audio picker.
+    private var videoOptions: [SourceOptionSnapshot] {
+        var representatives: [SourceOptionSnapshot] = []
+        var indexByPresentation: [String: Int] = [:]
+        for source in sources {
+            let key = presentationKey(source)
+            guard let index = indexByPresentation[key] else {
+                indexByPresentation[key] = representatives.count
+                representatives.append(source)
+                continue
+            }
+            if representatives[index].unavailableReason != nil, source.unavailableReason == nil {
+                representatives[index] = source
+            }
+        }
+        return representatives
+    }
+
+    private func presentationKey(_ source: SourceOptionSnapshot) -> String {
+        source.videoGroupID ?? "\(source.quality)#\(source.playbackPath.rawValue)"
+    }
+
+    /// The chosen presentation's representative, or "automatic" when nothing
+    /// is explicitly selected.
+    private var videoSelection: String {
+        guard let selected = sources.first(where: { $0.id == status.selectedSourceID })
+        else { return "automatic" }
+        let key = presentationKey(selected)
+        return videoOptions.first { presentationKey($0) == key }?.id ?? "automatic"
+    }
+
     private var isLive: Bool { status.isLive }
     private var busy: Bool { PlaybackPolicy.isBusy(status) }
     private var canChooseOutput: Bool { !isLive && enhancementAction != .original }
     private var outputHelp: String {
         if isLive { return "Enhancement is available only for on-demand video." }
         if enhancementAction == .original { return "Choose an enhancement to change the output resolution." }
+        if controller.requires4KOutput { return "This source is above 1080p, so enhancement uses 4K." }
         return "Changing the target reloads from the start, paused."
     }
 
@@ -34,7 +72,7 @@ struct VideoMenuView: View {
 
     private var menuLabel: String {
         if enhancement != .original { return enhancement.label }
-        if sources.count > 1 { return sourceLabel }
+        if videoOptions.count > 1 { return sourceLabel }
         if let quality = status.quality { return "Original · \(quality)" }
         return "Original"
     }
@@ -43,7 +81,7 @@ struct VideoMenuView: View {
         if isLive {
             return "Enhancement is only for on-demand video. This live stream can only change source quality."
         }
-        return "Choose this video's source and enhancement. Changes reload from the start, paused, and keep the receiver. 4K needs a compatible receiver."
+        return "Choose this video's source, audio track, and enhancement. Video or enhancement changes reload paused; direct audio changes on the current item. 4K needs a compatible receiver."
     }
 
     var body: some View {
@@ -65,14 +103,14 @@ struct VideoMenuView: View {
         .popover(isPresented: $showingOptions,
                  attachmentAnchor: .point(.bottomLeading), arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 10) {
-                if sources.count > 1 {
-                    Text("Source").font(.subheadline.weight(.medium))
-                    Picker("Source", selection: Binding(get: { sourceSelection }, set: { chooseSource($0) })) {
+                if videoOptions.count > 1 {
+                    Text("Video").font(.subheadline.weight(.medium))
+                    Picker("Video", selection: Binding(get: { videoSelection }, set: { chooseSource($0) })) {
                         Text("Automatic").tag("automatic")
-                        ForEach(sources) { source in
-                            Text(sourceRow(source))
-                                .tag(source.id)
-                                .disabled(source.unavailableReason != nil)
+                        ForEach(videoOptions) { option in
+                            Text(videoRow(option))
+                                .tag(option.id)
+                                .disabled(option.unavailableReason != nil)
                         }
                     }
                     .pickerStyle(.menu)
@@ -81,12 +119,28 @@ struct VideoMenuView: View {
                         .font(.caption).foregroundStyle(.secondary)
                     Divider()
                 }
+                if audioOptions.count > 1 {
+                    Text("Audio").font(.subheadline.weight(.medium))
+                    Picker("Audio", selection: Binding(get: { audioSelection }, set: { chooseAudio($0) })) {
+                        if status.selectedAudioID == nil {
+                            Text("Choose audio").tag("").disabled(true)
+                        }
+                        ForEach(audioOptions) { option in
+                            Text(audioRow(option))
+                                .tag(option.id)
+                                .disabled(option.unavailableReason != nil)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    Divider()
+                }
                 Text("Upscale output")
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(canChooseOutput ? Color.primary : Color.secondary)
                 Picker("Upscale output", selection: Binding(get: { controller.enhancementOutput4K },
                                                           set: { chooseOutput4K($0) })) {
-                    Text("1080p").tag(false)
+                    Text("1080p").tag(false).disabled(controller.requires4KOutput)
                     Text("4K").tag(true)
                 }
                 .pickerStyle(.segmented)
@@ -110,15 +164,28 @@ struct VideoMenuView: View {
         }
     }
 
-    private func sourceRow(_ source: SourceOptionSnapshot) -> String {
-        [source.quality, source.playbackPath.label, source.audio, source.unavailableReason]
+    private func videoRow(_ source: SourceOptionSnapshot) -> String {
+        [source.quality, source.playbackPath.label, source.unavailableReason]
             .compactMap { $0 }.joined(separator: " · ")
     }
 
+    private func audioRow(_ option: AudioOptionSnapshot) -> String {
+        [option.label, option.unavailableReason].compactMap { $0 }.joined(separator: " · ")
+    }
+
     private func chooseSource(_ id: String) {
-        guard id != sourceSelection || status.state == .failed else { return }
+        guard id != videoSelection || status.state == .failed else { return }
         do {
-            try controller.selectSource(id)
+            try controller.selectVideo(id)
+            showingOptions = false
+        }
+        catch { controller.displayError(error) }
+    }
+
+    private func chooseAudio(_ id: String) {
+        guard id != audioSelection else { return }
+        do {
+            try controller.selectAudio(id)
             showingOptions = false
         }
         catch { controller.displayError(error) }

@@ -54,9 +54,17 @@ final class PlaybackController: ObservableObject {
     /// `.original` for every new item; a source-quality change keeps it.
     private var videoEnhancement: VideoEnhancement = .original
     @Published private(set) var enhancementOutput4K = false
+    var requires4KOutput: Bool {
+        guard let selectedSource else { return false }
+        return (sourceCandidates.first {
+            $0.source.url == selectedSource.url && $0.source.audio?.url == selectedSource.audio?.url
+        }?.height ?? 0) > 1080
+    }
     private var originalSourceURL: URL?
     private var sourceCandidates: [MediaCandidate] = []
     private var sourceChoice: String?
+    private var selectedNativeAudioID: String?
+    private var nativeAudioGroup: AVMediaSelectionGroup?
     private var changingSource = false
     private var sourceOptionsGeneration = UUID()
     private var actualPlaybackPath: PlaybackPath?
@@ -208,6 +216,64 @@ final class PlaybackController: ObservableObject {
                   enhancementOutput4K: enhancementOutput4K)
     }
 
+    /// A video choice keeps the current language if the new paired video offers it.
+    func selectVideo(_ optionID: String) throws {
+        guard optionID != "automatic",
+              let index = sourceCandidates.indices.first(where: { sourceOptionID($0) == optionID }) else {
+            try selectSource(optionID)
+            return
+        }
+        let picked = sourceCandidates[index]
+        guard picked.source.audio != nil, let language = preferredAudioLanguage else {
+            try selectSource(optionID)
+            return
+        }
+        let matching = sourceCandidates.indices.first { candidateIndex in
+            let candidate = sourceCandidates[candidateIndex]
+            return candidate.source.url == picked.source.url
+                && candidate.source.headers == picked.source.headers
+                && candidate.source.playbackPath == picked.source.playbackPath
+                && candidate.audioDescription?.components(separatedBy: " · ").first == language
+                && candidate.unavailableReason(for: effectiveConversionPolicy) == nil
+        }
+        try selectSource(sourceOptionID(matching ?? index))
+    }
+
+    private var preferredAudioLanguage: String? {
+        if let selectedNativeAudioID {
+            return selectedSource?.hlsAudioOptions.first(where: { $0.id == selectedNativeAudioID })?.language
+        }
+        guard let selectedSource else { return nil }
+        return sourceCandidates.first {
+            $0.source.url == selectedSource.url && $0.source.audio?.url == selectedSource.audio?.url
+        }?.audioDescription?.components(separatedBy: " · ").first
+    }
+
+    /// Native HLS audio changes on the installed item. A paired-file audio
+    /// choice uses the existing source reload so its tracks remain in sync.
+    func selectAudio(_ optionID: String) throws {
+        guard !loadInProgress, let selectedSource else {
+            throw AppFailure(.unsupportedOperation, "Wait for the video to finish loading.")
+        }
+        guard let choice = audioChoices.first(where: { $0.snapshot.id == optionID }) else {
+            throw AppFailure(.invalidRequest, "This audio choice has expired. Open Audio again.")
+        }
+        switch choice.kind {
+        case .native(let index):
+            guard let item = mediaItem, let group = nativeAudioGroup,
+                  selectedSource.hlsAudioOptions.indices.contains(index),
+                  let option = Self.matchAudio(selectedSource.hlsAudioOptions[index], in: group) else {
+                throw AppFailure(.unsupportedOperation, "This audio track is unavailable in the direct stream.")
+            }
+            player.appliesMediaSelectionCriteriaAutomatically = false
+            item.select(option, in: group)
+            selectedNativeAudioID = selectedSource.hlsAudioOptions[index].id
+            refresh()
+        case .candidate(let index):
+            try selectSource(sourceOptionID(index))
+        }
+    }
+
     /// The popover's resolution control. On Original it only selects the
     /// resolution for the next enhancement. On an active preset it prepares the
     /// matching output and reloads paused through the existing item path.
@@ -219,6 +285,9 @@ final class PlaybackController: ObservableObject {
             throw AppFailure(.unsupportedOperation, "Enhancement is available for on-demand video, not live streams.")
         }
         guard enabled != enhancementOutput4K else { return }
+        guard enabled || !requires4KOutput else {
+            throw AppFailure(.unsupportedOperation, "This source is above 1080p. Choose 4K to avoid downscaling.")
+        }
         switch videoEnhancement {
         case .original:
             enhancementOutput4K = enabled
@@ -242,6 +311,9 @@ final class PlaybackController: ObservableObject {
             throw AppFailure(.unsupportedOperation, "Enhancement is available for on-demand video, not live streams.")
         }
         guard enhancement != videoEnhancement else { return }
+        guard enhancement.targetHeight != 1080 || !requires4KOutput else {
+            throw AppFailure(.unsupportedOperation, "This source is above 1080p. Choose 4K to avoid downscaling.")
+        }
         let pinnedSourceID: String?
         if sourceChoice == nil, let selectedSource {
             pinnedSourceID = sourceCandidates.first(where: {
@@ -255,6 +327,50 @@ final class PlaybackController: ObservableObject {
     }
 
     private func sourceOptionID(_ index: Int) -> String { "\(sourceOptionsGeneration.uuidString)-\(index)" }
+
+    private enum AudioChoiceKind { case native(Int), candidate(Int) }
+    private struct AudioChoice {
+        let snapshot: AudioOptionSnapshot
+        let kind: AudioChoiceKind
+    }
+
+    private var audioChoices: [AudioChoice] {
+        guard let selectedSource else { return [] }
+        if selectedSource.delivery == .hls && selectedSource.playbackPath == .direct {
+            return selectedSource.hlsAudioOptions.enumerated().map { index, option in
+                AudioChoice(snapshot: AudioOptionSnapshot(
+                    id: "\(sourceOptionsGeneration.uuidString)-audio-native-\(index)",
+                    label: option.name), kind: .native(index))
+            }
+        }
+        guard let current = sourceCandidates.first(where: {
+            $0.source.url == selectedSource.url && $0.source.audio?.url == selectedSource.audio?.url
+        }), current.source.audio != nil else { return [] }
+        return sourceCandidates.enumerated().compactMap { index, candidate in
+            guard candidate.source.url == current.source.url,
+                  candidate.source.headers == current.source.headers,
+                  candidate.source.playbackPath == current.source.playbackPath,
+                  let label = candidate.audioDescription else { return nil }
+            return AudioChoice(snapshot: AudioOptionSnapshot(
+                id: "\(sourceOptionsGeneration.uuidString)-audio-candidate-\(index)",
+                label: label,
+                unavailableReason: candidate.unavailableReason(for: effectiveConversionPolicy)),
+                kind: .candidate(index))
+        }
+    }
+
+    private static func matchAudio(_ choice: HLSAudioOption, in group: AVMediaSelectionGroup) -> AVMediaSelectionOption? {
+        let matches = group.options.filter { option in
+            guard let language = choice.language, let locale = option.locale else { return false }
+            let wanted = language.lowercased().replacingOccurrences(of: "_", with: "-")
+            let available = locale.identifier.lowercased().replacingOccurrences(of: "_", with: "-")
+            return available == wanted || available.split(separator: "-").first == wanted.split(separator: "-").first
+        }
+        if matches.count == 1 { return matches[0] }
+        return (matches.isEmpty ? group.options : matches).first {
+            $0.displayName.localizedCaseInsensitiveCompare(choice.name) == .orderedSame
+        }
+    }
 
     /// Short quality label for a candidate, e.g. "720p60". Frame rate only
     /// appears above 30 so ordinary presentations stay "720p".
@@ -278,9 +394,20 @@ final class PlaybackController: ObservableObject {
         return qualityLabel(candidate)
     }
 
+    private static func candidatesHeight(for source: ResolvedSource, in candidates: [MediaCandidate]) -> Double? {
+        candidates.first {
+            $0.source.url == source.url && $0.source.audio?.url == source.audio?.url
+        }?.height
+    }
+
     private var sourceOptions: [SourceOptionSnapshot]? {
         guard !sourceCandidates.isEmpty else { return nil }
         return sourceCandidates.enumerated().map { index, candidate in
+            let videoIndex = sourceCandidates.firstIndex {
+                $0.source.url == candidate.source.url &&
+                $0.source.headers == candidate.source.headers &&
+                $0.source.playbackPath == candidate.source.playbackPath
+            } ?? index
             let quality: String
             if let base = Self.qualityLabel(candidate) {
                 quality = base + (candidate.source.delivery == .hls ? " maximum (adaptive)" : "")
@@ -289,7 +416,8 @@ final class PlaybackController: ObservableObject {
                 audio: candidate.audioDescription, playbackPath: candidate.source.playbackPath,
                 unavailableReason: sourceCandidates.filter({ $0.id == candidate.id }).count > 1
                     ? "This source cannot be identified uniquely. Choose Automatic."
-                    : candidate.unavailableReason(for: effectiveConversionPolicy))
+                    : candidate.unavailableReason(for: effectiveConversionPolicy),
+                videoGroupID: "\(sourceOptionsGeneration.uuidString)-video-\(videoIndex)")
         }
     }
 
@@ -393,10 +521,16 @@ final class PlaybackController: ObservableObject {
                 }
                 // An explicit enhancement prepares this item's video on the Mac;
                 // the source choice above is preserved and only the plan changes.
-                if preferences.enhancement != .original {
-                    source = source.withEnhancement(preferences.enhancement)
-                }
                 guard let self, !Task.isCancelled, self.generation == id else { return }
+                var appliedEnhancement = preferences.enhancement
+                let sourceHeight = Self.candidatesHeight(for: source, in: self.sourceCandidates)
+                if (sourceHeight ?? 0) > 1080 {
+                    if appliedEnhancement == .upscale1080 { appliedEnhancement = .upscale4K }
+                    if appliedEnhancement == .cleanup1080 { appliedEnhancement = .cleanup4K }
+                }
+                if appliedEnhancement != .original { source = source.withEnhancement(appliedEnhancement) }
+                self.videoEnhancement = appliedEnhancement
+                if (sourceHeight ?? 0) > 1080 { self.enhancementOutput4K = true }
                 self.selectedSource = source
                 // Works for the remux fallback too: it reuses the original
                 // candidates, so the fallback keeps the source's quality label.
@@ -437,17 +571,15 @@ final class PlaybackController: ObservableObject {
                 // HLS may expose alternate audio as media-selection options.
                 // An inspection error is unknown, not proof of a silent source.
                 let audio = try? await asset.loadTracks(withMediaType: .audio)
+                let audibleGroup = try? await asset.loadMediaSelectionGroup(for: .audible)
                 let metadataTitle = await self.metadataTitle(from: asset)
                 var detectedAudio: Bool?
                 if let audio {
                     if !audio.isEmpty {
                         detectedAudio = true
                     } else {
-                        do {
-                            let group = try await asset.loadMediaSelectionGroup(for: .audible)
-                            // Empty AVAsset tracks/options are inconclusive for HLS.
-                            detectedAudio = group?.options.isEmpty == false ? true : (video.isEmpty ? nil : false)
-                        } catch { detectedAudio = nil }
+                        // Empty AVAsset tracks/options are inconclusive for HLS.
+                        detectedAudio = audibleGroup?.options.isEmpty == false ? true : (video.isEmpty ? nil : false)
                     }
                 }
                 guard !Task.isCancelled, self.generation == id, self.failure == nil else { return }
@@ -473,6 +605,26 @@ final class PlaybackController: ObservableObject {
                 self.hasAudio = detectedAudio
                 if source.title == nil, let metadataTitle { self.title = metadataTitle }
                 let item = AVPlayerItem(asset: asset)
+                self.nativeAudioGroup = nil
+                self.selectedNativeAudioID = nil
+                if source.delivery == .hls, source.playbackPath == .direct,
+                   let group = audibleGroup, !source.hlsAudioOptions.isEmpty {
+                    self.nativeAudioGroup = group
+                    // YouTube can mark both the original and a dub DEFAULT=NO.
+                    // Prefer the explicitly identified original over the Mac's
+                    // system language, then the manifest's default if present.
+                    let preferred = source.hlsAudioOptions.first(where: { $0.isOriginal })
+                        ?? source.hlsAudioOptions.first(where: { $0.isDefault })
+                    if let preferred, let option = Self.matchAudio(preferred, in: group) {
+                        self.player.appliesMediaSelectionCriteriaAutomatically = false
+                        item.select(option, in: group)
+                        self.selectedNativeAudioID = preferred.id
+                    } else {
+                        self.player.appliesMediaSelectionCriteriaAutomatically = true
+                    }
+                } else {
+                    self.player.appliesMediaSelectionCriteriaAutomatically = true
+                }
                 // Keep local HLS updates flowing while Load stays paused.
                 if self.preparedMedia?.url.pathExtension == "m3u8" {
                     item.canUseNetworkResourcesForLiveStreamingWhilePaused = true
@@ -563,6 +715,11 @@ final class PlaybackController: ObservableObject {
                     self.selectedQuality = Self.qualityLabel(height: height, frameRate: frameRate)
                     self.fail(.preparationRequired,
                               message: "This source needs video conversion. Turn off Avoid video conversion in Settings, then reload.")
+                    return
+                }
+                if case PreparationFailure.conversionWouldDownscale = error {
+                    self.fail(.preparationRequired,
+                              message: "This output would downscale the source. Choose 4K or Original.")
                     return
                 }
                 // Keep a validator's specific message instead of flattening it to
@@ -924,6 +1081,8 @@ final class PlaybackController: ObservableObject {
         originalSourceURL = nil
         sourceCandidates = []
         sourceChoice = nil
+        selectedNativeAudioID = nil
+        nativeAudioGroup = nil
         changingSource = false
         sourceOptionsGeneration = UUID()
         actualPlaybackPath = nil
@@ -1107,6 +1266,17 @@ final class PlaybackController: ObservableObject {
             ? (actualPlaybackPath ?? (preparing ? selectedSource?.plannedPath : selectedSource?.playbackPath)) : nil
         next.quality = selectedQuality
         next.sources = sourceOptions
+        let choices = audioChoices
+        next.audioOptions = choices.count > 1 ? choices.map(\.snapshot) : nil
+        if let selectedNativeAudioID,
+           let index = selectedSource?.hlsAudioOptions.firstIndex(where: { $0.id == selectedNativeAudioID }) {
+            next.selectedAudioID = "\(sourceOptionsGeneration.uuidString)-audio-native-\(index)"
+        } else if let selectedSource,
+                  let index = sourceCandidates.firstIndex(where: {
+                      $0.source.url == selectedSource.url && $0.source.audio?.url == selectedSource.audio?.url
+                  }), sourceCandidates[index].source.audio != nil {
+            next.selectedAudioID = "\(sourceOptionsGeneration.uuidString)-audio-candidate-\(index)"
+        }
         if let sourceChoice, let index = sourceCandidates.firstIndex(where: { $0.id == sourceChoice }) {
             next.selectedSourceID = sourceOptionID(index)
         }
