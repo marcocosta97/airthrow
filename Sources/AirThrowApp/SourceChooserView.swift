@@ -18,6 +18,12 @@ struct VideoMenuView: View {
     private var sourceSelection: String { status.selectedSourceID ?? "automatic" }
     private var isLive: Bool { status.isLive }
     private var busy: Bool { PlaybackPolicy.isBusy(status) }
+    private var canChooseOutput: Bool { !isLive && enhancementAction != .original }
+    private var outputHelp: String {
+        if isLive { return "Enhancement is available only for on-demand video." }
+        if enhancementAction == .original { return "Choose an enhancement to change the output resolution." }
+        return "Changing the target reloads from the start, paused."
+    }
 
     /// The chosen source, independent of any prepared output quality.
     private var sourceLabel: String {
@@ -75,7 +81,9 @@ struct VideoMenuView: View {
                         .font(.caption).foregroundStyle(.secondary)
                     Divider()
                 }
-                Text("Upscale output").font(.subheadline.weight(.medium))
+                Text("Upscale output")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(canChooseOutput ? Color.primary : Color.secondary)
                 Picker("Upscale output", selection: Binding(get: { controller.enhancementOutput4K },
                                                           set: { chooseOutput4K($0) })) {
                     Text("1080p").tag(false)
@@ -84,8 +92,8 @@ struct VideoMenuView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .frame(maxWidth: .infinity)
-                .disabled(isLive)
-                .help("With an active enhancement, changing the target reloads from the start, paused.")
+                .disabled(!canChooseOutput)
+                .help(outputHelp)
                 Text("Enhancement").font(.subheadline.weight(.medium))
                 Picker("Enhancement", selection: Binding(get: { enhancementAction },
                                                          set: { chooseAction($0) })) {
@@ -127,10 +135,10 @@ struct VideoMenuView: View {
     }
 
     private func chooseOutput4K(_ enabled: Bool) {
-        guard enabled != controller.enhancementOutput4K else { return }
+        guard canChooseOutput, enabled != controller.enhancementOutput4K else { return }
         do {
             try controller.setEnhancementOutput4K(enabled)
-            if enhancementAction != .original { showingOptions = false }
+            showingOptions = false
         }
         catch { controller.displayError(error) }
     }

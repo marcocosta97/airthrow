@@ -55,8 +55,8 @@ next load or source choice; an in-flight preparation keeps its captured
 settings. Automatic compatibility conversion produces H.264/AAC up to 1080p/60
 without upscaling. The loaded item's **Video** popover has a 1080p/4K output
 segmented control and three enhancement choices: Original, Upscale, and Clean up
-and upscale. The control selects a target for the next enhancement while
-Original is active; on an active enhancement it reloads the item at the new resolution. An
+and upscale. The output control is disabled on Original and retains the last
+target. On an active enhancement it reloads the item at the new resolution. An
 explicit preset authorizes a video encode only for that item, even when the
 global preference avoids conversion. It reloads from the start, paused, on the
 same player and route; Stop, replacement, and playlist navigation reset it to
