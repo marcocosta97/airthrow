@@ -202,7 +202,7 @@ struct PreparationChecks {
         videoConverted.stop()
 
         // Compatible 4K SDR video is copied through a remux. An explicitly
-        // requested 1080p enhancement may still downscale it.
+        // requested 1080p enhancement must not downscale it.
         let uhdSource = ResolvedSource(url: URL(string: base + "/uhd.mkv")!,
                                        needsPreparation: true, conversionPolicy: .allowVideo)
         let uhdConverted = try await preparer.prepare(uhdSource, mode: .completeFile)
@@ -218,10 +218,10 @@ struct PreparationChecks {
         let (hevcData, _) = try await fetch(hevcCopy.url)
         try hevcData.write(to: directory.appendingPathComponent("hevc-remuxed.mp4"))
         hevcCopy.stop()
-        let uhdDownscaled = try await preparer.prepare(uhdSource.withEnhancement(.upscale1080))
-        try check(uhdDownscaled.playbackPath == .videoConversion && uhdDownscaled.videoHeight == 1080,
-                  "Explicit 1080p preparation did not downscale a 4K source")
-        uhdDownscaled.stop()
+        do {
+            _ = try await preparer.prepare(uhdSource.withEnhancement(.upscale1080))
+            try check(false, "Explicit 1080p preparation downscaled a 4K source")
+        } catch PreparationFailure.conversionWouldDownscale {}
         for choice in [VideoEnhancement.upscale1080, .cleanup1080, .upscale4K, .cleanup4K] {
             print("Checking enhancement \(choice.rawValue)")
             let enhanced = try await preparer.prepare(source.withEnhancement(choice))

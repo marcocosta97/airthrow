@@ -10,11 +10,11 @@ private func completionTolerance(for duration: Double) -> Double {
 }
 
 public enum PreparationFailure: Error, Sendable, Equatable {
-    case unavailable, unsupported, videoConversionRequired(height: Int?, frameRate: Double?), failed, limit, delivery
+    case unavailable, unsupported, videoConversionRequired(height: Int?, frameRate: Double?), conversionWouldDownscale, failed, limit, delivery
     public var reason: MediaFailureReason {
         switch self {
         case .unavailable: .preparerUnavailable
-        case .unsupported, .videoConversionRequired: .preparationRequired
+        case .unsupported, .videoConversionRequired, .conversionWouldDownscale: .preparationRequired
         case .failed: .preparationFailed
         case .limit: .preparationLimit
         case .delivery: .deliveryUnavailable
@@ -581,7 +581,19 @@ public struct MediaPreparer: Sendable {
         guard videoAction == .copy || policy == .allowVideo else {
             throw PreparationFailure.videoConversionRequired(height: video.height, frameRate: video.frameRate)
         }
-        if videoAction == .convert && !video.convertibleVideo { throw PreparationFailure.unsupported }
+        if videoAction == .convert {
+            guard video.convertibleVideo else { throw PreparationFailure.unsupported }
+            let maxWidth = enhancement.targetHeight == 2160 ? 3840 : 1920
+            let maxHeight = enhancement.targetHeight == 2160 ? 2160 : 1080
+            // The scale filter preserves aspect ratio inside this output box.
+            // If either source dimension exceeds the box, it would shrink the
+            // picture. Odd dimensions can also lose a pixel when made even.
+            guard let width = video.width, let height = video.height,
+                  width <= maxWidth, height <= maxHeight,
+                  width.isMultiple(of: 2), height.isMultiple(of: 2) else {
+                throw PreparationFailure.conversionWouldDownscale
+            }
+        }
         return PreparationPlan(video: video, audio: audio, audioInput: separateAudio ? 1 : 0,
                                videoAction: videoAction, audioAction: audio.copyableAudio ? .copy : .convert,
                                enhancement: enhancement)
@@ -710,6 +722,10 @@ public struct MediaPreparer: Sendable {
                    : true),
                   let fps = video.frameRate, fps.isFinite, fps > 0, fps <= 60.5 else {
                 throw PreparationFailure.failed
+            }
+            guard let inputWidth = plan.video.width, let inputHeight = plan.video.height,
+                  (video.width ?? 0) >= inputWidth, (video.height ?? 0) >= inputHeight else {
+                throw PreparationFailure.conversionWouldDownscale
             }
         } else {
             // Video is copied: it must still match the inspected source stream.
