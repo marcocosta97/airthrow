@@ -57,29 +57,14 @@ containers may be prepared or converted on the Mac first.
 
 ## Limitations
 
-- Video conversion is optional and off by default. For finite SDR video, the
-  loaded item's **Video** popover offers a 1080p/4K segmented control and
-  **Upscale** or **Clean up and upscale**. Select an enhancement to enable the
-  resolution control. The Mac prepares a new file before playback; choosing a
-  preset reloads from the start, paused. 4K output uses HEVC and
-  requires a compatible receiver. Compatible 4K H.264 or 8-bit SDR HEVC can
-  also pass through a remux without downscaling. Enhancements never reduce the
-  source resolution; sources above 1080p require the 4K target.
-- The Video popover groups video presentation, audio track, and subtitles under
-  Source.
-  Multiple formats with the same visible resolution and processing path share
-  one video choice. You can choose a source before connecting a receiver. For direct
-  HLS with alternate audio, AirThrow prefers a track identified as original
-  and lets you switch tracks on the current player item.
-- Direct MP4/MOV and HLS expose subtitle tracks when AVFoundation provides
-  native legible choices. Finite media prepared from supported text subtitles
-  (including SRT, WebVTT, and ASS/SSA) retains up to eight selectable tracks in
-  the MP4 output. Image-based subtitles and subtitle burn-in are not supported.
-  A live stream that must be prepared on the Mac does not yet retain its text
-  subtitles; direct HLS can expose its native subtitle renditions.
-- HDR/Dolby Vision enhancement or tone mapping, AI Super Resolution, and
-  surround preservation are not supported yet. A prepared file
-  passing local checks does not guarantee playback on a particular receiver.
+- Video conversion is off by default. Optional **Upscale** and **Clean up and
+  upscale** work on finite SDR video at 1080p or 4K; 4K requires a compatible
+  receiver. Enhancements never downscale.
+- Native subtitles are available when the media exposes supported tracks.
+  Image-based subtitles, burn-in, and subtitles in Mac-prepared live streams are
+  unsupported.
+- HDR/Dolby Vision processing, AI Super Resolution, and surround preservation
+  are unsupported. Receiver compatibility still depends on the device.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for project layout, architecture, and
 testing details.
