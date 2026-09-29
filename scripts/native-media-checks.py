@@ -98,15 +98,48 @@ if (out / 'silent.m3u8').exists() and (out / 'audio-only.m3u8').exists():
         'silent.m3u8\n')
     case('HLS alternate audio', 'alternate-audio.m3u8', 'HLS / MPEG-TS', 'H.264', 'AAC',
          expected='awaiting_receiver', has_audio=True)
+if (out / 'stream.m3u8').exists():
+    for language, word in [('it', 'Ciao'), ('en', 'Hello')]:
+        (out / f'subtitle-{language}.vtt').write_text(
+            'WEBVTT\nX-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:0\n\n'
+            f'00:00:00.200 --> 00:00:01.200\n{word}\n', encoding='utf-8')
+        (out / f'subtitle-{language}.m3u8').write_text(
+            '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:3\n'
+            '#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n'
+            f'#EXTINF:2.083333,\nsubtitle-{language}.vtt\n#EXT-X-ENDLIST\n', encoding='utf-8')
+    (out / 'alternate-subtitles.m3u8').write_text(
+        '#EXTM3U\n#EXT-X-VERSION:3\n'
+        '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",LANGUAGE="it",NAME="Italiano",DEFAULT=NO,AUTOSELECT=YES,URI="subtitle-it.m3u8"\n'
+        '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",LANGUAGE="en",NAME="English",DEFAULT=NO,AUTOSELECT=YES,URI="subtitle-en.m3u8"\n'
+        '#EXT-X-STREAM-INF:BANDWIDTH=800000,CODECS="avc1.42e01e,mp4a.40.2,wvtt",SUBTITLES="subs"\n'
+        'stream.m3u8\n', encoding='utf-8')
+    case('HLS selectable subtitles', 'alternate-subtitles.m3u8', 'HLS / WebVTT', 'H.264', 'AAC',
+         expected='awaiting_receiver', has_audio=True)
+if ffmpeg:
+    (out / 'it.srt').write_text('1\n00:00:00,200 --> 00:00:01,200\nCiao\n', encoding='utf-8')
+    (out / 'en.srt').write_text('1\n00:00:00,200 --> 00:00:01,200\nHello\n', encoding='utf-8')
+    try:
+        run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-n',
+             '-i', out / 'audio.mp4', '-i', out / 'it.srt', '-i', out / 'en.srt',
+             '-map', '0:v:0', '-map', '0:a:0', '-map', '1:s:0', '-map', '2:s:0',
+             '-c:v', 'copy', '-c:a', 'copy', '-c:s', 'mov_text',
+             '-metadata:s:s:0', 'language=ita', '-metadata:s:s:1', 'language=eng',
+             out / 'direct-subtitles.mp4'])
+        case('MP4 selectable subtitles', 'direct-subtitles.mp4', 'MP4', 'H.264', 'AAC',
+             expected='awaiting_receiver', has_audio=True)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        case('MP4 selectable subtitles', None, 'MP4', 'H.264', 'AAC',
+             skipped='Subtitle fixture generation failed')
 (out / 'fixtures.json').write_text(json.dumps(cases, indent=2) + '\n')
 
 # Only expose generated fixtures. URL query strings are ignored and never logged.
-files = {p.name: p for p in out.iterdir() if p.suffix in {'.mp4', '.mov', '.wav', '.mkv', '.webm', '.m3u8', '.ts'}}
+files = {p.name: p for p in out.iterdir() if p.suffix in {'.mp4', '.mov', '.wav', '.mkv', '.webm', '.m3u8', '.ts', '.vtt'}}
 files['slow.mp4'] = out / 'video.mp4'
 if (out / 'stream.m3u8').exists():
     files['hls-no-extension'] = out / 'stream.m3u8'
 mime = {'.mp4': 'video/mp4', '.mov': 'video/quicktime', '.wav': 'audio/wav',
-        '.mkv': 'video/x-matroska', '.webm': 'video/webm', '.m3u8': 'application/vnd.apple.mpegurl', '.ts': 'video/mp2t'}
+        '.mkv': 'video/x-matroska', '.webm': 'video/webm', '.m3u8': 'application/vnd.apple.mpegurl',
+        '.ts': 'video/mp2t', '.vtt': 'text/vtt'}
 
 
 class Handler(http.server.BaseHTTPRequestHandler):

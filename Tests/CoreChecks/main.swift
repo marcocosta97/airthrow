@@ -291,7 +291,8 @@ let tests: [(String, () throws -> Void)] = [
         let legacy = Data(#"{"state":"idle","externalPlaybackActive":false,"seekableRanges":[],"title":"No video loaded","isLive":false}"#.utf8)
         let decoded = try JSONDecoder().decode(PlaybackSnapshot.self, from: legacy)
         try check(decoded.sources == nil && decoded.selectedSourceID == nil && decoded.audioOptions == nil
-                  && decoded.selectedAudioID == nil && decoded.allowVideoConversion == nil,
+                  && decoded.selectedAudioID == nil && decoded.subtitleOptions == nil
+                  && decoded.selectedSubtitleID == nil && decoded.allowVideoConversion == nil,
                   "Legacy status invented source chooser fields")
         var status = PlaybackSnapshot()
         status.playbackPath = .remux
@@ -305,6 +306,9 @@ let tests: [(String, () throws -> Void)] = [
         status.selectedSourceID = "session-1"
         status.audioOptions = [AudioOptionSnapshot(id: "session-audio-0", label: "Italiano - original")]
         status.selectedAudioID = "session-audio-0"
+        status.subtitleOptions = [SubtitleOptionSnapshot(id: "session-subtitle-off", label: "Off"),
+                                  SubtitleOptionSnapshot(id: "session-subtitle-0", label: "Italiano")]
+        status.selectedSubtitleID = "session-subtitle-off"
         status.allowVideoConversion = true
         let data = try JSONEncoder().encode(status)
         try check(try JSONDecoder().decode(PlaybackSnapshot.self, from: data) == status,

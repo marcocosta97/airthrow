@@ -123,6 +123,84 @@ struct MediaChecks {
                       "Direct audio switch did not select the English track")
             await audioController.shutdownAndWait()
         }
+        if cases.contains(where: { $0.name == "MP4 selectable subtitles" && $0.path != nil }) {
+            let url = URL(string: base + "/direct-subtitles.mp4")!
+            let subtitleController = PlaybackController(prepareSource: nil)
+            try subtitleController.load(url.absoluteString)
+            let deadline = Date().addingTimeInterval(25)
+            while Date() < deadline && subtitleController.snapshot.state != .awaitingReceiver {
+                if subtitleController.snapshot.state == .failed { break }
+                try await Task.sleep(for: .milliseconds(50))
+                subtitleController.refresh()
+            }
+            try check(subtitleController.snapshot.state == .awaitingReceiver,
+                      "Direct subtitle item did not become ready")
+            let options = subtitleController.snapshot.subtitleOptions ?? []
+            try check(options.count >= 2 && options.contains(where: { $0.label == "Off" }),
+                      "Direct MP4 did not expose native subtitle tracks and Off")
+            let item = subtitleController.player.currentItem!
+            let group = try await item.asset.loadMediaSelectionGroup(for: .legible)
+            try check((group?.options.count ?? 0) >= 2 &&
+                      group?.options.contains(where: { $0.locale?.identifier.hasPrefix("it") == true }) == true &&
+                      group?.options.contains(where: { $0.locale?.identifier.hasPrefix("en") == true }) == true,
+                      "AVPlayer did not expose both MP4 subtitle languages")
+            guard let italian = options.first(where: { $0.label.localizedCaseInsensitiveContains("Italian") })
+                ?? options.first(where: { $0.label != "Off" }) else {
+                throw NSError(domain: "MediaChecks", code: 3)
+            }
+            try subtitleController.selectSubtitle(italian.id)
+            try check(subtitleController.player.currentItem === item && subtitleController.player.rate == 0,
+                      "Subtitle selection replaced the player item or started playback")
+            try check(subtitleController.snapshot.selectedSubtitleID == italian.id,
+                      "Selected native subtitle did not appear in status")
+            if let off = options.first(where: { $0.label == "Off" }) {
+                try subtitleController.selectSubtitle(off.id)
+                try check(subtitleController.snapshot.selectedSubtitleID == off.id,
+                          "Turning subtitles off did not update status")
+            }
+            await subtitleController.shutdownAndWait()
+        }
+        if cases.contains(where: { $0.name == "HLS selectable subtitles" && $0.path != nil }) {
+            let url = URL(string: base + "/alternate-subtitles.m3u8")!
+            let controller = PlaybackController(resolveCandidates: { _ in [
+                MediaCandidate(source: ResolvedSource(url: url, delivery: .hls,
+                                                      videoKnownPresent: true), height: 180)
+            ] }, prepareSource: nil)
+            try controller.load(url.absoluteString)
+            let deadline = Date().addingTimeInterval(25)
+            while Date() < deadline && controller.snapshot.state != .awaitingReceiver {
+                if controller.snapshot.state == .failed { break }
+                try await Task.sleep(for: .milliseconds(50))
+                controller.refresh()
+            }
+            try check(controller.snapshot.state == .awaitingReceiver,
+                      "Direct HLS subtitle item did not become ready")
+            let options = controller.snapshot.subtitleOptions ?? []
+            try check(options.contains(where: { $0.label == "Italian" }) &&
+                      options.contains(where: { $0.label == "English" }),
+                      "Direct HLS WebVTT alternatives were unavailable: \(options.map(\.label))")
+            let item = controller.player.currentItem!
+            let selected = options.first(where: { $0.label == "Italian" })!
+            try controller.selectSubtitle(selected.id)
+            try check(controller.snapshot.selectedSubtitleID == selected.id && controller.player.currentItem === item,
+                      "HLS subtitle switch replaced the player item")
+            try controller.selectSource("automatic")
+            let reloadDeadline = Date().addingTimeInterval(25)
+            while Date() < reloadDeadline && controller.snapshot.state != .awaitingReceiver {
+                if controller.snapshot.state == .failed { break }
+                try await Task.sleep(for: .milliseconds(50))
+                controller.refresh()
+            }
+            try check(controller.snapshot.state == .awaitingReceiver,
+                      "HLS source reload after subtitle selection did not become ready")
+            let replacement = controller.player.currentItem!
+            let replacementGroup = try await replacement.asset.loadMediaSelectionGroup(for: .legible)
+            try check(replacementGroup.flatMap {
+                replacement.currentMediaSelection.selectedMediaOption(in: $0)
+            }?.locale?.identifier.hasPrefix("it") == true,
+                      "Source reload did not retain the selected subtitle language")
+            await controller.shutdownAndWait()
+        }
         let controller = PlaybackController(prepareSource: nil)
         defer { controller.shutdown() }
         func settled(states: [PlaybackState] = [.awaitingReceiver, .failed], audio: Bool? = nil) async throws -> PlaybackSnapshot {

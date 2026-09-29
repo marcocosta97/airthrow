@@ -99,6 +99,18 @@ AVPlayer item. Paired-file audio choices use the existing paused source reload.
 If the master identifies no original, its declared default or AVPlayer's
 automatic selection applies.
 
+The **Subtitles** menu uses the installed item's AVFoundation legible media
+selection group, including an Off choice when allowed. Selecting a track does
+not replace the player item. A source or enhancement reload attempts to keep
+the selected language; a new item, playlist navigation, or Stop resets it.
+Direct HLS can expose WebVTT subtitle renditions. Finite preparation maps up to
+eight supported text subtitle streams into selectable MP4 `mov_text` tracks and
+uses complete-file output when a progressive HLS request carries subtitles.
+Image-based subtitles and burn-in are unsupported. Prepared live HLS currently
+retains video and audio but cannot expose separate subtitle renditions through
+its single MPEG-TS playlist. Receiver rendering and receiver-side selection
+require physical AirPlay validation.
+
 `source` IDs are session-scoped and expire on reload, replacement, or Stop.
 List sources again before choosing. Status exposes optional `sources`,
 `selectedSourceID` (absent for Automatic), and `allowVideoConversion`.

@@ -103,6 +103,38 @@ struct PreparationChecks {
         catch is URLError {}
         print("PASS remux, GET/HEAD, open/closed/suffix ranges, invalid ranges, token route and server shutdown")
 
+        // A finite text-subtitle input must keep both languages as native MP4
+        // tracks, even if progressive delivery was requested for other media.
+        let subtitleSource = ResolvedSource(url: URL(string: base + "/subtitles.mkv")!)
+        let subtitleMedia = try await preparer.prepare(subtitleSource, mode: .progressiveHLS)
+        try check(subtitleMedia.url.pathExtension == "mp4",
+                  "Finite subtitle input was sent through MPEG-TS instead of native MP4")
+        let (subtitleBytes, subtitleResponse) = try await fetch(subtitleMedia.url)
+        try check(subtitleResponse.statusCode == 200 && subtitleBytes.count > 1000,
+                  "Prepared file with subtitles was not delivered")
+        try subtitleBytes.write(to: directory.appendingPathComponent("subtitle-remuxed.mp4"))
+        let subtitleAsset = AVURLAsset(url: subtitleMedia.url)
+        let subtitleGroup = try await subtitleAsset.loadMediaSelectionGroup(for: .legible)
+        try check((subtitleGroup?.options.count ?? 0) >= 2 &&
+                  subtitleGroup?.options.contains(where: { $0.locale?.identifier.hasPrefix("it") == true }) == true &&
+                  subtitleGroup?.options.contains(where: { $0.locale?.identifier.hasPrefix("en") == true }) == true,
+                  "Prepared file did not expose both native subtitle languages: \(subtitleGroup?.options.map { "\($0.displayName):\($0.locale?.identifier ?? "nil")" } ?? [])")
+        subtitleMedia.stop()
+        print("PASS finite remux retains two selectable text subtitle tracks")
+
+        // Live MPEG-TS does not carry soft text tracks yet. A subtitle-bearing
+        // source must still keep its video/audio playback path working.
+        let liveSubtitleSource = ResolvedSource(url: URL(string: base + "/subtitles.mkv")!,
+                                                isLive: true)
+        let liveSubtitleMedia = try await preparer.prepare(liveSubtitleSource)
+        try check(liveSubtitleMedia.url.pathExtension == "m3u8",
+                  "Live subtitle source did not use HLS delivery")
+        await liveSubtitleMedia.waitForProducer()
+        try check(liveSubtitleMedia.productionFailure == nil,
+                  "Live subtitle source failed to prepare video and audio")
+        liveSubtitleMedia.stop()
+        print("PASS live preparation retains video/audio with unsupported text subtitles")
+
         let localFile = directory.appendingPathComponent("combined.mp4")
         let localSource = try await SourceResolver().resolve(MediaInput.localFile(localFile))
         var localDelivery: PreparedMedia? = try await preparer.prepare(localSource)

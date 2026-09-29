@@ -279,7 +279,7 @@ public struct MediaPreparer: Sendable {
         // A growing EVENT playlist is presented as live by AirPlay receivers,
         // even when its source duration is known. Hand off a finalized VOD file
         // for finite media so receiver seeking and host controls remain usable.
-        let mode = source.enhancement == .original
+        var mode = source.enhancement == .original
             ? (mode ?? (environment["AIRTHROW_PREPARATION_MODE"] == "progressive-hls" ? .progressiveHLS : .completeFile))
             : .completeFile
         try Task.checkCancellation()
@@ -311,6 +311,15 @@ public struct MediaPreparer: Sendable {
                 audioInput = try await probe(audio.url, headers: audio.headers, executable: ffprobe,
                                               hls: source.delivery == .hls)
             } else { audioInput = videoInput }
+            // Keep text subtitles as soft tracks in finite MP4 delivery. MPEG-TS
+            // EVENT output cannot carry these tracks as selectable renditions,
+            // so a finite request that has them uses the complete-file path.
+            let subtitleInputs: [(input: Int, stream: Stream)] =
+                videoInput.streams.filter(\.supportedTextSubtitle).prefix(8).map { (0, $0) }
+                + (source.audio == nil ? [] : audioInput.streams.filter(\.supportedTextSubtitle)
+                    .prefix(8).map { (1, $0) })
+            if !source.isLive && !subtitleInputs.isEmpty { mode = .completeFile }
+            let subtitleTracks = source.isLive ? [] : Array(subtitleInputs.prefix(8))
             // The inspect step rejects HDR/Dolby Vision, encrypted, attached-picture
             // and unknown tracks, and refuses video conversion unless the source
             // explicitly allows it.
@@ -350,10 +359,33 @@ public struct MediaPreparer: Sendable {
                                                          hls: source.delivery == .hls)
                 }
                 arguments += ["-map", "0:\(plan.video.index)", "-map", "\(plan.audioInput):\(plan.audio.index)"]
-                    + Self.videoArguments(stream: plan.video, action: plan.videoAction,
-                                          encoder: encoder, enhancement: plan.enhancement)
+                if mode == .completeFile {
+                    for subtitle in subtitleTracks {
+                        arguments += ["-map", "\(subtitle.input):\(subtitle.stream.index)"]
+                    }
+                }
+                arguments += Self.videoArguments(stream: plan.video, action: plan.videoAction,
+                                                 encoder: encoder, enhancement: plan.enhancement)
                     + Self.audioArguments(stream: plan.audio, action: plan.audioAction)
-                    + ["-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn"]
+                if mode == .completeFile && !subtitleTracks.isEmpty {
+                    arguments += ["-c:s", "mov_text"]
+                }
+                arguments += ["-map_metadata", "-1", "-map_chapters", "-1", "-dn"]
+                if mode == .completeFile {
+                    for (index, subtitle) in subtitleTracks.enumerated() {
+                        // Suppressing global source metadata also suppresses
+                        // automatic language tags. Restore only bounded track
+                        // labels so native selection remains meaningful.
+                        if let language = subtitle.stream.tags?.language,
+                           language.range(of: "^[A-Za-z]{2,3}$", options: .regularExpression) != nil {
+                            arguments += ["-metadata:s:s:\(index)", "language=\(language)"]
+                        }
+                        if let title = subtitle.stream.tags?.title, title.utf8.count <= 100,
+                           !title.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) {
+                            arguments += ["-metadata:s:s:\(index)", "title=\(title)"]
+                        }
+                    }
+                }
                 return arguments
             }
             // A hardware encoder is selected by a preflight at the real output
@@ -403,11 +435,15 @@ public struct MediaPreparer: Sendable {
                 let verified = try await probe(output, headers: [:], executable: ffprobe, local: true)
                 try Self.validateConverted(verified, plan: plan)
                 let duration = try verified.finiteDuration
-                guard verified.streams.count == 2,
+                let expectedSubtitles = subtitleTracks.count
+                guard verified.streams.count == 2 + expectedSubtitles,
                       verified.streams.contains(where: {
                           $0.codec_type == "video" && (plan.videoAction == .convert || $0.copyableVideo)
                       }),
                       verified.streams.contains(where: { $0.copyableAudio }),
+                      verified.streams.filter({ $0.codec_type == "subtitle" }).count == expectedSubtitles,
+                      verified.streams.filter({ $0.codec_type == "subtitle" })
+                        .allSatisfy({ $0.codec_name == "mov_text" }),
                       duration >= videoDuration! - completionTolerance(for: videoDuration!),
                       duration <= videoDuration! + 2 else { throw PreparationFailure.failed }
                 let server = try await MediaHTTPServer.start(file: output, host: host)
@@ -784,7 +820,7 @@ public struct MediaPreparer: Sendable {
             options = try Self.inputOptions(headers: headers, hls: hls)
         }
         let arguments = ["-v", "error"] + options + ["-show_entries",
-            "format=duration,size:stream=index,codec_type,codec_name,codec_tag_string,pix_fmt,width,height,profile,channels,sample_rate,color_range,color_transfer,color_primaries,color_space,avg_frame_rate,r_frame_rate:stream_disposition=attached_pic:stream_side_data",
+            "format=duration,size:stream=index,codec_type,codec_name,codec_tag_string,pix_fmt,width,height,profile,channels,sample_rate,color_range,color_transfer,color_primaries,color_space,avg_frame_rate,r_frame_rate:stream_disposition=attached_pic:stream_side_data:stream_tags=language,title",
             "-of", "json", "-i", isLocal ? url.path : url.absoluteString]
         let data = try await runProbe(executable: executable, arguments: arguments,
                                       timeout: .seconds(mpegts ? 8 : 40), retry: !isLocal)
@@ -840,6 +876,12 @@ public struct MediaPreparer: Sendable {
         let r_frame_rate: String?
         let disposition: Disposition?
         let side_data_list: [SideData]?
+        let tags: Tags?
+        struct Tags: Decodable { let language: String?; let title: String? }
+        var supportedTextSubtitle: Bool {
+            codec_type == "subtitle" && ["mov_text", "subrip", "webvtt", "ass", "ssa", "text"]
+                .contains(codec_name ?? "")
+        }
         struct Disposition: Decodable { let attached_pic: Int? }
         struct SideData: Decodable { let side_data_type: String? }
         var frameRate: Double? {

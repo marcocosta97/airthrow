@@ -239,6 +239,10 @@ public struct PlaybackSnapshot: Codable, Sendable, Equatable {
     /// Audio choices for the current video presentation, including native HLS renditions.
     public var audioOptions: [AudioOptionSnapshot]?
     public var selectedAudioID: String?
+    /// Native subtitle/caption choices on the installed player item. An Off
+    /// choice is present only when the media selection group allows it.
+    public var subtitleOptions: [SubtitleOptionSnapshot]?
+    public var selectedSubtitleID: String?
     public var allowVideoConversion: Bool?
     /// Per-item request, absent when no item is loaded.
     public var videoEnhancement: VideoEnhancement?
@@ -251,6 +255,14 @@ public struct AudioOptionSnapshot: Codable, Sendable, Equatable, Identifiable {
     public let unavailableReason: String?
     public init(id: String, label: String, unavailableReason: String? = nil) {
         self.id = id; self.label = label; self.unavailableReason = unavailableReason
+    }
+}
+
+public struct SubtitleOptionSnapshot: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let label: String
+    public init(id: String, label: String) {
+        self.id = id; self.label = label
     }
 }
 

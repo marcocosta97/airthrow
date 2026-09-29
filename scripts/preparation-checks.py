@@ -33,6 +33,12 @@ def fraction(value):
 ffmpeg('-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
        '-t', '2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ac', '2', '-movflags', '+faststart', OUT / 'combined.mp4')
 ffmpeg('-i', OUT / 'combined.mp4', '-map', '0', '-c', 'copy', OUT / 'combined.mkv')
+(OUT / 'subtitle-it.srt').write_text('1\n00:00:00,200 --> 00:00:01,200\nCiao\n', encoding='utf-8')
+(OUT / 'subtitle-en.srt').write_text('1\n00:00:00,200 --> 00:00:01,200\nHello\n', encoding='utf-8')
+ffmpeg('-i', OUT / 'combined.mp4', '-i', OUT / 'subtitle-it.srt', '-i', OUT / 'subtitle-en.srt',
+       '-map', '0:v:0', '-map', '0:a:0', '-map', '1:s:0', '-map', '2:s:0',
+       '-c:v', 'copy', '-c:a', 'copy', '-c:s', 'subrip',
+       '-metadata:s:s:0', 'language=ita', '-metadata:s:s:1', 'language=eng', OUT / 'subtitles.mkv')
 ffmpeg('-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
        '-t', '2', '-c:v', 'mpeg2video', '-c:a', 'mp2', '-f', 'mpeg', OUT / 'synthetic.mpg')
 ffmpeg('-i', OUT / 'combined.mp4', '-map', '0:v:0', '-c', 'copy', OUT / 'video.mp4')
@@ -90,7 +96,7 @@ no_encoder.chmod(0o700)
 hardware_failure = OUT / 'hardware-failure-ffmpeg'
 hardware_failure.write_text('#!/usr/bin/python3\nimport os, pathlib, sys\na = sys.argv[1:]\nhardware = "h264_videotoolbox" in a\npreflight = "lavfi" in a\nwith pathlib.Path(' + repr(str(OUT / 'encoder-attempts.txt')) + ').open("a") as log:\n log.write(("hardware" if hardware else "software") + ("-preflight" if preflight else "-job") + "\\n")\nif hardware: sys.exit(0 if preflight else 1)\nos.execv(' + repr(FFMPEG) + ', [' + repr(FFMPEG) + '] + a)\n')
 hardware_failure.chmod(0o700)
-FILES = {f'/{name}': (OUT / name).read_bytes() for name in ['combined.mp4', 'combined.mkv', 'video.mp4', 'audio.m4a',
+FILES = {f'/{name}': (OUT / name).read_bytes() for name in ['combined.mp4', 'combined.mkv', 'subtitles.mkv', 'video.mp4', 'audio.m4a',
                                                             'flac.mkv', 'multitrack.mkv', 'long.mp4', 'vp9-opus.mkv',
                                                             'hdr.mkv', 'uhd.mkv', 'hevc-sdr.mkv', 'highfps.mkv', 'tenbit.mkv']}
 

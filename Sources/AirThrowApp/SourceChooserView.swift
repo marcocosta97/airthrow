@@ -14,9 +14,11 @@ struct VideoMenuView: View {
     private var status: PlaybackSnapshot { controller.snapshot }
     private var sources: [SourceOptionSnapshot] { status.sources ?? [] }
     private var audioOptions: [AudioOptionSnapshot] { status.audioOptions ?? [] }
+    private var subtitleOptions: [SubtitleOptionSnapshot] { status.subtitleOptions ?? [] }
     private var enhancement: VideoEnhancement { status.videoEnhancement ?? .original }
     private var enhancementAction: EnhancementAction { .from(enhancement) }
     private var audioSelection: String { status.selectedAudioID ?? "" }
+    private var subtitleSelection: String { status.selectedSubtitleID ?? "" }
 
     /// Show one row per visible quality and processing path. Upstream formats
     /// can differ by codec or bitrate while producing identical chooser labels;
@@ -80,7 +82,7 @@ struct VideoMenuView: View {
         if isLive {
             return "Enhancement is only for on-demand video. This live stream can only change source quality."
         }
-        return "Choose this video's source, audio track, and enhancement. Video or enhancement changes reload paused; direct audio changes on the current item. 4K needs a compatible receiver."
+        return "Choose this video's source, audio, subtitles, and enhancement. Video or enhancement changes reload paused; native track changes stay on the current item. 4K needs a compatible receiver."
     }
 
     var body: some View {
@@ -102,7 +104,7 @@ struct VideoMenuView: View {
         .popover(isPresented: $showingOptions,
                  attachmentAnchor: .point(.bottomLeading), arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 10) {
-                if videoOptions.count > 1 || audioOptions.count > 1 {
+                if videoOptions.count > 1 || audioOptions.count > 1 || subtitleOptions.count > 1 {
                     Text("Source").font(.subheadline.weight(.medium))
                     if videoOptions.count > 1 {
                         HStack(spacing: 8) {
@@ -139,7 +141,25 @@ struct VideoMenuView: View {
                             .disabled(status.state == .loading)
                         }
                     }
-                    Text("Video changes reload paused.")
+                    if subtitleOptions.count > 1 {
+                        HStack(spacing: 8) {
+                            Text("Subtitles").font(.caption)
+                            Spacer(minLength: 0)
+                            Picker("Subtitles", selection: Binding(get: { subtitleSelection }, set: { chooseSubtitle($0) })) {
+                                if status.selectedSubtitleID == nil {
+                                    Text("Choose subtitles").tag("").disabled(true)
+                                }
+                                ForEach(subtitleOptions) { option in
+                                    Text(option.label).tag(option.id)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
+                            .disabled(status.state == .loading)
+                            .accessibilityLabel("Subtitles")
+                        }
+                    }
+                    Text("Video and enhancement changes reload paused.")
                         .font(.caption).foregroundStyle(.secondary)
                     Divider()
                 }
@@ -195,6 +215,15 @@ struct VideoMenuView: View {
         guard id != audioSelection else { return }
         do {
             try controller.selectAudio(id)
+            showingOptions = false
+        }
+        catch { controller.displayError(error) }
+    }
+
+    private func chooseSubtitle(_ id: String) {
+        guard id != subtitleSelection else { return }
+        do {
+            try controller.selectSubtitle(id)
             showingOptions = false
         }
         catch { controller.displayError(error) }

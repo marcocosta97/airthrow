@@ -18,6 +18,11 @@ final class PlaybackController: ObservableObject {
         /// Keeps Automatic's current presentation while its processing preset
         /// changes, without turning it into an explicit source choice in status.
         let pinnedSourceID: String?
+        let subtitle: SubtitlePreference?
+    }
+    private enum SubtitlePreference {
+        case off
+        case track(language: String?, name: String)
     }
     private struct QueueState {
         let title: String
@@ -65,6 +70,8 @@ final class PlaybackController: ObservableObject {
     private var sourceChoice: String?
     private var selectedNativeAudioID: String?
     private var nativeAudioGroup: AVMediaSelectionGroup?
+    private var nativeSubtitleGroup: AVMediaSelectionGroup?
+    private var subtitlePreference: SubtitlePreference?
     private var changingSource = false
     private var sourceOptionsGeneration = UUID()
     private var actualPlaybackPath: PlaybackPath?
@@ -273,6 +280,32 @@ final class PlaybackController: ObservableObject {
         }
     }
 
+    /// Select an AVFoundation legible option on the installed item. The
+    /// receiver keeps its native subtitle rendering and can change this group
+    /// independently; no video conversion or local overlay is involved.
+    func selectSubtitle(_ optionID: String) throws {
+        guard !loadInProgress, let item = mediaItem, let group = nativeSubtitleGroup else {
+            throw AppFailure(.unsupportedOperation, "Wait for the video and subtitle tracks to finish loading.")
+        }
+        let prefix = "\(sourceOptionsGeneration.uuidString)-subtitle-"
+        if optionID == prefix + "off" {
+            guard group.allowsEmptySelection else {
+                throw AppFailure(.unsupportedOperation, "This subtitle track cannot be turned off.")
+            }
+            item.select(nil, in: group)
+            subtitlePreference = .off
+        } else {
+            guard optionID.hasPrefix(prefix), let index = Int(optionID.dropFirst(prefix.count)),
+                  group.options.indices.contains(index) else {
+                throw AppFailure(.invalidRequest, "This subtitle choice has expired. Open Subtitles again.")
+            }
+            let option = group.options[index]
+            item.select(option, in: group)
+            subtitlePreference = .track(language: option.locale?.identifier, name: option.displayName)
+        }
+        refresh()
+    }
+
     /// The popover's resolution control. On Original it only selects the
     /// resolution for the next enhancement. On an active preset it prepares the
     /// matching output and reloads paused through the existing item path.
@@ -461,11 +494,14 @@ final class PlaybackController: ObservableObject {
         let preferences = preferences ?? LoadPreferences(conversion: conversionPolicy, preferQuality: preferQuality,
                                                          enhancement: enhancement ?? .original,
                                                          enhancementOutput4K: enhancementOutput4K ?? false,
-                                                         pinnedSourceID: pinnedSourceID)
+                                                         pinnedSourceID: pinnedSourceID,
+                                                         subtitle: changingSource || retry || fallback != nil
+                                                            ? subtitlePreference : nil)
         let retryRoute = hasOpenedPicker || player.isExternalPlaybackActive
         let retainedCandidates = fallback == nil ? [] : sourceCandidates
         resetItem(keepPlayerItem: true, preserveQueue: preservingQueue)
         loadPreferences = preferences
+        subtitlePreference = preferences.subtitle
         videoEnhancement = preferences.enhancement
         self.enhancementOutput4K = preferences.enhancementOutput4K
         originalSourceURL = url
@@ -571,6 +607,7 @@ final class PlaybackController: ObservableObject {
                 // An inspection error is unknown, not proof of a silent source.
                 let audio = try? await asset.loadTracks(withMediaType: .audio)
                 let audibleGroup = try? await asset.loadMediaSelectionGroup(for: .audible)
+                let legibleGroup = try? await asset.loadMediaSelectionGroup(for: .legible)
                 let metadataTitle = await self.metadataTitle(from: asset)
                 var detectedAudio: Bool?
                 if let audio {
@@ -606,6 +643,7 @@ final class PlaybackController: ObservableObject {
                 let item = AVPlayerItem(asset: asset)
                 self.nativeAudioGroup = nil
                 self.selectedNativeAudioID = nil
+                self.nativeSubtitleGroup = legibleGroup?.options.isEmpty == false ? legibleGroup : nil
                 if source.delivery == .hls, source.playbackPath == .direct,
                    let group = audibleGroup, !source.hlsAudioOptions.isEmpty {
                     self.nativeAudioGroup = group
@@ -623,6 +661,19 @@ final class PlaybackController: ObservableObject {
                     }
                 } else {
                     self.player.appliesMediaSelectionCriteriaAutomatically = true
+                }
+                if let group = self.nativeSubtitleGroup, let preference = self.subtitlePreference {
+                    switch preference {
+                    case .off:
+                        if group.allowsEmptySelection { item.select(nil, in: group) }
+                    case .track(let language, let name):
+                        let matching = group.options.first { option in
+                            option.locale?.identifier == language && option.displayName == name
+                        } ?? group.options.first { option in
+                            option.locale?.identifier == language && language != nil
+                        }
+                        if let matching { item.select(matching, in: group) }
+                    }
                 }
                 // Keep local HLS updates flowing while Load stays paused.
                 if self.preparedMedia?.url.pathExtension == "m3u8" {
@@ -703,6 +754,23 @@ final class PlaybackController: ObservableObject {
                     Task { @MainActor in
                         guard let self, self.generation == id else { return }
                         self.fail(reason)
+                    }
+                })
+                self.notifications.append(NotificationCenter.default.addObserver(
+                    forName: AVPlayerItem.mediaSelectionDidChangeNotification, object: item, queue: .main
+                ) { [weak self] _ in
+                    Task { @MainActor in
+                        guard let self, self.generation == id else { return }
+                        if item.status == .readyToPlay, self.mediaItem === item,
+                           let group = self.nativeSubtitleGroup {
+                            if let option = item.currentMediaSelection.selectedMediaOption(in: group) {
+                                self.subtitlePreference = .track(language: option.locale?.identifier,
+                                                                 name: option.displayName)
+                            } else if group.allowsEmptySelection {
+                                self.subtitlePreference = .off
+                            }
+                        }
+                        self.refresh()
                     }
                 })
                 self.mediaItem = item
@@ -1085,6 +1153,8 @@ final class PlaybackController: ObservableObject {
         sourceChoice = nil
         selectedNativeAudioID = nil
         nativeAudioGroup = nil
+        nativeSubtitleGroup = nil
+        subtitlePreference = nil
         changingSource = false
         sourceOptionsGeneration = UUID()
         actualPlaybackPath = nil
@@ -1270,6 +1340,26 @@ final class PlaybackController: ObservableObject {
         next.sources = sourceOptions
         let choices = audioChoices
         next.audioOptions = choices.count > 1 ? choices.map(\.snapshot) : nil
+        if let group = nativeSubtitleGroup, let item = mediaItem {
+            let prefix = "\(sourceOptionsGeneration.uuidString)-subtitle-"
+            var options: [SubtitleOptionSnapshot] = []
+            if group.allowsEmptySelection {
+                options.append(SubtitleOptionSnapshot(id: prefix + "off", label: "Off"))
+            }
+            options += group.options.enumerated().map { index, option in
+                let name = option.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+                let label = name.isEmpty || name.count > 80 || name.contains("://")
+                    ? "Subtitle \(index + 1)" : name
+                return SubtitleOptionSnapshot(id: prefix + String(index), label: label)
+            }
+            next.subtitleOptions = options
+            if let selected = item.currentMediaSelection.selectedMediaOption(in: group),
+               let index = group.options.firstIndex(of: selected) {
+                next.selectedSubtitleID = prefix + String(index)
+            } else if group.allowsEmptySelection {
+                next.selectedSubtitleID = prefix + "off"
+            }
+        }
         if let selectedNativeAudioID,
            let index = selectedSource?.hlsAudioOptions.firstIndex(where: { $0.id == selectedNativeAudioID }) {
             next.selectedAudioID = "\(sourceOptionsGeneration.uuidString)-audio-native-\(index)"
