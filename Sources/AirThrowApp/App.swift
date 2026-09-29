@@ -297,7 +297,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let about = appMenu.addItem(withTitle: "About AirThrow", action: #selector(showAbout), keyEquivalent: "")
         about.target = self
         appMenu.addItem(.separator())
-        let settings = appMenu.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
+        let settings = appMenu.addItem(withTitle: "Settings", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
         appMenu.addItem(.separator())
         let show = appMenu.addItem(withTitle: "Show Controller", action: #selector(showWindow), keyEquivalent: "0")

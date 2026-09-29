@@ -24,6 +24,7 @@ old.AGENTS.md
 /DESIGN.md
 /PLAN.md
 /development-guide.md
+/docs/plans/
 
 # Exported YouTube cookies are session credentials; never commit them
 cookies.txt
