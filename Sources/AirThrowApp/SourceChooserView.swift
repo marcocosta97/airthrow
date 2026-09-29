@@ -56,8 +56,9 @@ struct VideoMenuView: View {
         .help(helpText)
         .accessibilityLabel("Video options")
         .accessibilityValue(menuLabel)
-        .popover(isPresented: $showingOptions, arrowEdge: .leading) {
-            VStack(alignment: .leading, spacing: 12) {
+        .popover(isPresented: $showingOptions,
+                 attachmentAnchor: .point(.bottomLeading), arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 10) {
                 if sources.count > 1 {
                     Text("Source").font(.subheadline.weight(.medium))
                     Picker("Source", selection: Binding(get: { sourceSelection }, set: { chooseSource($0) })) {
@@ -82,6 +83,7 @@ struct VideoMenuView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
+                .frame(maxWidth: .infinity)
                 .disabled(isLive)
                 .help("With an active enhancement, changing the target reloads from the start, paused.")
                 Text("Enhancement").font(.subheadline.weight(.medium))
@@ -95,8 +97,8 @@ struct VideoMenuView: View {
                 .labelsHidden()
                 .disabled(isLive)
             }
-            .padding(14)
-            .frame(width: 280)
+            .padding(12)
+            .frame(width: 210, alignment: .leading)
         }
     }
 
