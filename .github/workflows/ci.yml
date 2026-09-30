@@ -43,7 +43,6 @@ jobs:
             Sources/AirThrowCore/*.swift \
             Tests/ResolverChecks/main.swift \
             -o .build/ResolverChecks
-          cp -R Sources/AirThrowCore/SourceProviders .build/
           .build/ResolverChecks
 
       - name: Settings checks

@@ -76,8 +76,6 @@ with tempfile.TemporaryDirectory(prefix='live-remux-', dir=ROOT / 'build') as te
             ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift',
             ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
             ROOT / 'Tests/LiveRemuxChecks/main.swift', '-o', binary)
-        shutil.copytree(ROOT / 'Sources/AirThrowCore/SourceProviders',
-                        binary.parent / 'SourceProviders', dirs_exist_ok=True)
         result = run(binary, f'http://127.0.0.1:{server.server_port}', output, timeout=90)
         print(result.stdout, end='')
         streams = [stream['codec_name'] for stream in json.loads(run(ffprobe, '-v', 'error',

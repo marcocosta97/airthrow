@@ -137,8 +137,8 @@ public struct SourceResolver: Sendable {
         youtube = YouTubeSourceAdapter(environment: environment, cookies: cookies)
         if let registry { self.registry = .success(registry) }
         else {
-            do { self.registry = .success(try SourceRegistry.bundled(environment: environment, cookies: cookies)) }
-            catch { self.registry = .failure((error as? SourceRegistryError) ?? .unavailableManifests) }
+            do { self.registry = .success(try SourceRegistry.standard(environment: environment, cookies: cookies)) }
+            catch { self.registry = .failure((error as? SourceRegistryError) ?? .invalidAdapter) }
         }
     }
 
@@ -148,7 +148,7 @@ public struct SourceResolver: Sendable {
         let sources: SourceRegistry
         do { sources = try registry.get() }
         catch {
-            // Optional website definitions must not prevent native file playback.
+            // Invalid custom adapter metadata must not prevent native file playback.
             if Self.isDirectMediaHint(url) { return DirectSourceAdapter.candidates(url) }
             throw ResolutionFailure.failed
         }

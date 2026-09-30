@@ -127,10 +127,6 @@ try:
          ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift',
          ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
          ROOT / 'Tests/SourceChoiceChecks/main.swift', '-o', binary], timeout=180)
-    providers = binary.parent / 'SourceProviders'
-    if providers.exists():
-        shutil.rmtree(providers)
-    shutil.copytree(ROOT / 'Sources/AirThrowCore/SourceProviders', providers)
     print(f'Built {binary}')
     if args.compile_only:
         print('Compilation only requested; AVPlayer checks were not run.')

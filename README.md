@@ -42,8 +42,9 @@ Shorts, `youtu.be`, playlist, or Mix link in the same field. AirThrow finds the
 best playable source, preferring one the receiver can play directly. Dedicated
 playlist links create a queue of up to 100 items.
 
-Other public video pages may work through yt-dlp's generic extractor. Site
-sign-in, DRM, and sources requiring custom request headers are unsupported.
+Other public video pages use yt-dlp's automatic extractor selection. Playback
+depends on the returned media. Non-YouTube sign-in, DRM and custom request
+headers are unsupported.
 
 Some videos are gated by a YouTube sign-in check. In **Settings → YouTube
 access**, pick a browser or a Netscape `cookies.txt` file to supply a signed-in

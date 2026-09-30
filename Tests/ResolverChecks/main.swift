@@ -182,9 +182,9 @@ struct ResolverChecks {
                      "--no-playlist", "--playlist-items", "--simulate", "--dump-single-json", "--no-js-runtimes"] {
             try check(arguments.contains(flag), "Generic helper isolation flag missing")
         }
-        let extractorIndex = arguments.firstIndex(of: "--use-extractors")!
-        try check(arguments[extractorIndex + 1] == "^generic$" && arguments.suffix(2) == ["--", page.absoluteString],
-                  "Generic extractor scope or original URL was changed")
+        try check(!arguments.contains("--use-extractors") && !arguments.contains("--ies")
+                  && arguments.suffix(2) == ["--", page.absoluteString],
+                  "Automatic extractor selection or original URL was changed")
         try check(!arguments.contains("--cookies") && !arguments.contains("--cookies-from-browser")
                   && !arguments.contains("--js-runtimes"), "Generic resolution required Deno or imported cookies")
         try FileManager.default.removeItem(at: temp.appendingPathComponent("generic-args"))
