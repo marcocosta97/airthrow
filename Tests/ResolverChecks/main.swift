@@ -86,6 +86,151 @@ struct ResolverChecks {
         precondition(status == kCCSuccess, "fixture encryption failed")
         return Data(output.prefix(moved))
     }
+
+    static func genericChecks(temp: URL, helper: (String, String) throws -> String,
+                              combined: [String: Any]) async throws {
+        let page = URL(string: "https://video.example/watch?id=private-query")!
+        let missing = ["AIRTHROW_YTDLP": "/missing/yt-dlp", "AIRTHROW_DENO": "/missing/deno"]
+        let absent = SourceResolver(environment: missing)
+        try check(SourceResolver.needsResolution(page) && !SourceResolver.isWebsite(page),
+                  "Generic page was not routed to discovery")
+        try check(!SourceResolver.needsResolution(temp.appendingPathComponent("video.mp4")),
+                  "Local file was routed to discovery")
+        for ext in ["MP4", "m4v", "mov", "m3u8", "mkv", "webm", "mpd", "ts", "m4s", "m2ts",
+                    "mpg", "mpeg", "vob", "flv", "avi", "m4a", "mp3", "aac", "flac", "ogg", "wav"] {
+            let url = URL(string: "https://cdn.example/video.\(ext)?signature=private-query")!
+            try check(!SourceResolver.needsResolution(url), "Direct media hint entered discovery")
+        }
+        let native = try await absent.resolve(page)
+        try check(native.url == page && !native.videoKnownPresent, "Missing generic helper lost its native attempt")
+        let extensionless = URL(string: "https://cdn.example/media?id=1")!
+        try check(try await absent.resolve(extensionless).url == extensionless,
+                  "Extensionless media lost its helper-free fallback")
+
+        func resolver(_ data: Data) throws -> SourceResolver {
+            let executable = try helper("generic-" + UUID().uuidString,
+                "cat <<'JSON'\n\(String(decoding: data, as: UTF8.self))\nJSON\n")
+            return SourceResolver(environment: ["AIRTHROW_YTDLP": executable, "AIRTHROW_DENO": "/missing/deno"])
+        }
+        let inspected = try await resolver(metadata([combined])).resolve(page)
+        try check(inspected.videoKnownPresent && inspected.playbackPath == .direct,
+                  "Generic combined source did not share native selection")
+        let video = combined.merging(["acodec": "none"]) { _, rhs in rhs }
+        let audio: [String: Any] = ["url": "https://cdn.example/audio.m4a", "protocol": "https",
+                                   "vcodec": "none", "acodec": "aac", "ext": "m4a"]
+        let paired = try await resolver(metadata([video, audio])).resolve(page)
+        try check(paired.audio != nil && paired.playbackPath == .remux,
+                  "Generic separate tracks did not share remux selection")
+        let conversion = combined.merging(["vcodec": "vp9", "acodec": "opus", "ext": "webm"]) { _, rhs in rhs }
+        let conversionResolver = try resolver(metadata([conversion]))
+        try await expect(.preparationRequired) { _ = try await conversionResolver.resolve(page) }
+        try check(try await conversionResolver.resolve(page, policy: .allowVideo).playbackPath == .videoConversion,
+                  "Generic conversion permission was lost")
+        for extra in [["dynamic_range": "HDR"], ["height": 4320], ["fps": 144]] as [[String: Any]] {
+            let blocked = try await resolver(metadata([conversion.merging(extra) { _, rhs in rhs }])).candidates(for: page)
+            try check(blocked.count == 1 && blocked[0].unavailableReason != nil,
+                      "Generic preparation limit was not retained for display")
+        }
+
+        // This is the shape emitted by yt-dlp for a JW Player file or a direct
+        // URL discovered by its MIME type: a whole presentation, unknown codecs.
+        let whole: [String: Any] = ["url": "https://cdn.example/video?signature=secret", "ext": "mp4", "protocol": "https"]
+        let unverifiedResolver = try resolver(metadata([whole], extra: ["title": "  Generic\nTitle  "]))
+        let unverified = try await unverifiedResolver.resolve(page)
+        try check(unverified.url.query == "signature=secret" && unverified.playbackPath == .direct
+                  && !unverified.videoKnownPresent && unverified.title == "GenericTitle",
+                  "Unverified generic source lost its native attempt or invented video evidence")
+        try check(try ExtractedSourceAdapter.candidates(metadata([whole])).isEmpty,
+                  "Generic unknown-codec allowance changed strict YouTube parsing")
+        let unknownMKV = try await resolver(metadata([whole.merging(["ext": "mkv"]) { _, rhs in rhs }])).resolve(page)
+        try check(unknownMKV.needsPreparation && unknownMKV.playbackPath == .remux && !unknownMKV.videoKnownPresent,
+                  "Generic container metadata did not request inspection for extensionless MKV")
+        let unknownHLS = try await resolver(metadata([whole.merging(["protocol": "m3u8_native"]) { _, rhs in rhs }])).resolve(page)
+        try check(unknownHLS.delivery == .hls && !unknownHLS.videoKnownPresent,
+                  "Unknown-codec HLS was treated as confirmed video")
+        let manyWhole = (0..<50).map { whole.merging(["format_id": "whole-\($0)"]) { _, rhs in rhs } }
+        let bounded = try await resolver(metadata(manyWhole)).candidates(for: page)
+        try check(bounded.count == 12 && bounded.allSatisfy({ !$0.id.contains("secret") }),
+                  "Unverified generic candidates were unbounded or exposed request details")
+
+        for formats in [[], [whole.merging(["acodec": "none"]) { _, rhs in rhs }],
+                        [whole.merging(["vcodec": "none"]) { _, rhs in rhs }],
+                        [whole.merging(["http_headers": ["Referer": "https://private.example/"]]) { _, rhs in rhs }],
+                        [whole.merging(["fragments": [["url": "https://cdn.example/fragment"]]]) { _, rhs in rhs }],
+                        [whole.merging(["protocol": "http_dash_segments"]) { _, rhs in rhs }]] {
+            let rejected = try resolver(metadata(formats))
+            try await expect(.failed) { _ = try await rejected.resolve(page) }
+        }
+        let infoHeaders = try resolver(metadata([combined], extra: ["http_headers": ["Authorization": "private"]]))
+        try await expect(.failed) { _ = try await infoHeaders.resolve(page) }
+        let drm = try resolver(metadata([combined], extra: ["has_drm": true]))
+        try await expect(.protectedMedia) { _ = try await drm.resolve(page) }
+        let malformed = try resolver(Data("not JSON".utf8))
+        try await expect(.failed) { _ = try await malformed.resolve(page) }
+        let playlist = try resolver(metadata([combined], extra: ["_type": "playlist", "entries": []]))
+        try await expect(.failed) { _ = try await playlist.resolve(page) }
+
+        let raw = try metadata([combined])
+        let controlled = try helper("generic-controlled", "printf '%s\\n' \"$@\" > '\(temp.path)/generic-args'\ncat <<'JSON'\n\(String(decoding: raw, as: UTF8.self))\nJSON\n")
+        let configured = SourceResolver(environment: ["AIRTHROW_YTDLP": controlled, "AIRTHROW_DENO": "/missing/deno",
+                                                       "AIRTHROW_YTDLP_COOKIES": "/missing/cookies"],
+                                        cookies: .file(temp.appendingPathComponent("missing-cookies")))
+        _ = try await configured.resolve(page)
+        let arguments = try String(contentsOf: temp.appendingPathComponent("generic-args"), encoding: .utf8)
+            .split(separator: "\n").map(String.init)
+        for flag in ["--ignore-config", "--no-plugin-dirs", "--no-cache-dir", "--no-remote-components",
+                     "--no-playlist", "--playlist-items", "--simulate", "--dump-single-json", "--no-js-runtimes"] {
+            try check(arguments.contains(flag), "Generic helper isolation flag missing")
+        }
+        let extractorIndex = arguments.firstIndex(of: "--use-extractors")!
+        try check(arguments[extractorIndex + 1] == "generic" && arguments.suffix(2) == ["--", page.absoluteString],
+                  "Generic extractor scope or original URL was changed")
+        try check(!arguments.contains("--cookies") && !arguments.contains("--cookies-from-browser")
+                  && !arguments.contains("--js-runtimes"), "Generic resolution required Deno or imported cookies")
+        try FileManager.default.removeItem(at: temp.appendingPathComponent("generic-args"))
+        _ = try await configured.resolve(URL(string: "https://cdn.example/video.mp4")!)
+        _ = try await configured.resolve(URL(string: "https://cdn.example/master.m3u8")!)
+        try check(!FileManager.default.fileExists(atPath: temp.appendingPathComponent("generic-args").path),
+                  "Recognized media invoked generic extraction")
+
+        let rejected = try helper("generic-rejected", "echo call >> '\(temp.path)/generic-calls'\nexit 1\n")
+        let fallback = SourceResolver(environment: ["AIRTHROW_YTDLP": rejected, "AIRTHROW_DENO": "/missing/deno"])
+        try check(try await fallback.resolve(extensionless).url == extensionless, "Rejected extraction lost native fallback")
+        let calls = try String(contentsOf: temp.appendingPathComponent("generic-calls"), encoding: .utf8)
+        try check(calls.split(separator: "\n").count == 1, "Generic fallback recursively extracted")
+        let cannotLaunch = try helper("generic-unlaunchable", "exit 0\n")
+        try Data("not an executable format".utf8).write(to: URL(fileURLWithPath: cannotLaunch))
+        try check(try await SourceResolver(environment: ["AIRTHROW_YTDLP": cannotLaunch]).resolve(page).url == page,
+                  "Unavailable generic helper launch did not retain native fallback")
+        let empty = try helper("generic-empty", "exit 0\n")
+        try check(try await SourceResolver(environment: ["AIRTHROW_YTDLP": empty]).resolve(page).url == page,
+                  "Empty extraction lost native fallback")
+        print("PASS generic routing, shared selection, unknown-codec inspection, eligibility, bounded fallback and cookie isolation")
+
+        let noisy = try helper("generic-noisy", "while :; do echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done\n")
+        try await expect(.tooMuchOutput) { _ = try await SourceResolver(environment: ["AIRTHROW_YTDLP": noisy]).resolve(page) }
+        let sleeper = try helper("generic-sleeper", "sleep 90 &\necho $! > '\(temp.path)/generic-child'\nwait\n")
+        let sleeping = SourceResolver(environment: ["AIRTHROW_YTDLP": sleeper, "AIRTHROW_DENO": "/missing/deno"])
+        let task = Task { try await sleeping.resolve(page) }
+        let childFile = temp.appendingPathComponent("generic-child")
+        let startDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while !FileManager.default.fileExists(atPath: childFile.path), ContinuousClock.now < startDeadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try check(FileManager.default.fileExists(atPath: childFile.path), "Generic cancellation helper did not start")
+        task.cancel()
+        do { _ = try await task.value; try check(false, "Cancelled generic extraction returned a fallback") }
+        catch is CancellationError {}
+        let child = try String(contentsOf: childFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        try await Task.sleep(for: .milliseconds(100))
+        try check(kill(Int32(child)!, 0) == -1 && errno == ESRCH, "Generic helper descendant survived cancellation")
+        try await expect(.timedOut) { _ = try await sleeping.resolve(page) }
+        let timedOutChild = try String(contentsOf: childFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        try await Task.sleep(for: .milliseconds(100))
+        try check(kill(Int32(timedOutChild)!, 0) == -1 && errno == ESRCH, "Generic helper descendant survived its deadline")
+        print("PASS generic output limit, cancellation and deadline propagate without native fallback")
+    }
     static func main() async throws {
         if CommandLine.arguments.count == 3 {
             do {
@@ -777,6 +922,7 @@ struct ResolverChecks {
         try await Task.sleep(for: .milliseconds(100))
         try check(kill(Int32(child)!, 0) == -1 && errno == ESRCH, "Helper descendant survived cancellation")
         print("PASS structured output, controlled flags, nonzero exit, output limit, timeout and process-group cancellation")
+        try await genericChecks(temp: temp, helper: helper, combined: combined)
         print("All resolver checks passed (no physical receiver)")
     }
 }

@@ -4,10 +4,10 @@ import Foundation
 enum ExtractedSourceAdapter {
     /// yt-dlp flattens alternate-audio HLS into video-only and audio-only
     /// formats. Their shared master URL can still be a complete presentation.
-    static func candidatesWithHLS(_ data: Data,
+    static func candidatesWithHLS(_ data: Data, allowUnverifiedWholeSources: Bool = false,
         fetch: @Sendable (URL) async throws -> Data = HLSMaster.fetch) async throws -> [MediaCandidate] {
         let info = try validatedInfo(data)
-        var candidates = try candidates(data)
+        var candidates = try candidates(data, allowUnverifiedWholeSources: allowUnverifiedWholeSources)
 
         // A master is a repeat only when its URL and headers both match, so two
         // masters that share a format signature but differ in request headers are
@@ -76,7 +76,7 @@ enum ExtractedSourceAdapter {
     private static let maximumConversionCombined = 12
     private static let maximumCandidates = 40
 
-    static func candidates(_ data: Data) throws -> [MediaCandidate] {
+    static func candidates(_ data: Data, allowUnverifiedWholeSources: Bool = false) throws -> [MediaCandidate] {
         let info = try validatedInfo(data)
         guard let formats = info.formats, !formats.isEmpty else { throw ResolutionFailure.failed }
         let title = cleanTitle(info.title)
@@ -105,6 +105,27 @@ enum ExtractedSourceAdapter {
                     height: format.height, bitrate: format.tbr,
                     frameRate: format.fps,
                     audioDescription: audioDescription(format))
+            }
+            .sorted(by: costFirst)
+            .prefix(maximumDirectCombined)
+
+        // Generic discovery often supplies a whole file or HLS URL without
+        // codec metadata. Give those presentations the same inspection/native
+        // attempt as a pasted media URL, without claiming confirmed video.
+        // Explicit audio-only/video-only formats never enter this path.
+        let unverified = formats
+            .filter { allowUnverifiedWholeSources && isUnverifiedWholeSource($0) }
+            .compactMap { format -> MediaCandidate? in
+                guard let whole = wholePresentation(format) else { return nil }
+                let needsPreparation = ["mkv", "webm", "mpg", "mpeg", "vob"].contains(format.ext ?? "")
+                return MediaCandidate(
+                    source: ResolvedSource(url: whole.url, title: title, headers: whole.headers,
+                                           needsPreparation: needsPreparation,
+                                           delivery: isHLSContainer(format) ? .hls : (needsPreparation ? .file : .unknown),
+                                           isLive: live),
+                    id: formatIdentifier(format, role: "unverified"),
+                    height: format.height, bitrate: format.tbr, frameRate: format.fps,
+                    unavailableReason: needsPreparation ? preparationLimitReason(format) : nil)
             }
             .sorted(by: costFirst)
             .prefix(maximumDirectCombined)
@@ -174,7 +195,7 @@ enum ExtractedSourceAdapter {
         // explicit choice instead of silently overriding one of them.
         var presentations = Set<String>()
         var result: [MediaCandidate] = []
-        for candidate in (Array(direct) + Array(conversions) + pairs).sorted(by: costFirst) {
+        for candidate in (Array(direct) + Array(unverified) + Array(conversions) + pairs).sorted(by: costFirst) {
             guard result.count < maximumCandidates else { break }
             guard presentations.insert(sourceKey(candidate)).inserted else { continue }
             result.append(candidate)
@@ -281,6 +302,15 @@ enum ExtractedSourceAdapter {
         (format.http_headers ?? [:]).keys.allSatisfy { defaultHeaders.contains($0.lowercased()) }
     }
 
+    private static func isUnverifiedWholeSource(_ format: Format) -> Bool {
+        format.vcodec == nil && format.acodec == nil && format.has_drm != true
+            && (format.fragments == nil || isHLSContainer(format))
+            && (isHLSContainer(format) || (isSimpleHTTP(format)
+                && ["mp4", "m4v", "mov", "mkv", "webm", "mpg", "mpeg", "vob"].contains(format.ext ?? "")))
+            && format.url.flatMap { try? MediaInput.url($0) } != nil
+            && headersAreDefault(format)
+    }
+
     /// HDR video cannot be prepared without tone mapping, so it is exposed as a
     /// disabled candidate rather than silently dropped. Prefer the video-specific
     /// fields; a free-form note may mention Dolby audio on an SDR stream.
@@ -294,9 +324,8 @@ enum ExtractedSourceAdapter {
     }
 
     /// A preparation candidate is disabled only when no supported conversion can
-    /// rescue it. Resolution and frame rate above the output profile are handled
-    /// by downscaling under `.allowVideo`, not rejected here. The input bound is
-    /// deliberately conservative until the preparer states its own limits.
+    /// rescue it. The preparer rejects output profiles that would downscale.
+    /// The input bound is deliberately conservative until inspection.
     private static func preparationLimitReason(_ format: Format) -> String? {
         if isHDR(format) { return "HDR video is not supported." }
         if let width = format.width, width > 3840 {

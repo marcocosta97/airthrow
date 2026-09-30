@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Controller-level source chooser checks over synthetic loopback fixtures.
 
-Injected candidates avoid live websites and helper executables while real AVPlayer
-loading is still exercised. This suite shares system media services with the
-native/preparation/controller suites, so run it sequentially with those.
+Default checks inject candidates while exercising real AVPlayer loading.
+--yt-dlp adds generic extraction over local pages using the installed helper.
+This suite shares system media services with the native/preparation/controller
+suites, so run it sequentially with those.
 """
 import argparse
 import http.server
@@ -21,6 +22,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--compile-only', action='store_true',
                     help='Build the checks without starting AVPlayer')
+parser.add_argument('--yt-dlp', help='Optional installed yt-dlp path for generic extraction over local fixture pages')
 args = parser.parse_args()
 
 (ROOT / 'build').mkdir(exist_ok=True)
@@ -49,6 +51,24 @@ FILES = {
     '/video.mp4': (out / 'video.mp4').read_bytes(),
     '/audio.mp4': (out / 'audio.mp4').read_bytes(),
 }
+CONTENT_TYPES = {}
+if args.yt_dlp:
+    print(f'Generic extractor: yt-dlp {run([args.yt_dlp, "--version"]).stdout.strip()}', flush=True)
+    run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-n', '-i', out / 'audio.mp4',
+         '-c', 'copy', '-hls_time', '1', '-hls_playlist_type', 'vod', out / 'stream.m3u8'])
+    (out / 'master.m3u8').write_text(
+        '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=320x180,'
+        'CODECS="avc1.42e01e,mp4a.40.2"\nstream.m3u8\n')
+    FILES['/generic-media'] = FILES['/audio.mp4']
+    for name, source in [('generic-file', 'audio.mp4'), ('generic-hls', 'master.m3u8')]:
+        FILES[f'/{name}'] = (
+            '<html><title>Generic fixture</title><script>'
+            f'jwplayer("player").setup({{file:"{source}"}});'
+            '</script></html>').encode()
+        CONTENT_TYPES[f'/{name}'] = 'text/html'
+    for path in [*out.glob('*.m3u8'), *out.glob('*.ts')]:
+        FILES['/' + path.name] = path.read_bytes()
+        CONTENT_TYPES['/' + path.name] = 'application/vnd.apple.mpegurl' if path.suffix == '.m3u8' else 'video/mp2t'
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -62,7 +82,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.respond(True)
 
     def respond(self, body):
-        data = FILES.get(urllib.parse.urlsplit(self.path).path)
+        path = urllib.parse.urlsplit(self.path).path
+        data = FILES.get(path)
         if data is None:
             self.send_error(404)
             return
@@ -85,7 +106,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 return
         self.send_response(206 if requested else 200)
-        self.send_header('Content-Type', 'video/mp4')
+        self.send_header('Content-Type', CONTENT_TYPES.get(path, 'video/mp4'))
         self.send_header('Accept-Ranges', 'bytes')
         self.send_header('Content-Length', str(end - start + 1))
         if requested:
@@ -113,11 +134,15 @@ try:
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f'http://127.0.0.1:{server.server_port}'
-    result = run([binary, base, out / 'video.mp4'], timeout=300)
+    arguments = [binary, base, out / 'video.mp4']
+    if args.yt_dlp:
+        arguments.append(args.yt_dlp)
+    result = run(arguments, timeout=300)
     print(result.stdout, end='')
     print(result.stderr, end='')
     (out / 'results.json').write_text(json.dumps(
-        dict(checks='passed', receiver='untested'), indent=2) + '\n')
+        dict(checks='passed', genericExtractor='passed' if args.yt_dlp else 'not run',
+             receiver='untested'), indent=2) + '\n')
     print(f'Report: {out / "results.json"}')
 except subprocess.CalledProcessError as error:
     print(error.stdout)

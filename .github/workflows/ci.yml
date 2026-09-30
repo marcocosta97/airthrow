@@ -38,6 +38,8 @@ jobs:
             Sources/AirThrowCore/Protocol.swift \
             Sources/AirThrowCore/MediaSelection.swift \
             Sources/AirThrowCore/SourceResolver.swift \
+            Sources/AirThrowCore/ExtractedSourceAdapter.swift \
+            Sources/AirThrowCore/WebSourceAdapter.swift \
             Sources/AirThrowCore/HelperProcess.swift \
             Sources/AirThrowCore/YouTubeCookies.swift \
             Tests/ResolverChecks/main.swift \

@@ -9,6 +9,7 @@ struct WebSourceAdapter: Sendable {
     init(environment: [String: String]) { self.environment = environment }
 
     func candidates(_ url: URL) async throws -> [MediaCandidate] {
+        try Task.checkCancellation()
         let finder = HelperExecutables(environment: environment)
         guard let helper = finder.executable("yt-dlp", override: "AIRTHROW_YTDLP") else {
             return DirectSourceAdapter.candidates(url)
@@ -22,14 +23,22 @@ struct WebSourceAdapter: Sendable {
         arguments += ["--no-playlist", "--playlist-items", "1", "--simulate",
                       "--dump-single-json", "--no-warnings", "--socket-timeout", "10",
                       "--retries", "0", "--extractor-retries", "0", "--", url.absoluteString]
-        let result = try await HelperProcess.runCapturingStderr(executable: helper, arguments: arguments)
+        let result: HelperProcess.Result
+        do {
+            result = try await HelperProcess.runCapturingStderr(executable: helper, arguments: arguments)
+        } catch ResolutionFailure.unavailable {
+            // An executable can disappear or fail to launch after discovery.
+            try Task.checkCancellation()
+            return DirectSourceAdapter.candidates(url)
+        }
         // An unrecognized page might be an extensionless direct media URL.
         // Give that input one native attempt, with no recursive extraction.
         guard result.succeeded, !result.output.isEmpty else {
             return DirectSourceAdapter.candidates(url)
         }
         do {
-            let choices = try await ExtractedSourceAdapter.candidatesWithHLS(result.output)
+            let choices = try await ExtractedSourceAdapter.candidatesWithHLS(
+                result.output, allowUnverifiedWholeSources: true)
             guard !choices.isEmpty else { throw ResolutionFailure.failed }
             return choices
         } catch ResolutionFailure.unsupportedPage {

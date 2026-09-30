@@ -128,14 +128,19 @@ Ambiguous non-YouTube URLs use only yt-dlp's generic extractor with no cookies
 or site-specific request headers. A missing helper or rejected URL gets one
 native attempt; valid metadata with no presentation fails resolution. A listed
 source that needs disabled conversion keeps its preparation error.
+Generic whole-file and HLS formats with both codecs unspecified may also enter
+native loading or container inspection, with no assumed video evidence. Explicit
+audio-only/video-only formats, fragmented HTTP sources, and custom headers do
+not receive that allowance. Extractor-added Referer headers remain ineligible,
+so some public embedded players will fail until Mac-side header delivery exists.
 Dedicated `playlist?list=…` links and
 Mixes (`list=RD…`) create a queue of up to 100 entries; entries resolve lazily, so
 signed URLs are not retained for the whole playlist, and unavailable or
 not-yet-started entries are skipped with a notice. Live entries play through the
 native HLS path when one is available. Private/authenticated playlists,
 shuffle, repeat, and queue editing are unsupported. A watch link with any other
-`list=` loads only its named video. DRM, non-YouTube sites, and custom request
-headers are out of scope.
+`list=` loads only its named video. DRM, non-YouTube sign-in, site-specific
+extractors, and custom request headers are out of scope.
 
 Some public videos fail with "Could not find a playable video" because YouTube
 challenges the request, not because the video is private. Settings → YouTube
@@ -287,7 +292,7 @@ swiftc -swift-version 6 -parse-as-library Sources/AirThrowCore/Protocol.swift So
 .build/ResolverChecks
 ```
 
-They cover direct bypass, exact website hosts, single-video playlist-context removal, bounded flat-playlist extraction, ordering, unavailable entries, Mix acceptance, live entries, missing helpers, combined-stream selection, unknown codecs, custom headers, DRM and upcoming rejection, native-live selection, malformed output, output limits, timeout, and cancellation of child processes. The native media matrix also checks resolver Stop/replacement and exactly one retry for a source-unavailable error, with all loads paused.
+They cover direct bypass, generic routing and bounded native fallback, exact YouTube hosts, single-video playlist-context removal, bounded flat-playlist extraction, ordering, unavailable entries, Mix acceptance, live entries, missing helpers, combined-stream selection, unknown-codec whole-source inspection, custom headers, DRM and upcoming rejection, native-live selection, malformed output, output limits, timeout, and cancellation of child processes. Generic extraction also verifies that configured YouTube cookies are never imported and Deno remains optional. The native media matrix checks YouTube and generic resolver Stop/replacement and exactly one retry for a source-unavailable error, with all loads paused.
 
 Resolver checks also cover HLS master selection before remuxing, alternate-audio groups, malformed/missing audio references, unsupported codecs, custom-header exclusion, cancellation, and fallback after fetch failure. Master inspection tries at most two distinct URLs, each with an eight-second resource deadline and 1 MiB body limit, using an ephemeral session without cookies or stored credentials. Only a master advertising an H.264/AAC variant and valid HTTP(S) rendition references is eligible; AVPlayer selects and loads the actual renditions. The native matrix includes a separate-audio HLS fixture and exercises HTTP errors, advertised/unadvertised oversized bodies, and cancellation. Receiver audio, seeking and adaptive variant changes still need physical testing.
 
@@ -302,6 +307,12 @@ For an optional metadata-only live smoke check, install `yt-dlp` and `deno`, rec
 ```
 
 This uses the same resolver as the app and prints a redacted result. Live-site results may change independently of AirThrow. Validate UI and CLI loading and receiver picture/sound separately. The result distinguishes a combined source from separate tracks selected for preparation. It is metadata-only and is not a playback pass.
+
+For installed-helper integration over original local pages, run
+`python3 scripts/source-choice-checks.py --yt-dlp /path/to/yt-dlp`. This adds
+JW Player MP4/HLS pages and extensionless media to the controller suite, using
+the real generic extractor and native AVPlayer loading. It does not contact a
+public website or establish receiver playback.
 
 The subprocess runs in its own process group with a 40-second deadline, 8 MiB JSON limit, and 256 KiB discarded stderr limit. Stop/replacement kills the group and reaps the helper. Arguments disable user configuration, plugins, cache, and remote component installation. Generic extraction enables only the generic extractor and does not require Deno. When YouTube cookies are configured, AirThrow reads the browser store or the supplied cookies file itself, keeps only `youtube.com`/`youtu.be`/`youtube-nocookie.com` records, writes them to a private `0600` temporary Netscape file, and passes that file to yt-dlp; the scratch directory is removed once the helper exits. No other site's cookies are imported, and cookie values never enter status, logs, or identifiers. JavaScript/EJS support must already be installed for YouTube. Default yt-dlp browser headers are retained in memory; direct playback does not forward them, while FFmpeg/ffprobe receive them for separate HTTP tracks. Other headers remain ineligible. Even candidates with only default headers can fail if a site requires them at fetch time.
 

@@ -130,7 +130,7 @@ struct SourceChoiceChecks {
             if let previousQuality { UserDefaults.standard.set(previousQuality, forKey: "preferHigherQuality") }
             else { UserDefaults.standard.removeObject(forKey: "preferHigherQuality") }
         }
-        guard CommandLine.arguments.count == 3 else {
+        guard (3...4).contains(CommandLine.arguments.count) else {
             throw NSError(domain: "SourceChoiceChecks", code: 5,
                           userInfo: [NSLocalizedDescriptionKey: "Expected the fixture base URL and local video path"])
         }
@@ -187,7 +187,45 @@ struct SourceChoiceChecks {
                                   height: 2160, plannedPath: .remux)
         try await enhancementReload(website: website, source: native1080,
                                     alternate: alternate, preparer: preparer)
-        print("20/20 source-choice controller checks passed (no physical receiver)")
+        let genericPage = URL(string: "https://video.example/watch?id=generic-private-query")!
+        try await explicitChoiceReResolves(website: genericPage, high: native1080, low: native720)
+        try await staleResolutionRejected(website: genericPage, videoURL: videoURL, native: native720)
+        try await snapshotIsPrivate(base: base, website: genericPage, secret: secret)
+        print("23/23 source-choice controller checks passed (no physical receiver)")
+        if CommandLine.arguments.count == 4 {
+            try await genericExtraction(base: base, helper: CommandLine.arguments[3])
+        }
+    }
+
+    // Optional integration check with the installed generic extractor and original
+    // loopback pages. The real resolver, selector and native loader all participate.
+    static func genericExtraction(base: URL, helper: String) async throws {
+        let resolver = SourceResolver(environment: ["AIRTHROW_YTDLP": helper, "AIRTHROW_DENO": "/missing/deno"],
+                                      cookies: .file(URL(fileURLWithPath: "/missing/generic-cookies")))
+        let controller = PlaybackController(resolveCandidates: { try await resolver.candidates(for: $0) },
+                                            prepareSource: nil)
+        defer { controller.shutdown() }
+        let player = controller.player
+        for path in ["generic-file", "generic-hls", "generic-media"] {
+            let page = base.appendingPathComponent(path)
+            try controller.load(page.absoluteString)
+            try check(controller.snapshot.loadingPhase == "resolving", "Real generic extraction skipped discovery phase")
+            let ready = try await settle(controller, seconds: 40)
+            try check(ready.state == .awaitingReceiver && ready.hasAudio == true && ready.playbackPath == .direct,
+                      "Real generic source did not finish native loading with audio")
+            try check(controller.player === player && player.rate == 0 && player.isMuted,
+                      "Generic extraction replaced the persistent player or started local playback")
+            try check(player.currentItem?.asset is AVURLAsset, "Generic extraction did not install a native URL asset")
+            let installedURL = (player.currentItem?.asset as? AVURLAsset)?.url
+            let expectedPaths = path == "generic-file" ? ["/audio.mp4"]
+                : (path == "generic-hls" ? ["/master.m3u8", "/stream.m3u8"] : ["/generic-media"])
+            try check(installedURL.map { expectedPaths.contains($0.path) } == true,
+                      "Generic extraction installed the page instead of an eligible media presentation")
+            let json = String(decoding: try JSONEncoder().encode(ready), as: UTF8.self)
+            try check(!json.contains(base.absoluteString), "Generic status exposed its media URL")
+            controller.stop()
+        }
+        print("PASS installed yt-dlp generic MP4/HLS pages and extensionless media through native controller loading")
     }
 
     static func sourceChoiceDuringPreparation(
