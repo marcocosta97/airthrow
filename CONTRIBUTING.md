@@ -10,7 +10,7 @@
 
 Use Apple's public APIs and the system receiver picker. Keep one playback session shared by the UI and CLI, with no local video presentation. Derive status from observed playback state and cancel stale work when media changes.
 
-`SourceResolver` dispatches discovery to direct/YouTube/generic-web/local adapters. `ExtractedSourceAdapter` parses yt-dlp metadata for both website paths; YouTube keeps its own URL, playlist, and cookie handling. Adapters return complete `MediaCandidate` presentations rather than selecting one: an upstream master, combined file, paired audio/video tracks, or a validated local regular file. `MediaSelector` ranks them without provider-specific logic and returns a `ResolvedSource` execution plan. Native playback wins over remuxing by default; within a tier, known resolution wins, HLS breaks resolution ties, then bitrate. HLS quality comes from eligible variants in the inspected master and is not the observed playback quality. Recognizable direct-media extensions bypass helpers; ambiguous extensionless URLs try generic extraction and retain one native fallback when yt-dlp is missing or rejects the URL. Local MP4/MOV files are served in place. The shared remux fallback handles initial native format failures; HLS, network/DRM failures and already-prepared sources do not enter that fallback. `MediaPreparer` still validates actual streams before copying them.
+`SourceResolver` uses a website adapter registry while keeping direct media and local files helper-free. Bundled JSON manifests configure yt-dlp providers; custom Swift adapters implement `SourceAdapter`. `ExtractedSourceAdapter` parses website metadata; YouTube keeps its own URL, playlist, and cookie handling. Adapters return complete `MediaCandidate` presentations rather than selecting one: an upstream master, combined file, paired audio/video tracks, or a validated local regular file. `MediaSelector` ranks them without provider-specific logic and returns a `ResolvedSource` execution plan. Native playback wins over remuxing by default; within a tier, known resolution wins, HLS breaks resolution ties, then bitrate. HLS quality comes from eligible variants in the inspected master and is not the observed playback quality. Recognizable direct-media extensions bypass helpers; ambiguous extensionless URLs try generic extraction and retain one native fallback when yt-dlp is missing or rejects the URL. Local MP4/MOV files are served in place. The shared remux fallback handles initial native format failures; HLS, network/DRM failures and already-prepared sources do not enter that fallback. `MediaPreparer` still validates actual streams before copying them.
 
 The additive protocol-v1 `playbackPath` reports `direct`, `remux`, `audio_conversion`, or `video_conversion`, and is absent before selection, after Stop, and on terminal failure. An unknown preparation plan remains unlabelled while inspection runs; prepared media reports the actual path used. The UI and CLI use the same snapshot. It neither exposes candidate URLs nor asserts receiver compatibility. Resolver/core checks cover ranking independently of adapter order, preserving alternatives, lower-quality HLS versus native MP4, and bounded fallback; preparation checks cover label changes and cleanup across replacement/Stop.
 
@@ -19,6 +19,61 @@ The additive protocol-v1 `playbackPath` reports `direct`, `remux`, `audio_conver
 ## Product behaviour and limits
 
 User-facing behaviour that is too detailed for the README lives here.
+
+### Adding website sources
+
+For a site already handled by yt-dlp, add one JSON file under
+`Sources/AirThrowCore/SourceProviders/`. SwiftPM, Xcode and the packaging script
+include that directory automatically; no resolver or player changes are needed.
+Rebuild the app to install the provider. For example, this **illustrative**
+provider would require an upstream extractor named `example:video`:
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "example-video",
+  "name": "Example Video",
+  "hosts": ["video.example", "www.video.example"],
+  "extractors": ["example:video"]
+}
+```
+
+Use literal names from `yt-dlp --list-extractors`, including any extractors
+needed for that site's redirects. Host matching is exact: list each supported
+host explicitly. Direct-media extensions still bypass discovery. Extractor
+names allow ASCII letters, digits, `_`, `:`, and `-`; regexes and the
+`all`/`default`/`end` selectors are rejected. Only the shipped generic manifest
+uses `fallback: true`; its host list is empty and its extractor is `generic`.
+Unknown fields, duplicate IDs/hosts, multiple fallbacks, malformed files and
+unsupported schema versions fail validation. Manifests cannot set cookies,
+headers, helper paths or arbitrary command arguments.
+
+For custom discovery, put a `SourceAdapter` implementation in a separate Swift
+file under `Sources/AirThrowCore` and register it in the `customAdapters` factory
+in `BundledSources.swift`. Supply a stable ID,
+exact hosts and `candidates(for:)`; each candidate must describe a complete
+presentation. The default protocol properties keep direct-media URLs outside
+the adapter; opt into `handlesDirectMediaURLs` only when URL normalization
+requires it. For checks or other callers, extend the shipped registry with
+`SourceRegistry.bundled(additionalAdapters:)` and inject it through
+`SourceResolver(registry:)`. Use that resolver's `needsResolution(for:)` for
+loading/retry decisions. Duplicate registrations cannot override YouTube.
+
+Selection, conversion permissions, preparation, native subtitles and player
+lifecycle stay in the shared pipeline. YouTube cookies and queues retain their
+existing handling; this interface discovers single media presentations and
+does not add authentication, generic playlists or request-header delivery.
+Known manifest providers report extraction/setup failures instead of trying
+to play a rejected HTML page. The generic fallback still permits one native
+attempt for an ambiguous or extensionless URL.
+
+Contribute deterministic metadata/helper fixtures and resolver checks with the
+provider. Run `.build/debug/SourceRegistryChecks` after `swift build` and
+`python3 scripts/source-registry-checks.py` for relocated resource and added-file
+checks, then the resolver and source-choice checks below. Record a public-site extraction and
+native loading check separately from physical receiver playback; a manifest
+alone is not evidence that a site's media plays on AirPlay. Manifests are bundled
+data, not runtime code plugins, and still depend on the installed yt-dlp version.
 
 ### Receiver selection
 
@@ -140,7 +195,7 @@ not-yet-started entries are skipped with a notice. Live entries play through the
 native HLS path when one is available. Private/authenticated playlists,
 shuffle, repeat, and queue editing are unsupported. A watch link with any other
 `list=` loads only its named video. DRM, non-YouTube sign-in, site-specific
-extractors, and custom request headers are out of scope.
+extractors without a registered provider, and custom request headers are out of scope.
 
 Some public videos fail with "Could not find a playable video" because YouTube
 challenges the request, not because the video is private. Settings → YouTube
@@ -288,7 +343,9 @@ For manual receiver checks, append `--serve --bind YOUR_MAC_LAN_IP` to keep the 
 Deterministic checks use fake helper executables and metadata; no installed yt-dlp, external site, or receiver is needed:
 
 ```bash
-swiftc -swift-version 6 -parse-as-library Sources/AirThrowCore/Protocol.swift Sources/AirThrowCore/MediaSelection.swift Sources/AirThrowCore/SourceResolver.swift Sources/AirThrowCore/ExtractedSourceAdapter.swift Sources/AirThrowCore/WebSourceAdapter.swift Sources/AirThrowCore/HelperProcess.swift Sources/AirThrowCore/YouTubeCookies.swift Tests/ResolverChecks/main.swift -o .build/ResolverChecks
+swiftc -swift-version 6 -parse-as-library Sources/AirThrowCore/*.swift Tests/ResolverChecks/main.swift -o .build/ResolverChecks
+rm -rf .build/SourceProviders
+cp -R Sources/AirThrowCore/SourceProviders .build/
 .build/ResolverChecks
 ```
 

@@ -143,6 +143,8 @@ try:
         run(['swiftc', '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
              ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
              ROOT / 'Tests/PreparationChecks/main.swift', '-o', binary], timeout=90)
+        shutil.copytree(ROOT / 'Sources/AirThrowCore/SourceProviders',
+                        binary.parent / 'SourceProviders', dirs_exist_ok=True)
         checks = run([binary, f'http://127.0.0.1:{server.server_port}', OUT], timeout=180)
         print(checks.stdout, end='')
         # Compare each compressed packet: this establishes stream copying rather than merely matching codec names.
@@ -202,6 +204,8 @@ try:
         print('PASS converted output is SDR H.264 yuv420p <=1080p/60 and AAC LC <=48 kHz mono/stereo')
         print('PASS 4K remux, four enhancement presets, 100->60 fps cap, software fallback and 10-bit refusal')
     progressive = OUT / 'ProgressiveChecks'
+    shutil.copytree(ROOT / 'Sources/AirThrowCore/SourceProviders',
+                    progressive.parent / 'SourceProviders', dirs_exist_ok=True)
     run(['swiftc', '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
          ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
          ROOT / 'Tests/ProgressiveChecks/main.swift', '-o', progressive], timeout=90)

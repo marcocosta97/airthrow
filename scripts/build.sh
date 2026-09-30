@@ -20,6 +20,7 @@ cp "$bin_dir/AirThrowApp" "$app/Contents/MacOS/AirThrowApp"
 cp "$bin_dir/athrow" "$app/Contents/MacOS/athrow"
 cp "$bin_dir/athrow" "$build_dir/athrow"
 cp Resources/Info.plist "$app/Contents/Info.plist"
+cp -R Sources/AirThrowCore/SourceProviders "$app/Contents/Resources/SourceProviders"
 bash scripts/write-build-commit.sh "$app/Contents/Resources/BuildCommit.txt"
 # Compile the Icon Composer document so macOS renders the Liquid Glass icon,
 # including its light, dark, and tinted appearances (Assets.car), with a loose

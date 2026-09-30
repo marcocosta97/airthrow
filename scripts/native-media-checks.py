@@ -214,6 +214,8 @@ try:
          ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift',
          ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
          ROOT / 'Tests/MediaChecks/main.swift', '-o', binary])
+    shutil.copytree(ROOT / 'Sources/AirThrowCore/SourceProviders',
+                    binary.parent / 'SourceProviders', dirs_exist_ok=True)
     result = run([binary, base, out / 'fixtures.json'], timeout=360)
     report = dict(macOS=platform.mac_ver()[0], machine=platform.machine(),
                   macModel=run(['sysctl', '-n', 'hw.model']).stdout.strip(),

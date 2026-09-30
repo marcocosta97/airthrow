@@ -32,18 +32,18 @@ jobs:
       - name: Core checks
         run: .build/debug/CoreChecks
 
+      - name: Source registry checks
+        run: |
+          .build/debug/SourceRegistryChecks
+          python3 scripts/source-registry-checks.py
+
       - name: Resolver checks
         run: |
           swiftc -swift-version 6 -parse-as-library \
-            Sources/AirThrowCore/Protocol.swift \
-            Sources/AirThrowCore/MediaSelection.swift \
-            Sources/AirThrowCore/SourceResolver.swift \
-            Sources/AirThrowCore/ExtractedSourceAdapter.swift \
-            Sources/AirThrowCore/WebSourceAdapter.swift \
-            Sources/AirThrowCore/HelperProcess.swift \
-            Sources/AirThrowCore/YouTubeCookies.swift \
+            Sources/AirThrowCore/*.swift \
             Tests/ResolverChecks/main.swift \
             -o .build/ResolverChecks
+          cp -R Sources/AirThrowCore/SourceProviders .build/
           .build/ResolverChecks
 
       - name: Settings checks

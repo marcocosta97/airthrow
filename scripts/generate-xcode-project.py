@@ -29,11 +29,12 @@ for path in sorted((root / 'Sources').rglob('*.swift')):
     relative = str(path.relative_to(root))
     files[relative] = add(relative, dict(isa='PBXFileReference', lastKnownFileType='sourcecode.swift', path=relative, sourceTree='<group>'))
 icon = add('Icon', dict(isa='PBXFileReference', lastKnownFileType='folder.iconcomposer.icon', path='Resources/AppIcon.icon', sourceTree='<group>'))
+providers = add('SourceProviders', dict(isa='PBXFileReference', lastKnownFileType='folder', path='Sources/AirThrowCore/SourceProviders', sourceTree='<group>'))
 plist = add('Info', dict(isa='PBXFileReference', lastKnownFileType='text.plist.xml', path='Resources/Info.plist', sourceTree='<group>'))
 app_product = add('AppProduct', dict(isa='PBXFileReference', explicitFileType='wrapper.application', path='AirThrow.app', sourceTree='BUILT_PRODUCTS_DIR'))
 cli_product = add('CLIProduct', dict(isa='PBXFileReference', explicitFileType='compiled.mach-o.executable', path='athrow', sourceTree='BUILT_PRODUCTS_DIR'))
 products = add('Products', dict(isa='PBXGroup', children=[app_product, cli_product], name='Products', sourceTree='<group>'))
-main_group = add('MainGroup', dict(isa='PBXGroup', children=list(files.values()) + [plist, icon, products], sourceTree='<group>'))
+main_group = add('MainGroup', dict(isa='PBXGroup', children=list(files.values()) + [plist, icon, providers, products], sourceTree='<group>'))
 
 common = dict(MACOSX_DEPLOYMENT_TARGET='14.0', SWIFT_VERSION='6.0', SDKROOT='macosx', CLANG_ENABLE_MODULES='YES')
 
@@ -65,7 +66,8 @@ embedded = add('EmbeddedCLI', dict(isa='PBXBuildFile', fileRef=cli_product, sett
 copy = add('CopyCLI', dict(isa='PBXCopyFilesBuildPhase', buildActionMask='2147483647', dstPath='', dstSubfolderSpec='6', files=[embedded], name='Embed CLI', runOnlyForDeploymentPostprocessing='0'))
 add('CLITarget', dict(isa='PBXNativeTarget', buildConfigurationList=cli_configs, buildPhases=[source_phase('CLI', ['AirThrowCore', 'AirThrowCLI'])], buildRules=[], dependencies=[], name='athrow', productName='athrow', productReference=cli_product, productType='com.apple.product-type.tool'))
 icon_build = add('IconBuild', dict(isa='PBXBuildFile', fileRef=icon))
-resources = add('AppResources', dict(isa='PBXResourcesBuildPhase', buildActionMask='2147483647', files=[icon_build], runOnlyForDeploymentPostprocessing='0'))
+providers_build = add('SourceProvidersBuild', dict(isa='PBXBuildFile', fileRef=providers))
+resources = add('AppResources', dict(isa='PBXResourcesBuildPhase', buildActionMask='2147483647', files=[icon_build, providers_build], runOnlyForDeploymentPostprocessing='0'))
 commit_phase = add('BuildCommit', dict(isa='PBXShellScriptBuildPhase', buildActionMask='2147483647', files=[],
     name='Stamp Git commit', inputPaths=[], outputPaths=['$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/BuildCommit.txt'],
     alwaysOutOfDate='1', runOnlyForDeploymentPostprocessing='0', shellPath='/bin/bash',

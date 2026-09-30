@@ -9,9 +9,10 @@ let package = Package(
         .executable(name: "athrow", targets: ["AirThrowCLI"])
     ],
     targets: [
-        .target(name: "AirThrowCore"),
+        .target(name: "AirThrowCore", resources: [.copy("SourceProviders")]),
         .executableTarget(name: "AirThrowApp", dependencies: ["AirThrowCore"]),
         .executableTarget(name: "AirThrowCLI", dependencies: ["AirThrowCore"]),
-        .executableTarget(name: "CoreChecks", dependencies: ["AirThrowCore"], path: "Tests/CoreChecks")
+        .executableTarget(name: "CoreChecks", dependencies: ["AirThrowCore"], path: "Tests/CoreChecks"),
+        .executableTarget(name: "SourceRegistryChecks", dependencies: ["AirThrowCore"], path: "Tests/SourceRegistryChecks")
     ]
 )
