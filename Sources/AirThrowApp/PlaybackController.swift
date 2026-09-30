@@ -125,7 +125,7 @@ final class PlaybackController: ObservableObject {
          allowVideoConversion: Bool? = nil,
          preferQuality: Bool? = nil,
          resolvePlaylist: @escaping @Sendable (URL) async throws -> ResolvedPlaylist = {
-        try await SourceResolver(cookies: YouTubeCookiePreference.current()).resolvePlaylist($0)
+        try await SourceResolver(sessions: WebsiteCookiePreference.current()).resolvePlaylist($0)
     }, prepareSource: (@Sendable (ResolvedSource) async throws -> PreparedMedia)? = {
         try await MediaPreparer().prepare($0)
     }, afterPlaybackBehavior: @escaping @MainActor () -> AfterPlaybackBehavior = {
@@ -135,7 +135,7 @@ final class PlaybackController: ObservableObject {
         if let resolveCandidates { self.resolveCandidates = resolveCandidates }
         else if let resolveSource {
             self.resolveCandidates = { [MediaCandidate(source: try await resolveSource($0))] }
-        } else { self.resolveCandidates = { try await SourceResolver(cookies: YouTubeCookiePreference.current()).candidates(for: $0) } }
+        } else { self.resolveCandidates = { try await SourceResolver(sessions: WebsiteCookiePreference.current()).candidates(for: $0) } }
         self.allowVideoConversion = allowVideoConversion ?? UserDefaults.standard.bool(forKey: "allowVideoConversion")
         self.preferQuality = preferQuality ?? UserDefaults.standard.bool(forKey: "preferHigherQuality")
         self.resolvePlaylist = resolvePlaylist
@@ -1612,5 +1612,58 @@ enum YouTubeCookiePreference {
         default:
             return .none
         }
+    }
+}
+
+
+/// Settings select which site sessions may be read. Cookie contents are never
+/// stored in defaults; the resolver reads only the service of the next URL.
+enum WebsiteCookiePreference {
+    static let defaultBrowser = YouTubeCookiePreference.defaultBrowser
+    static func key(_ service: WebsiteService, _ field: String) -> String {
+        if service == .youtube {
+            switch field {
+            case "mode": return YouTubeCookiePreference.modeKey
+            case "browser": return YouTubeCookiePreference.browserKey
+            case "filePath": return YouTubeCookiePreference.filePathKey
+            default: break
+            }
+        }
+        return "websiteSession.\(service.rawValue).\(field)"
+    }
+
+    static func enabled(_ service: WebsiteService, defaults: UserDefaults = .standard) -> Bool {
+        let enabledKey = key(service, "enabled")
+        if defaults.object(forKey: enabledKey) != nil { return defaults.bool(forKey: enabledKey) }
+        // Preserve existing consent; new installations and new services stay off.
+        return service == .youtube && YouTubeCookiePreference.fromDefaults(defaults) != .none
+    }
+
+    static func source(_ service: WebsiteService, defaults: UserDefaults = .standard) -> YouTubeCookies {
+        guard enabled(service, defaults: defaults) else { return .none }
+        let mode = defaults.string(forKey: key(service, "mode")) ?? "browser"
+        switch mode {
+        case "browser":
+            let browser = (defaults.string(forKey: key(service, "browser")) ?? defaultBrowser).lowercased()
+            return YouTubeCookies.supportedBrowsers.contains(browser) ? .browser(browser) : .none
+        case "file":
+            guard let path = defaults.string(forKey: key(service, "filePath")), path.hasPrefix("/") else { return .none }
+            return .file(URL(fileURLWithPath: path))
+        default: return .none
+        }
+    }
+
+    static func current(environment: [String: String] = ProcessInfo.processInfo.environment,
+                        defaults: UserDefaults = .standard) -> WebsiteSessions {
+        var sources: [WebsiteService: YouTubeCookies] = [:]
+        for service in WebsiteService.allCases { sources[service] = source(service, defaults: defaults) }
+        // Keep the existing explicit CLI override, unless the user has turned
+        // YouTube off in the new service selector.
+        let override = YouTubeCookies.fromEnvironment(environment)
+        if override != .none, (defaults.object(forKey: key(.youtube, "enabled")) == nil
+            || enabled(.youtube, defaults: defaults)) {
+            sources[.youtube] = override
+        }
+        return WebsiteSessions(sources: sources)
     }
 }

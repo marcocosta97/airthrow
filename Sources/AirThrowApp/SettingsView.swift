@@ -16,42 +16,47 @@ final class CookieStatusModel: ObservableObject {
         case result(YouTubeCookieStatus)
     }
 
-    @Published private(set) var check: Check = .idle
+    @Published private(set) var checks: [WebsiteService: Check] = [:]
     @Published private(set) var installedBrowsers: [String] = []
+    var check: Check { checks[.youtube] ?? .idle }
     private var task: Task<Void, Never>?
-    private var requestedSource: YouTubeCookies = .none
-    private var revision = 0
-    private let probe: @Sendable (YouTubeCookies, URL) -> YouTubeCookieStatus
+    private var requested: [WebsiteService: YouTubeCookies] = [:]
+    private var revisions: [WebsiteService: Int] = [:]
+    private var pending = Set<WebsiteService>()
+    private let probe: @Sendable (WebsiteService, YouTubeCookies, URL) -> YouTubeCookieStatus
 
-    init(probe: @escaping @Sendable (YouTubeCookies, URL) -> YouTubeCookieStatus = { $0.probe(home: $1) }) {
-        self.probe = probe
+    init() { probe = { service, source, home in source.probe(for: service, home: home) } }
+    init(probe: @escaping @Sendable (YouTubeCookies, URL) -> YouTubeCookieStatus) {
+        self.probe = { _, source, home in probe(source, home) }
+    }
+    init(scopedProbe: @escaping @Sendable (WebsiteService, YouTubeCookies, URL) -> YouTubeCookieStatus) {
+        probe = scopedProbe
     }
 
     func discoverBrowsers() {
         installedBrowsers = YouTubeCookiePreference.installedBrowsers()
     }
 
-    func refresh(for source: YouTubeCookies) {
-        requestedSource = source
-        revision += 1
-        check = source == .none ? .idle : .checking
-        // A synchronous Keychain/browser read cannot be cancelled midway.
-        // Keep at most one in flight and coalesce changes to the latest choice.
-        guard task == nil, source != .none else { return }
+    func refresh(for source: YouTubeCookies, service: WebsiteService = .youtube) {
+        requested[service] = source
+        revisions[service, default: 0] += 1
+        checks[service] = source == .none ? .idle : .checking
+        if source == .none { pending.remove(service) }
+        else { pending.insert(service) }
+        // Serialize browser/Keychain reads and coalesce each service to its
+        // latest choice. Disabling one cannot revive a stale check result.
+        guard task == nil, !pending.isEmpty else { return }
         let home = FileManager.default.homeDirectoryForCurrentUser
         let probe = self.probe
         task = Task { [weak self] in
-            while let self {
-                let source = self.requestedSource
-                let revision = self.revision
-                guard source != .none else { self.task = nil; return }
-                let result = await Task.detached { probe(source, home) }.value
-                if self.revision == revision {
-                    self.check = .result(result)
-                    self.task = nil
-                    return
-                }
+            while let self, let service = WebsiteService.allCases.first(where: { self.pending.contains($0) }) {
+                self.pending.remove(service)
+                let source = self.requested[service] ?? .none
+                let revision = self.revisions[service]
+                let result = await Task.detached { probe(service, source, home) }.value
+                if self.revisions[service] == revision { self.checks[service] = .result(result) }
             }
+            self?.task = nil
         }
     }
 }
@@ -60,9 +65,6 @@ struct SettingsView: View {
     @ObservedObject var controller: PlaybackController
     @ObservedObject var cookieStatus: CookieStatusModel
     @AppStorage("afterPlaybackBehavior") private var behavior = AfterPlaybackBehavior.keepConnected.rawValue
-    @AppStorage(YouTubeCookiePreference.modeKey) private var cookieMode = "none"
-    @AppStorage(YouTubeCookiePreference.browserKey) private var cookieBrowser = YouTubeCookiePreference.defaultBrowser
-    @AppStorage(YouTubeCookiePreference.filePathKey) private var cookieFilePath = ""
 
     var body: some View {
         Form {
@@ -92,43 +94,14 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Section("YouTube access") {
-                Picker("Cookies", selection: $cookieMode) {
-                    Text("Don't use cookies").tag("none")
-                    Text("From a browser").tag("browser")
-                    Text("From a cookies file").tag("file")
+            Section("Website sessions") {
+                Text("Select the services whose signed-in sessions AirThrow may use. Public links work without enabling a session.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                ForEach(WebsiteService.allCases, id: \.self) { service in
+                    WebsiteSessionRow(service: service, cookieStatus: cookieStatus)
                 }
-                if cookieMode == "browser" {
-                    Picker("Browser", selection: $cookieBrowser) {
-                        if !installedBrowsers.contains(cookieBrowser) {
-                            Text("\(browserName(cookieBrowser)) (not installed)").tag(cookieBrowser)
-                        }
-                        ForEach(installedBrowsers, id: \.self) { browser in
-                            Text(browserName(browser)).tag(browser)
-                        }
-                    }
-                }
-                if cookieMode == "file" {
-                    HStack {
-                        Text(cookieFilePath.isEmpty
-                             ? "No file selected"
-                             : (cookieFilePath as NSString).lastPathComponent)
-                            .lineLimit(1).truncationMode(.middle)
-                            .foregroundStyle(cookieFilePath.isEmpty ? .secondary : .primary)
-                        Spacer()
-                        Button("Choose…") { chooseCookiesFile() }
-                    }
-                }
-                statusView
-                if selectedSource != .none {
-                    Button("Recheck") {
-                        cookieStatus.discoverBrowsers()
-                        cookieStatus.refresh(for: selectedSource)
-                    }
-                    .disabled(cookieStatus.check == .checking)
-                    .help("Check again after signing in or changing browser permissions")
-                }
-                Text("Use a signed-in YouTube session for videos that require it. Only YouTube cookies are read and passed to yt-dlp; their values are never shown or logged. Applies to the next load. Safari needs Full Disk Access; Chrome-family browsers ask for Keychain access.")
+                Text("Only the loaded website’s cookies are passed to yt-dlp. Changes apply to the next load. Safari needs Full Disk Access; Chrome-family browsers may ask for Keychain access.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -139,89 +112,127 @@ struct SettingsView: View {
         .frame(width: 440, height: 560)
         .background(Color(nsColor: .textBackgroundColor))
         .onAppear { cookieStatus.discoverBrowsers() }
-        .task(id: probeKey) { cookieStatus.refresh(for: selectedSource) }
+    }
+}
+
+private struct WebsiteSessionRow: View {
+    let service: WebsiteService
+    @ObservedObject var cookieStatus: CookieStatusModel
+    @AppStorage private var enabled: Bool
+    @AppStorage private var cookieMode: String
+    @AppStorage private var cookieBrowser: String
+    @AppStorage private var cookieFilePath: String
+
+    init(service: WebsiteService, cookieStatus: CookieStatusModel) {
+        self.service = service
+        self.cookieStatus = cookieStatus
+        _enabled = AppStorage(wrappedValue: WebsiteCookiePreference.enabled(service),
+                              WebsiteCookiePreference.key(service, "enabled"))
+        _cookieMode = AppStorage(wrappedValue: "browser", WebsiteCookiePreference.key(service, "mode"))
+        _cookieBrowser = AppStorage(wrappedValue: WebsiteCookiePreference.defaultBrowser,
+                                    WebsiteCookiePreference.key(service, "browser"))
+        _cookieFilePath = AppStorage(wrappedValue: "", WebsiteCookiePreference.key(service, "filePath"))
     }
 
-    // MARK: - Cookie status
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle(service.title, isOn: $enabled)
+                .accessibilityLabel("Use \(service.title) session")
+            if enabled {
+                Picker("Session from", selection: $cookieMode) {
+                    Text("Browser").tag("browser")
+                    Text("Cookies file").tag("file")
+                    // A legacy or malformed preference stays visibly inactive.
+                    if cookieMode == "none" { Text("None").tag("none") }
+                }
+                .accessibilityLabel("\(service.title) cookie source")
+                if cookieMode == "browser" {
+                    Picker("Browser", selection: $cookieBrowser) {
+                        if !installedBrowsers.contains(cookieBrowser) {
+                            Text("\(browserName(cookieBrowser)) (not installed)").tag(cookieBrowser)
+                        }
+                        ForEach(installedBrowsers, id: \.self) { browser in
+                            Text(browserName(browser)).tag(browser)
+                        }
+                    }
+                    .accessibilityLabel("\(service.title) browser")
+                }
+                if cookieMode == "file" {
+                    HStack {
+                        Text(cookieFilePath.isEmpty ? "No file selected" : (cookieFilePath as NSString).lastPathComponent)
+                            .lineLimit(1).truncationMode(.middle)
+                            .foregroundStyle(cookieFilePath.isEmpty ? .secondary : .primary)
+                        Spacer()
+                        Button("Choose…") { chooseCookiesFile() }
+                            .accessibilityLabel("Choose \(service.title) cookies file")
+                    }
+                }
+                statusView
+                if selectedSource != .none {
+                    Button("Recheck") {
+                        cookieStatus.discoverBrowsers()
+                        cookieStatus.refresh(for: selectedSource, service: service)
+                    }
+                    .disabled(check == .checking)
+                    .accessibilityLabel("Recheck \(service.title) session")
+                }
+            }
+        }
+        .onChange(of: enabled) { _, value in
+            if value, cookieMode == "none" { cookieMode = "browser" }
+        }
+        .task(id: probeKey) { cookieStatus.refresh(for: selectedSource, service: service) }
+    }
 
-    private var probeKey: String { "\(cookieMode)|\(effectiveBrowser)|\(cookieFilePath)" }
-
+    private var check: CookieStatusModel.Check { cookieStatus.checks[service] ?? .idle }
+    private var probeKey: String { "\(enabled)|\(cookieMode)|\(cookieBrowser)|\(cookieFilePath)" }
     private var installedBrowsers: [String] { cookieStatus.installedBrowsers }
-
-    private var effectiveBrowser: String {
-        cookieBrowser
-    }
-
+    private var effectiveBrowser: String { cookieBrowser }
     private var selectedSource: YouTubeCookies {
+        guard enabled else { return .none }
         switch cookieMode {
-        case "browser":
-            return .browser(effectiveBrowser)
-        case "file":
-            return cookieFilePath.isEmpty ? .none : .file(URL(fileURLWithPath: cookieFilePath))
-        default:
-            return .none
+        case "browser": return .browser(effectiveBrowser)
+        case "file": return cookieFilePath.isEmpty ? .none : .file(URL(fileURLWithPath: cookieFilePath))
+        default: return .none
         }
     }
 
     @ViewBuilder private var statusView: some View {
-        switch cookieStatus.check {
-        case .idle:
-            EmptyView()
+        switch check {
+        case .idle: EmptyView()
         case .checking:
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
-                Text("Checking cookies…").font(.caption).foregroundStyle(.secondary)
+                Text("Checking session…").font(.caption).foregroundStyle(.secondary)
             }
         case .result(let status):
             switch status {
-            case .none:
-                EmptyView()
-            case .loaded(let count):
-                let message = cookieMode == "file"
-                    ? "Loaded \(count) YouTube cookie\(count == 1 ? "" : "s"). A file is a snapshot and can expire; re-export it if loading fails."
-                    : "Loaded \(count) YouTube cookie\(count == 1 ? "" : "s")."
-                statusLabel(message, color: .green, symbol: "checkmark.circle.fill")
+            case .none: EmptyView()
+            case .loaded:
+                statusLabel("Session cookies found. Access is checked when loading a video.", color: .secondary, symbol: "checkmark.circle")
             case .permissionDenied:
                 statusLabel(permissionMessage, color: .red, symbol: "xmark.circle.fill")
             case .noSession:
-                statusLabel(noSessionMessage, color: .red, symbol: "xmark.circle.fill")
+                statusLabel("No \(service.title) session found. Sign in in the selected browser or choose a fresh cookies file.",
+                            color: .secondary, symbol: "person.crop.circle.badge.questionmark")
             case .notInstalled:
                 statusLabel("\(browserName(effectiveBrowser)) is not installed.", color: .red, symbol: "xmark.circle.fill")
             case .unavailable:
-                statusLabel(cookieMode == "file" ? "Cannot read that cookies file."
-                                                 : "Could not read cookies from \(browserName(effectiveBrowser)).",
+                statusLabel(cookieMode == "file" ? "Cannot read that cookies file." : "Could not read cookies from \(browserName(effectiveBrowser)).",
                             color: .red, symbol: "xmark.circle.fill")
             }
         }
     }
 
     private func statusLabel(_ message: String, color: Color, symbol: String) -> some View {
-        Label {
-            Text(message).fixedSize(horizontal: false, vertical: true)
-        } icon: {
-            Image(systemName: symbol)
-        }
-        .font(.caption)
-        .foregroundStyle(color)
+        Label { Text(message).fixedSize(horizontal: false, vertical: true) } icon: { Image(systemName: symbol) }
+            .font(.caption).foregroundStyle(color)
     }
-
     private var permissionMessage: String {
-        switch effectiveBrowser {
-        case "safari":
-            "Cannot read Safari cookies. Grant AirThrow Full Disk Access in System Settings → Privacy & Security → Full Disk Access, then recheck."
-        default:
-            "Keychain access was denied. Allow AirThrow to read the browser's stored key, then recheck."
-        }
+        effectiveBrowser == "safari"
+            ? "Allow AirThrow Full Disk Access in System Settings, then recheck."
+            : "Allow access to the browser’s stored Keychain key, then recheck."
     }
-
-    private var noSessionMessage: String {
-        cookieMode == "file"
-            ? "No YouTube cookies found in that file."
-            : "No YouTube session found in \(browserName(effectiveBrowser)). Sign in to YouTube there, then recheck."
-    }
-
-    // MARK: - Helpers
-
     private func browserName(_ browser: String) -> String {
         switch browser {
         case "brave": "Brave"
@@ -236,13 +247,12 @@ struct SettingsView: View {
         default: browser.capitalized
         }
     }
-
     private func chooseCookiesFile() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        panel.message = "Choose a Netscape cookies.txt file. Only YouTube cookies are used."
+        panel.message = "Choose a Netscape cookies.txt file. Only \(service.title) cookies are used."
         let completion: (NSApplication.ModalResponse) -> Void = { response in
             if response == .OK, let url = panel.url { cookieFilePath = url.path }
         }

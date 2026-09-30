@@ -7,9 +7,12 @@ public struct YTDLPSourceAdapter: SourceAdapter {
     public let hosts: [String] = []
     public let isFallback = true
     private let environment: [String: String]
+    private let sessions: WebsiteSessions
 
-    public init(environment: [String: String] = ProcessInfo.processInfo.environment) {
+    public init(environment: [String: String] = ProcessInfo.processInfo.environment,
+                sessions: WebsiteSessions = WebsiteSessions()) {
         self.environment = environment
+        self.sessions = sessions
     }
 
     public func candidates(for url: URL) async throws -> [MediaCandidate] {
@@ -20,6 +23,12 @@ public struct YTDLPSourceAdapter: SourceAdapter {
         }
         var arguments = ["--ignore-config", "--no-plugin-dirs", "--no-cache-dir",
                          "--no-remote-components", "--no-js-runtimes"]
+        let scratch: CookieScratch
+        if let service = WebsiteService.service(for: url) {
+            scratch = sessions.source(for: service).materialize(for: service)
+        } else { scratch = .empty }
+        defer { scratch.cleanup() }
+        if let path = scratch.path { arguments += ["--cookies", path] }
         if let deno = finder.executable("deno", override: "AIRTHROW_DENO") {
             arguments += ["--js-runtimes", "deno:\(deno)"]
         }
@@ -42,7 +51,8 @@ public struct YTDLPSourceAdapter: SourceAdapter {
         }
         do {
             let choices = try await ExtractedSourceAdapter.candidatesWithHLS(
-                result.output, allowUnverifiedWholeSources: true)
+                result.output, allowUnverifiedWholeSources: true,
+                allowAuthenticated: scratch.path != nil)
             guard !choices.isEmpty else { throw ResolutionFailure.failed }
             return choices
         } catch ResolutionFailure.unsupportedPage {

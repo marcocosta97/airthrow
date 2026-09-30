@@ -133,11 +133,14 @@ public struct SourceResolver: Sendable {
     private let youtube: YouTubeSourceAdapter
     private let registry: Result<SourceRegistry, SourceRegistryError>
     public init(environment: [String: String] = ProcessInfo.processInfo.environment,
-                cookies: YouTubeCookies? = nil, registry: SourceRegistry? = nil) {
-        youtube = YouTubeSourceAdapter(environment: environment, cookies: cookies)
+                cookies: YouTubeCookies? = nil, sessions: WebsiteSessions? = nil,
+                registry: SourceRegistry? = nil) {
+        let youtubeCookies = cookies ?? sessions.map { $0.source(for: .youtube) }
+        youtube = YouTubeSourceAdapter(environment: environment, cookies: youtubeCookies)
         if let registry { self.registry = .success(registry) }
         else {
-            do { self.registry = .success(try SourceRegistry.standard(environment: environment, cookies: cookies)) }
+            do { self.registry = .success(try SourceRegistry.standard(environment: environment, cookies: youtubeCookies,
+                                                                      sessions: sessions)) }
             catch { self.registry = .failure((error as? SourceRegistryError) ?? .invalidAdapter) }
         }
     }

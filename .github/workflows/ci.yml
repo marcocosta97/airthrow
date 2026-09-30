@@ -45,6 +45,14 @@ jobs:
             -o .build/ResolverChecks
           .build/ResolverChecks
 
+      - name: Website session checks
+        run: |
+          swiftc -swift-version 6 -parse-as-library \
+            Sources/AirThrowCore/*.swift \
+            Tests/WebsiteSessionChecks/main.swift \
+            -o .build/WebsiteSessionChecks
+          .build/WebsiteSessionChecks
+
       - name: Settings checks
         run: |
           swiftc -swift-version 6 -parse-as-library \

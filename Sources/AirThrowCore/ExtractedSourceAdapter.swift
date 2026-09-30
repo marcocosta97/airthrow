@@ -5,9 +5,11 @@ enum ExtractedSourceAdapter {
     /// yt-dlp flattens alternate-audio HLS into video-only and audio-only
     /// formats. Their shared master URL can still be a complete presentation.
     static func candidatesWithHLS(_ data: Data, allowUnverifiedWholeSources: Bool = false,
+        allowAuthenticated: Bool = false,
         fetch: @Sendable (URL) async throws -> Data = HLSMaster.fetch) async throws -> [MediaCandidate] {
-        let info = try validatedInfo(data)
-        var candidates = try candidates(data, allowUnverifiedWholeSources: allowUnverifiedWholeSources)
+        let info = try validatedInfo(data, allowAuthenticated: allowAuthenticated)
+        var candidates = try candidates(data, allowUnverifiedWholeSources: allowUnverifiedWholeSources,
+                                        allowAuthenticated: allowAuthenticated)
 
         // A master is a repeat only when its URL and headers both match, so two
         // masters that share a format signature but differ in request headers are
@@ -56,13 +58,14 @@ enum ExtractedSourceAdapter {
     // All other headers require a future Mac-side delivery path. No private AVURLAsset options.
     private static let defaultHeaders: Set<String> = ["user-agent", "accept", "accept-language", "sec-fetch-mode"]
 
-    private static func validatedInfo(_ data: Data) throws -> Info {
+    private static func validatedInfo(_ data: Data, allowAuthenticated: Bool = false) throws -> Info {
         let info: Info
         do { info = try JSONDecoder().decode(Info.self, from: data) }
         catch { throw ResolutionFailure.failed }
         guard info._type == nil || info._type == "video", info.entries == nil,
               info.live_status != "is_upcoming",
-              info.availability == nil || info.availability == "public" || info.availability == "unlisted" else {
+              info.availability == nil || info.availability == "public" || info.availability == "unlisted"
+                || (allowAuthenticated && ["private", "premium_only", "subscriber_only", "needs_auth"].contains(info.availability ?? "")) else {
             throw ResolutionFailure.unsupportedPage
         }
         guard info.has_drm != true else { throw ResolutionFailure.protectedMedia }
@@ -76,8 +79,9 @@ enum ExtractedSourceAdapter {
     private static let maximumConversionCombined = 12
     private static let maximumCandidates = 40
 
-    static func candidates(_ data: Data, allowUnverifiedWholeSources: Bool = false) throws -> [MediaCandidate] {
-        let info = try validatedInfo(data)
+    static func candidates(_ data: Data, allowUnverifiedWholeSources: Bool = false,
+                           allowAuthenticated: Bool = false) throws -> [MediaCandidate] {
+        let info = try validatedInfo(data, allowAuthenticated: allowAuthenticated)
         guard let formats = info.formats, !formats.isEmpty else { throw ResolutionFailure.failed }
         let title = cleanTitle(info.title)
         let infoHeaders = info.http_headers ?? [:]

@@ -44,8 +44,7 @@ them. Selection, preparation, subtitles and the persistent player stay shared.
 Run `.build/debug/SourceRegistryChecks` after building and
 `python3 scripts/source-registry-checks.py` for execution outside the checkout.
 Record public-site extraction and native loading separately from physical
-receiver playback. Non-YouTube authentication, queues and custom-header delivery
-remain separate work.
+receiver playback. Non-YouTube queues and custom-header delivery remain separate work.
 
 ### Receiver selection
 
@@ -144,7 +143,31 @@ List sources again before choosing. Status exposes optional `sources`,
 `conversion allow-video` / `conversion avoid-video` saves the same preference as
 the UI.
 
-### YouTube extraction and cookies
+### Website extraction and sessions
+
+Settings exposes opt-in sessions for YouTube, Twitch, X, Instagram and Vimeo.
+New services start disabled; a previously configured YouTube source is retained.
+Each service stores its own browser or file choice. Disabling a service preserves
+its choice but prevents reads and handoff. Public website discovery is independent
+of these settings. The existing YouTube environment overrides remain scoped to
+YouTube; explicitly disabling its session prevents their use.
+
+`WebsiteSessions` maps enabled services to cookie sources; the adapter reads only
+the loaded URL’s known service. Shared browser readers filter SQLite queries to
+owned domains; Safari and Netscape files are filtered after parsing. Helpers
+receive a private temporary Netscape file, removed on completion, failure or
+cancellation. Settings checks are serialized and reject stale results. “Session
+cookies found” reports an unexpired local marker, not server-verified sign-in.
+Authenticated metadata can describe account-accessible media; DRM and media
+header restrictions still apply, and receiver delivery may fail independently.
+
+Run the controlled regression checks without reading real browser stores:
+
+```bash
+swiftc -swift-version 6 -parse-as-library Sources/AirThrowCore/*.swift Tests/WebsiteSessionChecks/main.swift -o .build/WebsiteSessionChecks
+.build/WebsiteSessionChecks
+```
+
 
 Source adapters discover candidates; one shared policy prefers native playback
 over preparation. Among native candidates it prefers higher resolution, then HLS
@@ -152,7 +175,8 @@ at equal resolution, then bitrate. A usable H.264/AAC HLS master goes straight t
 AVPlayer, which selects and synchronizes its renditions; FFmpeg is not involved.
 Recognizable direct-media URLs supply one candidate; MKV/WebM enter inspection.
 Ambiguous non-YouTube URLs let yt-dlp automatically select a default site or
-generic extractor, with no cookies or site-specific request headers. A missing
+generic extractor. Selected website sessions supply only that service’s cookies;
+site-specific media request headers remain unsupported. A missing
 helper or rejected URL gets one native attempt; valid metadata with no
 presentation fails resolution. A listed source that needs disabled conversion
 keeps its preparation error.
@@ -167,24 +191,19 @@ signed URLs are not retained for the whole playlist, and unavailable or
 not-yet-started entries are skipped with a notice. Live entries play through the
 native HLS path when one is available. Private/authenticated playlists,
 shuffle, repeat, and queue editing are unsupported. A watch link with any other
-`list=` loads only its named video. DRM, non-YouTube sign-in, and custom request
-headers are out of scope.
+`list=` loads only its named video. DRM and custom media request headers are
+out of scope.
 
-Some public videos fail with "Could not find a playable video" because YouTube
-challenges the request, not because the video is private. Settings → YouTube
-access selects a browser or a Netscape `cookies.txt` file. AirThrow reads the
-source itself and keeps only `youtube.com`, `youtu.be`, and
-`youtube-nocookie.com` cookies, writes them to a private `0600` temporary
-Netscape file, and deletes it once extraction finishes; cookie values never
-appear in status or logs. The picker lists only browsers found on this Mac, and a
-status line reports whether a signed-in session was found. Safari requires Full
-Disk Access; Chromium-family browsers ask for Keychain access to decrypt their
-store.
+YouTube may challenge a public-video request with a sign-in check. Enable
+YouTube under Settings → Website sessions to supply a browser or cookies-file
+session. Only `youtube.com`, `youtu.be`, and `youtube-nocookie.com` cookies are
+used. The picker lists browsers found on this Mac. Safari requires Full Disk
+Access; Chromium-family browsers may ask for Keychain access.
 
 Helpers are found in standard Homebrew locations even when the app is launched
 from Finder. `AIRTHROW_YTDLP`, `AIRTHROW_DENO`, `AIRTHROW_FFMPEG`, and
 `AIRTHROW_FFPROBE` override their paths, and `AIRTHROW_YTDLP_COOKIES` /
-`AIRTHROW_YTDLP_COOKIES_FROM_BROWSER` override the Settings cookie choice — all
+`AIRTHROW_YTDLP_COOKIES_FROM_BROWSER` override the YouTube cookie choice unless its session is explicitly disabled — all
 read **in the app's launch environment**, not from a CLI command. Helpers are not
 bundled.
 
@@ -342,7 +361,7 @@ JW Player MP4/HLS pages and extensionless media to the controller suite, using
 the real generic extractor and native AVPlayer loading. It does not contact a
 public website or establish receiver playback.
 
-The subprocess runs in its own process group with a 40-second deadline, 8 MiB JSON limit, and 256 KiB discarded stderr limit. Stop/replacement kills the group and reaps the helper. Arguments disable user configuration, plugins, cache, and remote component installation. Website extraction leaves extractor selection to yt-dlp and uses Deno when installed; YouTube requires Deno. When YouTube cookies are configured, AirThrow reads the browser store or the supplied cookies file itself, keeps only `youtube.com`/`youtu.be`/`youtube-nocookie.com` records, writes them to a private `0600` temporary Netscape file, and passes that file to yt-dlp; the scratch directory is removed once the helper exits. No other site's cookies are imported, and cookie values never enter status, logs, or identifiers. JavaScript/EJS support must already be installed for YouTube. Default yt-dlp browser headers are retained in memory; direct playback does not forward them, while FFmpeg/ffprobe receive them for separate HTTP tracks. Other headers remain ineligible. Even candidates with only default headers can fail if a site requires them at fetch time.
+The subprocess runs in its own process group with a 40-second deadline, 8 MiB JSON limit, and 256 KiB discarded stderr limit. Stop/replacement kills the group and reaps the helper. Arguments disable user configuration, plugins, cache, and remote component installation. Website extraction leaves extractor selection to yt-dlp and uses Deno when installed; YouTube requires Deno. When a website session is selected, AirThrow reads the chosen browser store or cookies file, keeps only that service’s owned domains, writes them to a private `0600` temporary Netscape file, and passes that file to yt-dlp; the scratch directory is removed once the helper exits. Other services’ cookies are not imported, and cookie values never enter status, logs, or identifiers. JavaScript/EJS support must already be installed for YouTube. Default yt-dlp browser headers are retained in memory; direct playback does not forward them, while FFmpeg/ffprobe receive them for separate HTTP tracks. Other headers remain ineligible. Even candidates with only default headers can fail if a site requires them at fetch time.
 
 ## Preparation and HTTP delivery checks
 

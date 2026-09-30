@@ -43,14 +43,15 @@ best playable source, preferring one the receiver can play directly. Dedicated
 playlist links create a queue of up to 100 items.
 
 Other public video pages use yt-dlp's automatic extractor selection. Playback
-depends on the returned media. Non-YouTube sign-in, DRM and custom request
-headers are unsupported.
+depends on the returned media. DRM and media requiring custom request headers
+are unsupported.
 
-Some videos are gated by a YouTube sign-in check. In **Settings → YouTube
-access**, pick a browser or a Netscape `cookies.txt` file to supply a signed-in
-session. Only `youtube.com` cookies are read; they never leave the Mac and are
-never shown or logged. Safari needs Full Disk Access; Chrome-family browsers ask
-for Keychain access.
+In **Settings → Website sessions**, enable the services whose signed-in sessions
+you want to use, then choose a browser or a Netscape `cookies.txt` file. YouTube,
+Twitch, X, Instagram and Vimeo are available. Only that service’s cookies are
+used; values are never shown or logged. Safari needs Full Disk Access;
+Chrome-family browsers may ask for Keychain access. Account access does not
+guarantee receiver playback.
 
 ## Local files (experimental)
 

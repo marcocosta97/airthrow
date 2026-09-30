@@ -82,7 +82,8 @@ struct YouTubeSourceAdapter: SourceAdapter {
         guard result.succeeded else {
             throw Self.isSignInChallenge(result.stderr) ? ResolutionFailure.signInRequired : ResolutionFailure.failed
         }
-        return try await ExtractedSourceAdapter.candidatesWithHLS(result.output)
+        return try await ExtractedSourceAdapter.candidatesWithHLS(result.output,
+                                                                  allowAuthenticated: scratch.path != nil)
     }
 
     public func resolvePlaylist(_ url: URL) async throws -> ResolvedPlaylist {
