@@ -47,6 +47,36 @@ struct WebsiteSessionChecks {
         try check(YouTubeCookies.none.materialize(for: .twitch).path == nil, "Disabled session materialized")
         print("PASS all service scopes, URL ownership, session markers, expiry, scratch permissions and cleanup")
 
+        // File inspection summarizes recognized service cookies without leaking names, values or domains.
+        guard case .loaded(let summaries) = CookieFileInspection.inspect(file) else {
+            try check(false, "Mixed cookie file was unavailable")
+            return
+        }
+        try check(summaries.map(\.service) == WebsiteService.allCases, "Inspection skipped or reordered a recognized service")
+        try check(summaries.allSatisfy { $0.cookieCount == 1 && $0.hasSession }, "Mixed inspection counts or sessions wrong")
+        let anonymous = root.appendingPathComponent("anonymous.txt")
+        try ".youtube.com\tTRUE\t/\tTRUE\t0\tPREF\tvalue\n".write(to: anonymous, atomically: true, encoding: .utf8)
+        try check(CookieFileInspection.inspect(anonymous) == .loaded([
+            CookieServiceSummary(service: .youtube, cookieCount: 1, hasSession: false)
+        ]), "Anonymous recognized cookie reported a session")
+        let expiredMarker = root.appendingPathComponent("expired-marker.txt")
+        try ".twitch.tv\tTRUE\t/\tTRUE\t1\tauth-token\tx\n".write(to: expiredMarker, atomically: true, encoding: .utf8)
+        try check(CookieFileInspection.inspect(expiredMarker) == .loaded([
+            CookieServiceSummary(service: .twitch, cookieCount: 1, hasSession: false)
+        ]), "Expired inspection marker reported a session")
+        let emptyCookies = root.appendingPathComponent("empty.txt")
+        try "".write(to: emptyCookies, atomically: true, encoding: .utf8)
+        let malformedCookies = root.appendingPathComponent("malformed.txt")
+        try "not a cookie line\n# comment only\n".write(to: malformedCookies, atomically: true, encoding: .utf8)
+        let foreignCookies = root.appendingPathComponent("foreign-only.txt")
+        try ".foreign.example\tTRUE\t/\tTRUE\t0\tauth-token\tforeign\n".write(to: foreignCookies, atomically: true, encoding: .utf8)
+        for emptyFile in [emptyCookies, malformedCookies, foreignCookies] {
+            try check(CookieFileInspection.inspect(emptyFile) == .loaded([]), "Empty, malformed or foreign-only file produced summaries")
+        }
+        try check(CookieFileInspection.inspect(root.appendingPathComponent("missing.txt")) == .unavailable, "Missing file was not unavailable")
+        try check(CookieFileInspection.inspect(URL(string: "https://example.com/cookies.txt")!) == .unavailable, "Non-file URL accepted by file inspection")
+        print("PASS cookie file inspection counts, sessions and inaccessible/empty/foreign cases")
+
         // A synthetic Firefox profile verifies SQL-level service scoping.
         let home = root.appendingPathComponent("home")
         let profile = home.appendingPathComponent("Library/Application Support/Firefox/Profiles/fixture.default")

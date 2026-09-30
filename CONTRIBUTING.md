@@ -145,19 +145,26 @@ the UI.
 
 ### Website extraction and sessions
 
-Settings exposes opt-in sessions for YouTube, Twitch, X, Instagram and Vimeo.
-New services start disabled; a previously configured YouTube source is retained.
-Each service stores its own browser or file choice. Disabling a service preserves
-its choice but prevents reads and handoff. Public website discovery is independent
-of these settings. The existing YouTube environment overrides remain scoped to
-YouTube; explicitly disabling its session prevents their use.
+Settings uses one cookie source: None, Browser or Cookies file. A Netscape file
+is parsed once per Settings check and lists recognized services with cookie
+counts and session-marker status. File mode uses every recognized supported
+scope automatically; it does not require choosing services. Browser mode has a
+checked service menu for YouTube, Twitch, X, Instagram and Vimeo. All services
+are offered on first use; deselected services are neither probed nor handed to
+the helper. Browser and file choices are preserved when switching modes.
+Existing YouTube preferences migrate; the interim per-service preferences use
+the first enabled service’s source (YouTube first) and retain the enabled browser
+service set. Public discovery is independent of cookies. YouTube environment
+overrides remain YouTube-only and are ignored with None or when YouTube is
+unselected in Browser mode.
 
 `WebsiteSessions` maps enabled services to cookie sources; the adapter reads only
 the loaded URL’s known service. Shared browser readers filter SQLite queries to
 owned domains; Safari and Netscape files are filtered after parsing. Helpers
 receive a private temporary Netscape file, removed on completion, failure or
-cancellation. Settings checks are serialized and reject stale results. “Session
-cookies found” reports an unexpired local marker, not server-verified sign-in.
+cancellation. Browser checks are serialized; browser checks and file summaries
+reject stale results. “Session found” reports an unexpired local marker, not
+server-verified sign-in. File counts include expired and anonymous cookies.
 Authenticated metadata can describe account-accessible media; DRM and media
 header restrictions still apply, and receiver delivery may fail independently.
 
@@ -194,16 +201,17 @@ shuffle, repeat, and queue editing are unsupported. A watch link with any other
 `list=` loads only its named video. DRM and custom media request headers are
 out of scope.
 
-YouTube may challenge a public-video request with a sign-in check. Enable
-YouTube under Settings → Website sessions to supply a browser or cookies-file
-session. Only `youtube.com`, `youtu.be`, and `youtube-nocookie.com` cookies are
-used. The picker lists browsers found on this Mac. Safari requires Full Disk
+YouTube may challenge a public-video request with a sign-in check. Configure
+cookies under Settings → Cookies, selecting YouTube for browser extraction
+or choosing a cookies file. Only `youtube.com`, `youtu.be`, and
+`youtube-nocookie.com` cookies are used. The picker lists browsers found on this Mac. Safari requires Full Disk
 Access; Chromium-family browsers may ask for Keychain access.
 
 Helpers are found in standard Homebrew locations even when the app is launched
 from Finder. `AIRTHROW_YTDLP`, `AIRTHROW_DENO`, `AIRTHROW_FFMPEG`, and
 `AIRTHROW_FFPROBE` override their paths, and `AIRTHROW_YTDLP_COOKIES` /
-`AIRTHROW_YTDLP_COOKIES_FROM_BROWSER` override the YouTube cookie choice unless its session is explicitly disabled — all
+`AIRTHROW_YTDLP_COOKIES_FROM_BROWSER` override the YouTube cookie choice unless
+Cookies is explicitly None or YouTube is unselected for browser extraction — all
 read **in the app's launch environment**, not from a CLI command. Helpers are not
 bundled.
 
@@ -279,7 +287,7 @@ python3 scripts/source-choice-checks.py
 
 The suite uses synthetic local fixtures and injected candidates to verify automatic selection, explicit reloads, stale IDs, queue navigation, captured load preferences, missing or ambiguous refreshed candidates, direct-load gating, privacy, and stale resolver completion. Fallback regressions verify that an explicit choice retains its presentation while Automatic can choose the best remux, with bounded preparation attempts. Identity intentionally includes exact format metadata: metadata jitter invalidates an explicit choice rather than guessing between potentially different presentations. URL/header rotation alone does not invalidate identity. It does not exercise a live website or receiver.
 
-Settings checks use synthetic cookie probes to verify serialized reads, coalesced preference changes, and rejection of stale results. They do not read browser data:
+Settings checks use synthetic probes and file inspections to verify browser filtering, file autodetection, preference migration, serialized browser reads, coalesced changes, and rejection of stale results. They do not read browser data:
 
 ```bash
 swiftc -swift-version 6 -parse-as-library Sources/AirThrowCore/*.swift Sources/AirThrowApp/MediaDiagnostics.swift Sources/AirThrowApp/PlaybackController.swift Sources/AirThrowApp/SettingsView.swift Tests/SettingsChecks/main.swift -o .build/SettingsChecks

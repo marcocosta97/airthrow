@@ -87,6 +87,49 @@ enum WebsiteCookieScope {
     }
 }
 
+/// A non-sensitive summary of one service's cookies inside an inspected file.
+/// Only the service, how many scoped cookies it holds, and whether a signed-in
+/// marker is present are exposed; cookie names, values, and domains never leave
+/// `CookieFileInspection`.
+public struct CookieServiceSummary: Sendable, Equatable {
+    public let service: WebsiteService
+    public let cookieCount: Int
+    public let hasSession: Bool
+
+    public init(service: WebsiteService, cookieCount: Int, hasSession: Bool) {
+        self.service = service
+        self.cookieCount = cookieCount
+        self.hasSession = hasSession
+    }
+}
+
+/// The result of reading a Netscape cookies file for session discovery without
+/// exposing any cookie material.
+public enum CookieFileInspection: Sendable, Equatable {
+    /// The file was readable. One summary per service with a nonzero scoped
+    /// count, in `WebsiteService.allCases` order; an empty array means the file
+    /// was readable but held no recognized service cookies (including malformed
+    /// or foreign-only files).
+    case loaded([CookieServiceSummary])
+    /// The file could not be read.
+    case unavailable
+
+    /// Read `file` once, parse it, and summarize each service's scoped cookies.
+    /// Cookie names, values, and domains are never exported.
+    public static func inspect(_ file: URL) -> CookieFileInspection {
+        guard file.isFileURL, let text = try? String(contentsOf: file, encoding: .utf8) else { return .unavailable }
+        let cookies = NetscapeCookies.parse(text)
+        let summaries = WebsiteService.allCases.compactMap { service -> CookieServiceSummary? in
+            let scoped = NetscapeCookies.scoped(cookies, service: service)
+            guard !scoped.isEmpty else { return nil }
+            return CookieServiceSummary(service: service,
+                                        cookieCount: scoped.count,
+                                        hasSession: WebsiteCookieScope.hasAuthentication(scoped, service: service))
+        }
+        return .loaded(summaries)
+    }
+}
+
 /// Maps loaded services to the cookie source the user configured for each. The
 /// app keeps one entry per service; absent entries mean "run unauthenticated".
 public struct WebsiteSessions: Sendable, Equatable {

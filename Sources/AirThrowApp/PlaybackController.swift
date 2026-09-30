@@ -1616,10 +1616,17 @@ enum YouTubeCookiePreference {
 }
 
 
-/// Settings select which site sessions may be read. Cookie contents are never
-/// stored in defaults; the resolver reads only the service of the next URL.
+/// One cookie source with a browser-only service filter. File sources are
+/// automatically scoped to the loaded website; cookie contents stay out of defaults.
 enum WebsiteCookiePreference {
+    static let modeKey = "websiteCookiesMode"
+    static let browserKey = "websiteCookiesBrowser"
+    static let filePathKey = "websiteCookiesFilePath"
+    static let servicesKey = "websiteCookiesServices"
     static let defaultBrowser = YouTubeCookiePreference.defaultBrowser
+    static let allServices = WebsiteService.allCases.map(\.rawValue).joined(separator: ",")
+
+    // Keys from the earlier per-service settings, used only for migration.
     static func key(_ service: WebsiteService, _ field: String) -> String {
         if service == .youtube {
             switch field {
@@ -1632,38 +1639,61 @@ enum WebsiteCookiePreference {
         return "websiteSession.\(service.rawValue).\(field)"
     }
 
-    static func enabled(_ service: WebsiteService, defaults: UserDefaults = .standard) -> Bool {
-        let enabledKey = key(service, "enabled")
-        if defaults.object(forKey: enabledKey) != nil { return defaults.bool(forKey: enabledKey) }
-        // Preserve existing consent; new installations and new services stay off.
-        return service == .youtube && YouTubeCookiePreference.fromDefaults(defaults) != .none
+    static func prepare(_ defaults: UserDefaults = .standard) {
+        guard defaults.object(forKey: modeKey) == nil else { return }
+        let enabled = WebsiteService.allCases.filter { service in
+            if defaults.object(forKey: key(service, "enabled")) != nil {
+                return defaults.bool(forKey: key(service, "enabled"))
+            }
+            return service == .youtube && YouTubeCookiePreference.fromDefaults(defaults) != .none
+        }
+        // Prefer the existing YouTube choice, otherwise the first enabled site.
+        if let service = enabled.first {
+            defaults.set(defaults.string(forKey: key(service, "mode")) ?? "browser", forKey: modeKey)
+            defaults.set(defaults.string(forKey: key(service, "browser")) ?? defaultBrowser, forKey: browserKey)
+            defaults.set(defaults.string(forKey: key(service, "filePath")) ?? "", forKey: filePathKey)
+            defaults.set(enabled.map(\.rawValue).joined(separator: ","), forKey: servicesKey)
+        } else if defaults.object(forKey: servicesKey) == nil {
+            defaults.set(allServices, forKey: servicesKey)
+        }
     }
 
-    static func source(_ service: WebsiteService, defaults: UserDefaults = .standard) -> YouTubeCookies {
-        guard enabled(service, defaults: defaults) else { return .none }
-        let mode = defaults.string(forKey: key(service, "mode")) ?? "browser"
-        switch mode {
+    static func selectedServices(_ value: String) -> Set<WebsiteService> {
+        Set(value.split(separator: ",").compactMap { WebsiteService(rawValue: String($0)) })
+    }
+
+    static func configuredSource(defaults: UserDefaults = .standard) -> YouTubeCookies {
+        prepare(defaults)
+        switch defaults.string(forKey: modeKey) {
         case "browser":
-            let browser = (defaults.string(forKey: key(service, "browser")) ?? defaultBrowser).lowercased()
+            let browser = (defaults.string(forKey: browserKey) ?? defaultBrowser).lowercased()
             return YouTubeCookies.supportedBrowsers.contains(browser) ? .browser(browser) : .none
         case "file":
-            guard let path = defaults.string(forKey: key(service, "filePath")), path.hasPrefix("/") else { return .none }
+            guard let path = defaults.string(forKey: filePathKey), path.hasPrefix("/") else { return .none }
             return .file(URL(fileURLWithPath: path))
         default: return .none
         }
+    }
+
+    static func source(_ service: WebsiteService, defaults: UserDefaults = .standard) -> YouTubeCookies {
+        let source = configuredSource(defaults: defaults)
+        if case .browser = source {
+            guard selectedServices(defaults.string(forKey: servicesKey) ?? allServices).contains(service) else { return .none }
+        }
+        return source
     }
 
     static func current(environment: [String: String] = ProcessInfo.processInfo.environment,
                         defaults: UserDefaults = .standard) -> WebsiteSessions {
         var sources: [WebsiteService: YouTubeCookies] = [:]
         for service in WebsiteService.allCases { sources[service] = source(service, defaults: defaults) }
-        // Keep the existing explicit CLI override, unless the user has turned
-        // YouTube off in the new service selector.
         let override = YouTubeCookies.fromEnvironment(environment)
-        if override != .none, (defaults.object(forKey: key(.youtube, "enabled")) == nil
-            || enabled(.youtube, defaults: defaults)) {
-            sources[.youtube] = override
-        }
+        let mode = defaults.string(forKey: modeKey)
+        let legacyDisabled = defaults.object(forKey: key(.youtube, "enabled")) != nil
+            && !defaults.bool(forKey: key(.youtube, "enabled"))
+        let allowsOverride = mode == "file" || (mode == "browser" && source(.youtube, defaults: defaults) != .none)
+            || (mode == nil && !legacyDisabled)
+        if override != .none, allowsOverride { sources[.youtube] = override }
         return WebsiteSessions(sources: sources)
     }
 }

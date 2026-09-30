@@ -17,6 +17,15 @@ final class CookieStatusModel: ObservableObject {
     }
 
     @Published private(set) var checks: [WebsiteService: Check] = [:]
+    enum FileCheck: Equatable {
+        case idle
+        case checking
+        case result(CookieFileInspection)
+    }
+    @Published private(set) var fileCheck: FileCheck = .idle
+    private var fileTask: Task<Void, Never>?
+    private var fileRevision = 0
+    private let inspectFile: @Sendable (URL) -> CookieFileInspection
     @Published private(set) var installedBrowsers: [String] = []
     var check: Check { checks[.youtube] ?? .idle }
     private var task: Task<Void, Never>?
@@ -25,12 +34,43 @@ final class CookieStatusModel: ObservableObject {
     private var pending = Set<WebsiteService>()
     private let probe: @Sendable (WebsiteService, YouTubeCookies, URL) -> YouTubeCookieStatus
 
-    init() { probe = { service, source, home in source.probe(for: service, home: home) } }
+    init() {
+        probe = { service, source, home in source.probe(for: service, home: home) }
+        inspectFile = CookieFileInspection.inspect
+    }
     init(probe: @escaping @Sendable (YouTubeCookies, URL) -> YouTubeCookieStatus) {
         self.probe = { _, source, home in probe(source, home) }
+        inspectFile = CookieFileInspection.inspect
     }
-    init(scopedProbe: @escaping @Sendable (WebsiteService, YouTubeCookies, URL) -> YouTubeCookieStatus) {
+    init(scopedProbe: @escaping @Sendable (WebsiteService, YouTubeCookies, URL) -> YouTubeCookieStatus,
+         inspectFile: @escaping @Sendable (URL) -> CookieFileInspection = CookieFileInspection.inspect) {
         probe = scopedProbe
+        self.inspectFile = inspectFile
+    }
+
+    func refreshSelection(source: YouTubeCookies, services: Set<WebsiteService>) {
+        fileRevision += 1
+        fileTask?.cancel()
+        fileTask = nil
+        fileCheck = .idle
+        for service in WebsiteService.allCases {
+            refresh(for: services.contains(service) && isBrowser(source) ? source : .none, service: service)
+        }
+        guard case .file(let url) = source else { return }
+        fileCheck = .checking
+        let revision = fileRevision
+        let inspect = inspectFile
+        fileTask = Task { [weak self] in
+            let result = await Task.detached { inspect(url) }.value
+            guard let self, self.fileRevision == revision else { return }
+            self.fileCheck = .result(result)
+            self.fileTask = nil
+        }
+    }
+
+    private func isBrowser(_ source: YouTubeCookies) -> Bool {
+        if case .browser = source { return true }
+        return false
     }
 
     func discoverBrowsers() {
@@ -94,16 +134,8 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Section("Website sessions") {
-                Text("Select the services whose signed-in sessions AirThrow may use. Public links work without enabling a session.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                ForEach(WebsiteService.allCases, id: \.self) { service in
-                    WebsiteSessionRow(service: service, cookieStatus: cookieStatus)
-                }
-                Text("Only the loaded website’s cookies are passed to yt-dlp. Changes apply to the next load. Safari needs Full Disk Access; Chrome-family browsers may ask for Keychain access.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            Section("Cookies") {
+                CookieSourceView(cookieStatus: cookieStatus)
             }
         }
         .formStyle(.grouped)
@@ -115,123 +147,174 @@ struct SettingsView: View {
     }
 }
 
-private struct WebsiteSessionRow: View {
-    let service: WebsiteService
+private struct CookieSourceView: View {
     @ObservedObject var cookieStatus: CookieStatusModel
-    @AppStorage private var enabled: Bool
-    @AppStorage private var cookieMode: String
-    @AppStorage private var cookieBrowser: String
-    @AppStorage private var cookieFilePath: String
+    @AppStorage(WebsiteCookiePreference.modeKey) private var cookieMode = "none"
+    @AppStorage(WebsiteCookiePreference.browserKey) private var cookieBrowser = WebsiteCookiePreference.defaultBrowser
+    @AppStorage(WebsiteCookiePreference.filePathKey) private var cookieFilePath = ""
+    @AppStorage(WebsiteCookiePreference.servicesKey) private var cookieServices = WebsiteCookiePreference.allServices
 
-    init(service: WebsiteService, cookieStatus: CookieStatusModel) {
-        self.service = service
+    init(cookieStatus: CookieStatusModel) {
+        WebsiteCookiePreference.prepare()
         self.cookieStatus = cookieStatus
-        _enabled = AppStorage(wrappedValue: WebsiteCookiePreference.enabled(service),
-                              WebsiteCookiePreference.key(service, "enabled"))
-        _cookieMode = AppStorage(wrappedValue: "browser", WebsiteCookiePreference.key(service, "mode"))
-        _cookieBrowser = AppStorage(wrappedValue: WebsiteCookiePreference.defaultBrowser,
-                                    WebsiteCookiePreference.key(service, "browser"))
-        _cookieFilePath = AppStorage(wrappedValue: "", WebsiteCookiePreference.key(service, "filePath"))
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Toggle(service.title, isOn: $enabled)
-                .accessibilityLabel("Use \(service.title) session")
-            if enabled {
-                Picker("Session from", selection: $cookieMode) {
-                    Text("Browser").tag("browser")
-                    Text("Cookies file").tag("file")
-                    // A legacy or malformed preference stays visibly inactive.
-                    if cookieMode == "none" { Text("None").tag("none") }
+        Picker("Cookies from", selection: $cookieMode) {
+            Text("None").tag("none")
+            Text("Browser").tag("browser")
+            Text("Cookies file").tag("file")
+        }
+        .pickerStyle(.menu)
+        .task(id: probeKey) { refresh() }
+        if cookieMode == "browser" {
+            Picker("Browser", selection: $cookieBrowser) {
+                if !cookieStatus.installedBrowsers.contains(cookieBrowser) {
+                    Text("\(browserName(cookieBrowser)) (not installed)").tag(cookieBrowser)
                 }
-                .accessibilityLabel("\(service.title) cookie source")
-                if cookieMode == "browser" {
-                    Picker("Browser", selection: $cookieBrowser) {
-                        if !installedBrowsers.contains(cookieBrowser) {
-                            Text("\(browserName(cookieBrowser)) (not installed)").tag(cookieBrowser)
-                        }
-                        ForEach(installedBrowsers, id: \.self) { browser in
-                            Text(browserName(browser)).tag(browser)
-                        }
-                    }
-                    .accessibilityLabel("\(service.title) browser")
-                }
-                if cookieMode == "file" {
-                    HStack {
-                        Text(cookieFilePath.isEmpty ? "No file selected" : (cookieFilePath as NSString).lastPathComponent)
-                            .lineLimit(1).truncationMode(.middle)
-                            .foregroundStyle(cookieFilePath.isEmpty ? .secondary : .primary)
-                        Spacer()
-                        Button("Choose…") { chooseCookiesFile() }
-                            .accessibilityLabel("Choose \(service.title) cookies file")
-                    }
-                }
-                statusView
-                if selectedSource != .none {
-                    Button("Recheck") {
-                        cookieStatus.discoverBrowsers()
-                        cookieStatus.refresh(for: selectedSource, service: service)
-                    }
-                    .disabled(check == .checking)
-                    .accessibilityLabel("Recheck \(service.title) session")
+                ForEach(cookieStatus.installedBrowsers, id: \.self) { browser in
+                    Text(browserName(browser)).tag(browser)
                 }
             }
+            .pickerStyle(.menu)
+            HStack {
+                Text("Services")
+                Spacer()
+                Menu {
+                    ForEach(WebsiteService.allCases, id: \.self) { service in
+                        Toggle(service.title, isOn: Binding(
+                            get: { selectedServices.contains(service) },
+                            set: { included in
+                                var services = selectedServices
+                                if included { services.insert(service) } else { services.remove(service) }
+                                cookieServices = WebsiteService.allCases.filter { services.contains($0) }
+                                    .map(\.rawValue).joined(separator: ",")
+                            }))
+                    }
+                } label: { Text(serviceSelectionLabel) }
+                .accessibilityLabel("Services to extract cookies for")
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+            }
+            if selectedServices.isEmpty {
+                Text("Select a service to use its browser cookies.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(WebsiteService.allCases.filter { selectedServices.contains($0) }, id: \.self) { service in
+                browserStatus(service)
+            }
         }
-        .onChange(of: enabled) { _, value in
-            if value, cookieMode == "none" { cookieMode = "browser" }
+        if cookieMode == "file" {
+            HStack {
+                Text(cookieFilePath.isEmpty ? "No file selected" : (cookieFilePath as NSString).lastPathComponent)
+                    .lineLimit(1).truncationMode(.middle)
+                    .foregroundStyle(cookieFilePath.isEmpty ? .secondary : .primary)
+                Spacer()
+                Button("Choose…") { chooseCookiesFile() }
+                    .accessibilityLabel("Choose cookies file")
+            }
+            fileStatus
         }
-        .task(id: probeKey) { cookieStatus.refresh(for: selectedSource, service: service) }
+        if selectedSource != .none, cookieMode == "file" || !selectedServices.isEmpty {
+            Button("Recheck") { refresh() }
+                .disabled(isChecking)
+        }
+        Text(cookieMode == "file"
+             ? "Recognized services are detected automatically. Only the loaded website’s cookies are used."
+             : "Public links work without cookies. Browser extraction reads only the selected services.")
+            .font(.caption).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        if cookieMode == "browser" {
+            Text("Safari needs Full Disk Access; Chrome-family browsers may ask for Keychain access.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        if cookieMode != "none" {
+            Text("Changes apply to the next load. Session markers do not guarantee account access or receiver playback.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
-    private var check: CookieStatusModel.Check { cookieStatus.checks[service] ?? .idle }
-    private var probeKey: String { "\(enabled)|\(cookieMode)|\(cookieBrowser)|\(cookieFilePath)" }
-    private var installedBrowsers: [String] { cookieStatus.installedBrowsers }
-    private var effectiveBrowser: String { cookieBrowser }
+    private var selectedServices: Set<WebsiteService> { WebsiteCookiePreference.selectedServices(cookieServices) }
+    private var serviceSelectionLabel: String {
+        if selectedServices.isEmpty { return "No services" }
+        if selectedServices.count == WebsiteService.allCases.count { return "All services" }
+        if selectedServices.count == 1 { return WebsiteService.allCases.first { selectedServices.contains($0) }!.title }
+        return "\(selectedServices.count) services"
+    }
+    private var probeKey: String { "\(cookieMode)|\(cookieBrowser)|\(cookieFilePath)|\(cookieServices)" }
     private var selectedSource: YouTubeCookies {
-        guard enabled else { return .none }
         switch cookieMode {
-        case "browser": return .browser(effectiveBrowser)
-        case "file": return cookieFilePath.isEmpty ? .none : .file(URL(fileURLWithPath: cookieFilePath))
+        case "browser": return YouTubeCookies.supportedBrowsers.contains(cookieBrowser) ? .browser(cookieBrowser) : .none
+        case "file": return cookieFilePath.hasPrefix("/") ? .file(URL(fileURLWithPath: cookieFilePath)) : .none
         default: return .none
         }
     }
+    private var isChecking: Bool {
+        cookieStatus.fileCheck == .checking || cookieStatus.checks.values.contains(.checking)
+    }
+    private func refresh() {
+        cookieStatus.discoverBrowsers()
+        cookieStatus.refreshSelection(source: selectedSource, services: selectedServices)
+    }
 
-    @ViewBuilder private var statusView: some View {
-        switch check {
+    @ViewBuilder private var fileStatus: some View {
+        switch cookieStatus.fileCheck {
         case .idle: EmptyView()
-        case .checking:
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.small)
-                Text("Checking session…").font(.caption).foregroundStyle(.secondary)
+        case .checking: checkingLabel("Reading cookies file…")
+        case .result(.unavailable):
+            statusLabel("Cannot read that cookies file.", color: .red, symbol: "xmark.circle.fill")
+        case .result(.loaded(let summaries)):
+            if summaries.isEmpty {
+                statusLabel("No supported service cookies found. Choose a Netscape cookies.txt file.",
+                            symbol: "info.circle")
             }
-        case .result(let status):
-            switch status {
-            case .none: EmptyView()
-            case .loaded:
-                statusLabel("Session cookies found. Access is checked when loading a video.", color: .secondary, symbol: "checkmark.circle")
-            case .permissionDenied:
-                statusLabel(permissionMessage, color: .red, symbol: "xmark.circle.fill")
-            case .noSession:
-                statusLabel("No \(service.title) session found. Sign in in the selected browser or choose a fresh cookies file.",
-                            color: .secondary, symbol: "person.crop.circle.badge.questionmark")
-            case .notInstalled:
-                statusLabel("\(browserName(effectiveBrowser)) is not installed.", color: .red, symbol: "xmark.circle.fill")
-            case .unavailable:
-                statusLabel(cookieMode == "file" ? "Cannot read that cookies file." : "Could not read cookies from \(browserName(effectiveBrowser)).",
-                            color: .red, symbol: "xmark.circle.fill")
+            ForEach(summaries, id: \.service) { summary in
+                HStack {
+                    Text(summary.service.title)
+                    Spacer()
+                    Text("\(cookieCountLabel(summary.cookieCount)) · \(summary.hasSession ? "Session found" : "No session marker")")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .combine)
             }
         }
     }
 
-    private func statusLabel(_ message: String, color: Color, symbol: String) -> some View {
+    @ViewBuilder private func browserStatus(_ service: WebsiteService) -> some View {
+        switch cookieStatus.checks[service] ?? .idle {
+        case .idle: EmptyView()
+        case .checking: checkingLabel("\(service.title): checking…")
+        case .result(let status):
+            switch status {
+            case .none: EmptyView()
+            case .loaded(let count):
+                statusLabel("\(service.title): \(cookieCountLabel(count)) · Session found", symbol: "checkmark.circle")
+            case .noSession:
+                statusLabel("\(service.title): no session found", symbol: "person.crop.circle.badge.questionmark")
+            case .permissionDenied:
+                statusLabel("\(service.title): allow \(cookieBrowser == "safari" ? "Full Disk Access" : "Keychain access"), then recheck.",
+                            color: .red, symbol: "xmark.circle.fill")
+            case .notInstalled:
+                statusLabel("\(browserName(cookieBrowser)) is not installed.", color: .red, symbol: "xmark.circle.fill")
+            case .unavailable:
+                statusLabel("\(service.title): could not read browser cookies.", color: .red, symbol: "xmark.circle.fill")
+            }
+        }
+    }
+    private func cookieCountLabel(_ count: Int) -> String {
+        "\(count) \(count == 1 ? "cookie" : "cookies")"
+    }
+    private func checkingLabel(_ message: String) -> some View {
+        HStack(spacing: 6) {
+            ProgressView().controlSize(.small)
+            Text(message).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+    private func statusLabel(_ message: String, color: Color = .secondary, symbol: String) -> some View {
         Label { Text(message).fixedSize(horizontal: false, vertical: true) } icon: { Image(systemName: symbol) }
             .font(.caption).foregroundStyle(color)
-    }
-    private var permissionMessage: String {
-        effectiveBrowser == "safari"
-            ? "Allow AirThrow Full Disk Access in System Settings, then recheck."
-            : "Allow access to the browser’s stored Keychain key, then recheck."
     }
     private func browserName(_ browser: String) -> String {
         switch browser {
@@ -252,7 +335,7 @@ private struct WebsiteSessionRow: View {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        panel.message = "Choose a Netscape cookies.txt file. Only \(service.title) cookies are used."
+        panel.message = "Choose a Netscape cookies.txt file. Supported services are detected automatically."
         let completion: (NSApplication.ModalResponse) -> Void = { response in
             if response == .OK, let url = panel.url { cookieFilePath = url.path }
         }

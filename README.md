@@ -46,12 +46,12 @@ Other public video pages use yt-dlp's automatic extractor selection. Playback
 depends on the returned media. DRM and media requiring custom request headers
 are unsupported.
 
-In **Settings → Website sessions**, enable the services whose signed-in sessions
-you want to use, then choose a browser or a Netscape `cookies.txt` file. YouTube,
-Twitch, X, Instagram and Vimeo are available. Only that service’s cookies are
-used; values are never shown or logged. Safari needs Full Disk Access;
-Chrome-family browsers may ask for Keychain access. Account access does not
-guarantee receiver playback.
+In **Settings → Cookies**, choose a browser or a Netscape `cookies.txt` file.
+Files automatically show recognized services; browser extraction has a services
+dropdown. YouTube, Twitch, X, Instagram and Vimeo are supported. Only the loaded
+website’s cookies are used; values are never shown or logged. Safari needs Full
+Disk Access; Chrome-family browsers may ask for Keychain access. Account access
+does not guarantee receiver playback.
 
 ## Local files (experimental)
 
