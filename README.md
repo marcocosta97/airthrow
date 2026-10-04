@@ -1,12 +1,29 @@
-# AirThrow
+<p align="center">
+  <img src="docs/images/app-icon.png" width="112" alt="AirThrow app icon">
+</p>
 
-AirThrow plays remote video on your TV through AirPlay, from a Mac.
+<h1 align="center">AirThrow</h1>
 
-Paste a video link or pick a local file, choose your Apple TV or other
-video-capable AirPlay receiver, and watch it on the big screen — the Mac stays
-the controller. The Mac’s screen is never mirrored, and playback can continue
-while you use other apps. A companion command-line tool drives the same session
-from a terminal or script.
+<p align="center"><strong>Videos on your TV. Your Mac stays the remote.</strong></p>
+
+<p align="center">
+  <a href="#build-and-run">Build</a> ·
+  <a href="#play-a-video">Usage</a> ·
+  <a href="#limitations">Limitations</a>
+</p>
+
+AirThrow sends video links and local files to Apple TV and other video-capable
+AirPlay receivers. A compact native Mac app controls playback without mirroring
+your screen.
+
+<p align="center">
+  <img src="docs/images/controller.jpg" width="470" alt="AirThrow with a video loaded, ready to choose an AirPlay receiver">
+</p>
+
+- **Links and files** — direct video URLs, website streams, local videos and playlists.
+- **Playback options** — video and audio sources, supported subtitles, and optional
+  clean up and upscaling to 1080p or 4K.
+- **One session** — control playback from the app, menu bar or `athrow` CLI.
 
 ## Requirements
 
