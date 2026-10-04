@@ -17,7 +17,7 @@ AirPlay receivers. A compact native Mac app controls playback without mirroring
 your screen.
 
 <p align="center">
-  <img src="docs/images/controller.jpg" width="470" alt="AirThrow with a video loaded, ready to choose an AirPlay receiver">
+  <img src="docs/images/controller.jpg" width="470" alt="AirThrow with a Remotion sample video URL loaded, ready to choose an AirPlay receiver">
 </p>
 
 - **Links and files** — direct video URLs, website streams, local videos and playlists.
