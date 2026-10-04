@@ -4,14 +4,14 @@ AirThrow plays remote video on your TV through AirPlay, from a Mac.
 
 Paste a video link or pick a local file, choose your Apple TV or other
 video-capable AirPlay receiver, and watch it on the big screen — the Mac stays
-the controller. The Mac's screen is never mirrored; the receiver fetches the
-video on its own, so playback keeps going while you use the Mac normally. A
-companion command-line tool drives the same session from a terminal or script.
+the controller. The Mac’s screen is never mirrored, and playback can continue
+while you use other apps. A companion command-line tool drives the same session
+from a terminal or script.
 
 ## Requirements
 
 - macOS 14 or later.
-- Swift 6 Command Line Tools or Xcode, to build from source.
+- Xcode 27 or later, to build the app and its Icon Composer asset.
 - Optional: `yt-dlp` for website links, `deno` for YouTube, and `ffmpeg`/
   `ffprobe` for preparation (`brew install ffmpeg yt-dlp deno`).
 - The Mac and the receiver must be on the same network.
@@ -34,6 +34,11 @@ This produces a locally signed app, a ZIP archive, and the `build/athrow` CLI.
    is available.
 3. Click the AirPlay button and choose a video-capable receiver, then press
    **Play** when the video and route are ready.
+
+The Mac must stay awake during playback; its display can turn off. To play with
+the laptop lid closed, use [Amphetamine](https://apps.apple.com/app/amphetamine/id937984704)
+or a similar tool configured to prevent lid-close sleep. AirThrow does not manage
+that setting.
 
 ## Website links (experimental)
 
@@ -70,9 +75,6 @@ containers may be prepared or converted on the Mac first.
   unsupported.
 - HDR/Dolby Vision processing, AI Super Resolution, and surround preservation
   are unsupported. Receiver compatibility still depends on the device.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for project layout, architecture, and
-testing details.
 
 ## License
 
