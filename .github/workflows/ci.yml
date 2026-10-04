@@ -16,7 +16,8 @@ permissions:
 jobs:
   core:
     name: Build and core checks
-    runs-on: macos-26
+    # Current Icon Composer asset requires Xcode 27.
+    runs-on: xcode-27
     steps:
       - uses: actions/checkout@v4
 
