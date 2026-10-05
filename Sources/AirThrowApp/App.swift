@@ -20,7 +20,7 @@ struct AirThrowMain {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate, NSToolbarDelegate {
     // Fixed playback surface reserves room for a two-line title and warning.
-    private static let controllerHeight: CGFloat = 464
+    private static let controllerHeight: CGFloat = 416
     private let controller = PlaybackController()
     private let cookieStatus = CookieStatusModel()
     private let presentation = ControllerPresentation()
@@ -159,20 +159,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // MARK: - Toolbar
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, .toggleInspector]
+        [.flexibleSpace, NSToolbarItem.Identifier("AirPlayReceiver"), .toggleInspector]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, .toggleInspector]
+        [.flexibleSpace, NSToolbarItem.Identifier("AirPlayReceiver"), .toggleInspector]
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        if itemIdentifier == NSToolbarItem.Identifier("AirPlayReceiver") {
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "AirPlay"
+            item.paletteLabel = "AirPlay receiver"
+            item.toolTip = "Choose an AirPlay video receiver"
+            item.view = NSHostingView(rootView: ReceiverToolbarButton(controller: controller)
+                .frame(width: 40, height: 30))
+            return item
+        }
         guard itemIdentifier == .toggleInspector else { return nil }
         let item = NSToolbarItem(itemIdentifier: itemIdentifier)
         item.label = "Playlist"
         item.paletteLabel = "Playlist"
         item.toolTip = "Show or hide the playlist"
+        item.target = splitViewController
         item.action = #selector(NSSplitViewController.toggleInspector(_:))
         return item
     }

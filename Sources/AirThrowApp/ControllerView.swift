@@ -1,5 +1,4 @@
 import SwiftUI
-import AVKit
 import AppKit
 import UniformTypeIdentifiers
 #if SWIFT_PACKAGE
@@ -94,23 +93,6 @@ struct ControllerView: View {
                             }
                             Text("Video URL, website, playlist, or local file")
                                 .font(.caption).foregroundStyle(.secondary)
-                        }
-
-                        HStack(spacing: 10) {
-                            Image(systemName: status.externalPlaybackActive ? "tv.fill" : "tv")
-                                .foregroundStyle(status.externalPlaybackActive ? Color.accentColor : .secondary)
-                                .accessibilityHidden(true)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(status.externalPlaybackActive ? "AirPlay connected" : "AirPlay receiver")
-                                    .font(.subheadline.weight(.medium))
-                                Text(status.externalPlaybackActive ? "Use AirPlay to change the receiver" : "Choose a video receiver")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            RoutePicker(controller: controller)
-                                .frame(width: 38, height: 28)
-                                .help("Choose an AirPlay video receiver")
-                                .accessibilityLabel("Choose AirPlay receiver")
                         }
                     }
                 }
@@ -395,23 +377,4 @@ struct ControllerView: View {
         do { try action() } catch { controller.displayError(error) }
     }
 
-}
-
-private struct RoutePicker: NSViewRepresentable {
-    let controller: PlaybackController
-    func makeCoordinator() -> Coordinator { Coordinator(controller) }
-    func makeNSView(context: Context) -> AVRoutePickerView {
-        let view = AVRoutePickerView()
-        view.player = controller.player
-        view.delegate = context.coordinator
-        view.isRoutePickerButtonBordered = true
-        return view
-    }
-    func updateNSView(_ nsView: AVRoutePickerView, context: Context) {}
-    @MainActor final class Coordinator: NSObject, AVRoutePickerViewDelegate {
-        let controller: PlaybackController
-        init(_ controller: PlaybackController) { self.controller = controller }
-        nonisolated func routePickerViewWillBeginPresentingRoutes(_ routePickerView: AVRoutePickerView) { Task { @MainActor in controller.pickerWillOpen() } }
-        nonisolated func routePickerViewDidEndPresentingRoutes(_ routePickerView: AVRoutePickerView) { Task { @MainActor in controller.pickerDidClose() } }
-    }
 }
