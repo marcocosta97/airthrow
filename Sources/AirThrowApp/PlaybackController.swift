@@ -98,6 +98,11 @@ final class PlaybackController: ObservableObject {
     // The requested item is separate from the paused item retained in AVPlayer
     // while its replacement loads. Routing belongs to the long-lived player.
     private var mediaItem: AVPlayerItem?
+    @Published private(set) var showReceiverWaitingScreen: Bool
+    private let waitingScreenURL: () -> URL?
+    private lazy var waitingScreen = ReceiverWaitingScreen(player: player, mediaURL: waitingScreenURL,
+        changed: { [weak self] in self?.refresh() },
+        failed: { [weak self] in self?.notice = "The TV waiting screen could not be opened. You can still load a video." })
     private var probePosition: Double = 0
     private var wasExternal = false
     private var failure: String?
@@ -123,6 +128,8 @@ final class PlaybackController: ObservableObject {
     private static let routeProbeTimeout: Double = 12
 
     init(player: AVPlayer = AVPlayer(),
+         showReceiverWaitingScreen: Bool? = nil,
+         waitingScreenURL: @escaping () -> URL? = { Bundle.main.url(forResource: "WaitingScreen", withExtension: nil) },
          resolveSource: (@Sendable (URL) async throws -> ResolvedSource)? = nil,
          resolveCandidates: (@Sendable (URL) async throws -> [MediaCandidate])? = nil,
          allowVideoConversion: Bool? = nil,
@@ -136,6 +143,8 @@ final class PlaybackController: ObservableObject {
         return AfterPlaybackBehavior(rawValue: raw) ?? .keepConnected
     }) {
         self.player = player
+        self.showReceiverWaitingScreen = showReceiverWaitingScreen ?? UserDefaults.standard.bool(forKey: "showReceiverWaitingScreen")
+        self.waitingScreenURL = waitingScreenURL
         if let resolveCandidates { self.resolveCandidates = resolveCandidates }
         else if let resolveSource {
             self.resolveCandidates = { [MediaCandidate(source: try await resolveSource($0))] }
@@ -191,6 +200,13 @@ final class PlaybackController: ObservableObject {
     func setVideoConversionAllowed(_ allowed: Bool) {
         allowVideoConversion = allowed
         UserDefaults.standard.set(allowed, forKey: "allowVideoConversion")
+        refresh()
+    }
+
+    func setShowReceiverWaitingScreen(_ enabled: Bool) {
+        showReceiverWaitingScreen = enabled
+        UserDefaults.standard.set(enabled, forKey: "showReceiverWaitingScreen")
+        if !enabled { waitingScreen.stop() }
         refresh()
     }
 
@@ -862,6 +878,7 @@ final class PlaybackController: ObservableObject {
     }
 
     func pause() {
+        if waitingScreen.isActive { stop(); return }
         playWhenReady = false
         playbackRequested = false
         probeWhenReady = false
@@ -974,6 +991,9 @@ final class PlaybackController: ObservableObject {
     /// ready item can establish the route without reopening the picker. Opening
     /// the picker is not evidence that the user selected a receiver.
     func pickerWillOpen() {
+        if showReceiverWaitingScreen && mediaItem == nil && !loadInProgress && failure == nil {
+            waitingScreen.start()
+        }
         hasOpenedPicker = true
         pickerIsOpen = true
         probeWhenReady = !player.isExternalPlaybackActive
@@ -1162,6 +1182,7 @@ final class PlaybackController: ObservableObject {
     }
 
     private func resetItem(keepPlayerItem: Bool = false, preserveQueue: Bool = false) {
+        waitingScreen.stop(keepingItemForReplacement: keepPlayerItem)
         let installedPrepared = preparedMedia != nil && mediaItem != nil && player.currentItem === mediaItem
         generation = UUID()
         loadTask?.cancel(); loadTask = nil
@@ -1299,6 +1320,19 @@ final class PlaybackController: ObservableObject {
     }
 
     func refresh() {
+        waitingScreen.reconcile()
+        if waitingScreen.isActive {
+            var next = PlaybackSnapshot()
+            next.receiverWaiting = true
+            next.externalPlaybackActive = player.isExternalPlaybackActive
+            next.state = next.externalPlaybackActive ? .idle : .connecting
+            next.title = "Ready to play"
+            next.allowVideoConversion = allowVideoConversion
+            wasExternal = next.externalPlaybackActive
+            if snapshot != next { snapshot = next; updateNowPlaying() }
+            updateSleepActivity()
+            return
+        }
         // Receiver-side controls must not resume a retained old item or a new
         // item whose video tracks are still being confirmed.
         if (mediaItem == nil || loading || failure != nil) && player.currentItem != nil {
@@ -1598,7 +1632,7 @@ final class PlaybackController: ObservableObject {
         let hasItem = mediaItem != nil && failure == nil
         center.playCommand.isEnabled = hasItem && !loading && snapshot.externalPlaybackActive && !probing && !probeRestoring
         center.pauseCommand.isEnabled = hasItem
-        center.stopCommand.isEnabled = hasItem || loading
+        center.stopCommand.isEnabled = hasItem || loading || waitingScreen.isActive
         center.togglePlayPauseCommand.isEnabled = center.playCommand.isEnabled
         center.changePlaybackPositionCommand.isEnabled = center.playCommand.isEnabled && !snapshot.seekableRanges.isEmpty
         center.previousTrackCommand.isEnabled = queue.map { $0.currentIndex > 0 } ?? false
@@ -1617,6 +1651,10 @@ final class PlaybackController: ObservableObject {
             }
             info.nowPlayingInfo = metadata
             info.playbackState = snapshot.state == .playing ? .playing : .paused
+        } else if waitingScreen.isActive {
+            info.nowPlayingInfo = [MPMediaItemPropertyTitle: "AirThrow — Ready to play",
+                                  MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.video.rawValue]
+            info.playbackState = .playing
         } else { info.nowPlayingInfo = nil; info.playbackState = .stopped }
     }
 
@@ -1625,7 +1663,7 @@ final class PlaybackController: ObservableObject {
         // Once Play is requested, transient AVPlayer pauses must not permit idle
         // sleep; prepared and local media also depend on this Mac's HTTP server.
         let needsActivity = loading || resolving || preparing || probing || probeRestoring
-            || pendingSeek != nil || playbackRequested
+            || pendingSeek != nil || playbackRequested || waitingScreen.isActive
         if needsActivity && activity == nil {
             activity = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled], reason: "Preparing or playing AirPlay video")
         } else if !needsActivity, let activity {

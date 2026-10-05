@@ -210,6 +210,8 @@ public enum MediaFailureReason: String, Codable, Sendable {
 public struct PlaybackSnapshot: Codable, Sendable, Equatable {
     public var state: PlaybackState = .idle
     public var externalPlaybackActive = false
+    /// True for the optional receiver interstitial; it is not user media.
+    public var receiverWaiting: Bool?
     public var position: Double?
     public var duration: Double?
     public var seekableRanges: [SeekRange] = []
@@ -551,7 +553,7 @@ public enum MenuModel {
         let controls = MenuControlState(
             isPlaying: PlaybackPolicy.isPlaying(snapshot),
             canToggle: PlaybackPolicy.canControl(snapshot),
-            canStop: snapshot.state != .idle,
+            canStop: snapshot.state != .idle || snapshot.receiverWaiting == true,
             canSeek: PlaybackPolicy.canSeek(snapshot),
             playlist: playlist
         )

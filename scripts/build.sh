@@ -33,6 +33,7 @@ cp "$bin_dir/AirThrowApp" "$app/Contents/MacOS/AirThrowApp"
 cp "$bin_dir/athrow" "$app/Contents/MacOS/athrow"
 cp "$bin_dir/athrow" "$build_dir/athrow"
 cp Resources/Info.plist "$app/Contents/Info.plist"
+cp -R Resources/WaitingScreen "$app/Contents/Resources/WaitingScreen"
 if [[ -n "$version" ]]; then
     /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
 fi

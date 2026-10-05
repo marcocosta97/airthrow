@@ -213,6 +213,7 @@ try:
          *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
          ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift',
          ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
+         ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
          ROOT / 'Tests/MediaChecks/main.swift', '-o', binary])
     result = run([binary, base, out / 'fixtures.json'], timeout=360)
     report = dict(macOS=platform.mac_ver()[0], machine=platform.machine(),

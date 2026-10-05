@@ -185,6 +185,13 @@ let tests: [(String, () throws -> Void)] = [
         try check(idle == MenuControlState(isPlaying: false, canToggle: false, canStop: false,
                                            canSeek: false, playlist: nil),
                   "Idle menu controls were wrong")
+        snapshot.receiverWaiting = true
+        guard case .controls(let waiting) = MenuModel.elements(for: snapshot)[2] else {
+            throw CheckFailure(message: "Waiting screen controls were missing")
+        }
+        try check(waiting.canStop && !waiting.canToggle && !waiting.canSeek,
+                  "Waiting screen should allow Stop without user media controls")
+        snapshot.receiverWaiting = nil
         snapshot.state = .paused
         snapshot.externalPlaybackActive = true
         snapshot.position = 83

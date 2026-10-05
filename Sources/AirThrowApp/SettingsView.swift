@@ -109,6 +109,12 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section("Playback") {
+                Toggle("Show a waiting screen on the TV", isOn: Binding(
+                    get: { controller.showReceiverWaitingScreen },
+                    set: { controller.setShowReceiverWaitingScreen($0) }))
+                Text("When choosing a receiver with no video loaded, show AirThrow on a black background. Stays on until you load a video, press Stop, or leave on the TV.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 Picker("After a video finishes", selection: $behavior) {
                     Text("Keep AirPlay connected").tag(AfterPlaybackBehavior.keepConnected.rawValue)
                     Text("Unload finished video").tag(AfterPlaybackBehavior.unloadVideo.rawValue)

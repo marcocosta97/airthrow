@@ -60,10 +60,14 @@ jobs:
             Sources/AirThrowCore/*.swift \
             Sources/AirThrowApp/MediaDiagnostics.swift \
             Sources/AirThrowApp/PlaybackController.swift \
+            Sources/AirThrowApp/ReceiverWaitingScreen.swift \
             Sources/AirThrowApp/SettingsView.swift \
             Tests/SettingsChecks/main.swift \
             -o .build/SettingsChecks
           .build/SettingsChecks
+
+      - name: Receiver waiting-screen checks
+        run: python3 scripts/waiting-screen-checks.py
 
       - name: Packaging script and CLI smoke
         run: |

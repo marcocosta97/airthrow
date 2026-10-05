@@ -75,6 +75,7 @@ with tempfile.TemporaryDirectory(prefix='live-remux-', dir=ROOT / 'build') as te
             *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
             ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift',
             ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
+            ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
             ROOT / 'Tests/LiveRemuxChecks/main.swift', '-o', binary)
         result = run(binary, f'http://127.0.0.1:{server.server_port}', output, timeout=90)
         print(result.stdout, end='')

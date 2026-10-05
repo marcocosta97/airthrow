@@ -49,7 +49,7 @@ struct ControllerView: View {
     /// Source quality and enhancement belong to any loaded item, including a
     /// single-file source. The item is still shown after a failure so the
     /// enhancement can be reverted without retyping the URL.
-    private var showsVideoMenu: Bool { status.state != .idle }
+    private var showsVideoMenu: Bool { status.state != .idle && status.receiverWaiting != true }
     private var activeEnhancement: VideoEnhancement? {
         guard let value = status.videoEnhancement, value != .original else { return nil }
         return value
@@ -111,7 +111,8 @@ struct ControllerView: View {
                     }
                     Spacer(minLength: 2)
                     if status.state == .idle {
-                        Label("No video loaded", systemImage: "play.rectangle")
+                        Label(status.receiverWaiting == true ? "Ready to play on TV" : "No video loaded",
+                              systemImage: status.receiverWaiting == true ? "tv" : "play.rectangle")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity)
@@ -227,7 +228,7 @@ struct ControllerView: View {
                         .keyboardShortcut(.space, modifiers: [])
 
                         Button { controller.stop() } label: { Image(systemName: "stop.fill") }
-                            .disabled(status.state == .idle)
+                            .disabled(status.state == .idle && status.receiverWaiting != true)
                             .help("Stop and unload video").accessibilityLabel("Stop and unload video")
 
                         Button { perform { try controller.skip(by: 10) } } label: {
@@ -270,7 +271,9 @@ struct ControllerView: View {
                             .foregroundStyle(status.error == nil ? Color.secondary : Color.primary)
                         }
                     } else {
-                        Text(status.state == .idle ? "Load a video, then press Play when your receiver is ready." : "Playback continues when you close this window.")
+                        Text(status.receiverWaiting == true
+                             ? "Load a video to replace the TV waiting screen."
+                             : (status.state == .idle ? "Load a video, then press Play when your receiver is ready." : "Playback continues when you close this window."))
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }

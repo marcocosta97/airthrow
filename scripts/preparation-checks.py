@@ -142,6 +142,7 @@ try:
         binary = OUT / 'PreparationChecks'
         run(['swiftc', '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
              ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
+             ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
              ROOT / 'Tests/PreparationChecks/main.swift', '-o', binary], timeout=90)
         checks = run([binary, f'http://127.0.0.1:{server.server_port}', OUT], timeout=180)
         print(checks.stdout, end='')
@@ -204,6 +205,7 @@ try:
     progressive = OUT / 'ProgressiveChecks'
     run(['swiftc', '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
          ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
+         ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
          ROOT / 'Tests/ProgressiveChecks/main.swift', '-o', progressive], timeout=90)
     print(run([progressive, f'http://127.0.0.1:{server.server_port}', OUT], timeout=140).stdout, end='')
     def video_frames(path):

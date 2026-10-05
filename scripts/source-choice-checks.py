@@ -134,6 +134,7 @@ try:
          *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
          ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift',
          ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
+         ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
          ROOT / 'Tests' / checks / 'main.swift', '-o', binary], timeout=180)
     print(f'Built {binary}')
     if args.compile_only:

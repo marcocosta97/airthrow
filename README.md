@@ -61,6 +61,9 @@ This produces a locally signed app, a ZIP archive, and the `build/athrow` CLI.
 3. Click the AirPlay button and choose a video-capable receiver, then press
    **Play** when the video and route are ready.
 
+In **Settings → Playback**, enable **Show a waiting screen on the TV** to display
+AirThrow on a black background when choosing a receiver before loading a video.
+
 The Mac must stay awake during playback; its display can turn off. To play with
 the laptop lid closed, use [Amphetamine](https://apps.apple.com/app/amphetamine/id937984704)
 or a similar tool configured to prevent lid-close sleep. AirThrow does not manage
