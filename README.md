@@ -28,7 +28,6 @@ your screen.
 ## Installation
 
 ```bash
-brew tap marcocosta97/airthrow
 brew install --cask marcocosta97/airthrow/airthrow
 ```
 
