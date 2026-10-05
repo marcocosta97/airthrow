@@ -7,6 +7,7 @@
 <p align="center"><strong>Videos on your TV. Your Mac stays the remote.</strong></p>
 
 <p align="center">
+  <a href="#installation">Installation</a> ·
   <a href="#build-and-run">Build</a> ·
   <a href="#play-a-video">Usage</a> ·
   <a href="#limitations">Limitations</a>
