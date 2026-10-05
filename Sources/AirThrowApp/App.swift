@@ -53,7 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             }
         } catch {
             // A second copy should reveal the existing app rather than steal its socket.
-            if let existing = NSRunningApplication.runningApplications(withBundleIdentifier: "app.airthrow.mac").first(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }) {
+            if let existing = NSRunningApplication.runningApplications(withBundleIdentifier: "it.mcosta.airthrow").first(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }) {
                 existing.activate(options: [])
                 NSApp.terminate(nil)
                 return

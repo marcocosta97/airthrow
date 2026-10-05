@@ -48,7 +48,7 @@ def config_list(name, extra):
     return add(name + 'Configurations', dict(isa='XCConfigurationList', buildConfigurations=ids, defaultConfigurationIsVisible='0', defaultConfigurationName='Release'))
 
 project_configs = config_list('Project', {})
-app_configs = config_list('App', dict(PRODUCT_NAME='AirThrow', PRODUCT_MODULE_NAME='AirThrowApp', EXECUTABLE_NAME='AirThrowApp', INFOPLIST_FILE='Resources/Info.plist', PRODUCT_BUNDLE_IDENTIFIER='app.airthrow.mac', CODE_SIGN_STYLE='Automatic', ENABLE_HARDENED_RUNTIME='YES', COMBINE_HIDPI_IMAGES='YES', ENABLE_USER_SCRIPT_SANDBOXING='NO', ASSETCATALOG_COMPILER_APPICON_NAME='AppIcon'))
+app_configs = config_list('App', dict(PRODUCT_NAME='AirThrow', PRODUCT_MODULE_NAME='AirThrowApp', EXECUTABLE_NAME='AirThrowApp', INFOPLIST_FILE='Resources/Info.plist', PRODUCT_BUNDLE_IDENTIFIER='it.mcosta.airthrow', CODE_SIGN_STYLE='Automatic', ENABLE_HARDENED_RUNTIME='YES', COMBINE_HIDPI_IMAGES='YES', ENABLE_USER_SCRIPT_SANDBOXING='NO', ASSETCATALOG_COMPILER_APPICON_NAME='AppIcon'))
 cli_configs = config_list('CLI', dict(PRODUCT_NAME='athrow', PRODUCT_MODULE_NAME='AirThrowCLI', CODE_SIGN_STYLE='Automatic', ENABLE_HARDENED_RUNTIME='YES', SKIP_INSTALL='YES'))
 
 def source_phase(name, folders):
