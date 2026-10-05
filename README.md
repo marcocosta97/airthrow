@@ -17,13 +17,23 @@ AirPlay receivers. A compact native Mac app controls playback without mirroring
 your screen.
 
 <p align="center">
-  <img src="docs/images/controller.jpg" width="470" alt="AirThrow with a Remotion sample video URL loaded, ready to choose an AirPlay receiver">
+  <img src="docs/images/controller.png" width="510" alt="AirThrow with a Remotion sample video loaded, ready to choose an AirPlay receiver">
 </p>
 
 - **Links and files** — direct video URLs, website streams, local videos and playlists.
 - **Playback options** — video and audio sources, supported subtitles, and optional
   clean up and upscaling to 1080p or 4K.
 - **One session** — control playback from the app, menu bar or `athrow` CLI.
+
+## Installation
+
+```bash
+brew tap marcocosta97/airthrow
+brew install --cask marcocosta97/airthrow/airthrow
+```
+
+This also installs `yt-dlp`, `deno`, and `ffmpeg`. If macOS blocks the app on
+first launch, choose **System Settings → Privacy & Security → Open Anyway**.
 
 ## Requirements
 
