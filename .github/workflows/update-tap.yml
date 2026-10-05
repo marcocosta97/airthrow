@@ -163,12 +163,12 @@ jobs:
           fi
           relation="$(python3 - "$version" "$current_version" <<'PY'
           import sys
-          
-          
+
+
           def parts(value):
               return tuple(int(component) for component in value.split("."))
-          
-          
+
+
           new = parts(sys.argv[1])
           current = parts(sys.argv[2])
           print((new > current) - (new < current))
