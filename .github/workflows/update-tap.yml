@@ -52,7 +52,7 @@ jobs:
             echo "::error::Refusing to update the tap from ${GITHUB_REPOSITORY}"
             exit 1
           fi
-          private="$(gh repo view --json isPrivate --jq .isPrivate)"
+          private="$(gh repo view "$GITHUB_REPOSITORY" --json isPrivate --jq .isPrivate)"
           [[ "$private" == "false" ]] || { echo "::error::AirThrow must be public before updating the tap"; exit 1; }
           info="$(gh release view "$TAG" --json isDraft,isPrerelease,tagName --jq '[.isDraft,.isPrerelease,.tagName] | @tsv')"
           is_draft="${info%%$'\t'*}"
