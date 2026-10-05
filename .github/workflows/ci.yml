@@ -87,6 +87,9 @@ jobs:
       - name: Source-choice controller checks
         run: python3 scripts/source-choice-checks.py
 
+      - name: Playback lifecycle checks
+        run: python3 scripts/source-choice-checks.py --controller
+
       - name: Preparation and HTTP delivery checks
         run: python3 scripts/preparation-checks.py
 

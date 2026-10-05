@@ -32,7 +32,7 @@ final class PlaybackController: ObservableObject {
         var skipped: Set<Int> = []
     }
 
-    let player = AVPlayer()
+    let player: AVPlayer
     @Published private(set) var snapshot = PlaybackSnapshot()
     @Published private(set) var notice: String?
     @Published private(set) var pendingSeek: Double?
@@ -46,6 +46,8 @@ final class PlaybackController: ObservableObject {
     private var timeoutTask: Task<Void, Never>?
     private var probeTask: Task<Void, Never>?
     private var probeRestoreTask: Task<Void, Never>?
+    private var probeRestoreSeekID: UUID?
+    private var probeRestoreSeekFinished: Bool?
     private var generation = UUID()
     private var seekID: UUID?
     private var probeID = UUID()
@@ -120,7 +122,8 @@ final class PlaybackController: ObservableObject {
     private static let pickerOpenProbeTimeout: Double = 30
     private static let routeProbeTimeout: Double = 12
 
-    init(resolveSource: (@Sendable (URL) async throws -> ResolvedSource)? = nil,
+    init(player: AVPlayer = AVPlayer(),
+         resolveSource: (@Sendable (URL) async throws -> ResolvedSource)? = nil,
          resolveCandidates: (@Sendable (URL) async throws -> [MediaCandidate])? = nil,
          allowVideoConversion: Bool? = nil,
          preferQuality: Bool? = nil,
@@ -132,6 +135,7 @@ final class PlaybackController: ObservableObject {
         guard let raw = UserDefaults.standard.string(forKey: "afterPlaybackBehavior") else { return .keepConnected }
         return AfterPlaybackBehavior(rawValue: raw) ?? .keepConnected
     }) {
+        self.player = player
         if let resolveCandidates { self.resolveCandidates = resolveCandidates }
         else if let resolveSource {
             self.resolveCandidates = { [MediaCandidate(source: try await resolveSource($0))] }
@@ -724,6 +728,12 @@ final class PlaybackController: ObservableObject {
                             }
                             return
                         }
+                        // A delayed probe-end notification must not unload or
+                        // advance the queue while the handoff is being rewound.
+                        if self.probeRestoring || self.probeRestoreFailed {
+                            self.player.pause()
+                            return
+                        }
                         let hasNext = self.queue.map { $0.currentIndex + 1 < $0.entries.count } ?? false
                         if QueuePolicy.shouldAdvanceAfterEnd(hasPlayed: self.hasPlayed,
                             externalPlaybackActive: self.player.isExternalPlaybackActive,
@@ -824,11 +834,16 @@ final class PlaybackController: ObservableObject {
         guard !probing && !probeRestoring else {
             throw AppFailure(.unsupportedOperation, "Wait for the receiver connection to finish.")
         }
-        guard !probeRestoreFailed else {
-            throw AppFailure(.unsupportedOperation, "Seek to the beginning or reload before playing.")
-        }
         guard player.isExternalPlaybackActive else {
             throw AppFailure(.routeRequired, "Choose a video receiver using the AirPlay button, then press Play.")
+        }
+        if probeRestoreFailed {
+            // A slow route handoff can exhaust the automatic retry window.
+            // Play retries the rewind and starts only after it is confirmed.
+            playWhenReady = true
+            restoreProbePosition()
+            refresh()
+            return
         }
         cancelProbe(restorePosition: true)
         notice = nil
@@ -979,7 +994,9 @@ final class PlaybackController: ObservableObject {
         probeWhenReady = false
         // Opening the picker on an active route must not pause or rewind playback.
         guard !player.isExternalPlaybackActive else { return }
-        probePosition = finite(player.currentTime().seconds) ?? 0
+        if !probeRestoreFailed {
+            probePosition = finite(player.currentTime().seconds) ?? 0
+        }
         probing = true
         probeID = UUID()
         let negotiationID = probeID
@@ -1004,7 +1021,6 @@ final class PlaybackController: ObservableObject {
     private func finishProbeIfReady() {
         guard probing, player.isExternalPlaybackActive else { return }
         cancelProbe(restorePosition: true)
-        notice = "Connected. Press Play when you’re ready."
         refresh()
     }
 
@@ -1047,43 +1063,79 @@ final class PlaybackController: ObservableObject {
         probeTask = nil
         probeRestoreTask?.cancel()
         probeRestoreTask = nil
+        probeRestoreSeekID = nil
+        probeRestoreSeekFinished = nil
         probeRestoring = false
         player.cancelPendingPrerolls()
         guard probing else { return }
         probing = false
         player.pause()
         if restorePosition, player.currentItem?.status == .readyToPlay {
-            probeRestoring = true
-            let id = generation
-            let restoreID = probeID
-            let position = CMTime(seconds: probePosition, preferredTimescale: 600)
-            player.seek(to: position, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
-                Task { @MainActor in
-                    guard let self, self.generation == id, self.probeID == restoreID,
-                          self.probeRestoring else { return }
-                    self.probeRestoreTask?.cancel()
-                    self.probeRestoreTask = nil
-                    self.probeRestoring = false
-                    if finished {
-                        self.probeRestoreFailed = false
-                    } else {
-                        self.probeRestoreFailed = true
-                        self.playWhenReady = false
-                        self.notice = "Could not return to the start. Seek to the beginning before playing."
+            restoreProbePosition()
+        }
+    }
+
+    private func restoreProbePosition() {
+        probeRestoreTask?.cancel()
+        probeRestoring = true
+        probeRestoreFailed = false
+        player.isMuted = true
+        player.pause()
+        let id = generation
+        let restoreID = probeID
+        let position = CMTime(seconds: probePosition, preferredTimescale: 600)
+        probeRestoreTask = Task { [weak self] in
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .seconds(20))
+            while !Task.isCancelled, clock.now < deadline {
+                guard let self, self.generation == id, self.probeID == restoreID,
+                      self.probeRestoring else { return }
+                let requestID = UUID()
+                self.probeRestoreSeekID = requestID
+                self.probeRestoreSeekFinished = nil
+                self.player.seek(to: position, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
+                    Task { @MainActor in
+                        guard let self, self.generation == id, self.probeID == restoreID,
+                              self.probeRestoring, self.probeRestoreSeekID == requestID else { return }
+                        self.probeRestoreSeekFinished = finished
                     }
-                    self.refresh()
                 }
+                // External playback becomes active before the receiver is
+                // necessarily ready for transport commands. Retry interrupted
+                // or unanswered seeks, and verify the actual paused clock.
+                let attemptDeadline = min(deadline, clock.now.advanced(by: .seconds(3)))
+                repeat {
+                    do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+                    guard self.generation == id, self.probeID == restoreID,
+                          self.probeRestoring else { return }
+                    if self.player.rate != 0 || self.player.timeControlStatus != .paused {
+                        self.player.pause()
+                    }
+                    if self.probeRestoreSeekFinished == true,
+                       let actual = self.finite(self.player.currentTime().seconds),
+                       abs(actual - position.seconds) < 0.1,
+                       self.player.rate == 0, self.player.timeControlStatus == .paused {
+                        self.probeRestoring = false
+                        self.probeRestoreSeekID = nil
+                        self.probeRestoreTask = nil
+                        if self.player.isExternalPlaybackActive {
+                            self.notice = "Connected. Press Play when you’re ready."
+                        }
+                        self.refresh()
+                        return
+                    }
+                    if self.probeRestoreSeekFinished == false { break }
+                } while clock.now < attemptDeadline
             }
-            probeRestoreTask = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(8))
-                guard !Task.isCancelled, let self, self.generation == id,
-                      self.probeID == restoreID, self.probeRestoring else { return }
-                self.probeRestoring = false
-                self.probeRestoreFailed = true
-                self.playWhenReady = false
-                self.notice = "Could not return to the start. Seek to the beginning before playing."
-                self.refresh()
-            }
+            guard !Task.isCancelled, let self, self.generation == id,
+                  self.probeID == restoreID, self.probeRestoring else { return }
+            self.probeRestoring = false
+            self.probeRestoreSeekID = nil
+            self.probeRestoreTask = nil
+            self.probeRestoreFailed = true
+            self.playWhenReady = false
+            self.notice = "The receiver has not returned to the starting position yet. Press Play to retry."
+            self.refresh()
         }
     }
 
@@ -1269,6 +1321,10 @@ final class PlaybackController: ObservableObject {
         }
         wasExternal = external
         if probing && external { finishProbeIfReady() }
+        if probeRestoring || (probeRestoreFailed && !probing) {
+            player.isMuted = true
+            if player.rate != 0 || player.timeControlStatus != .paused { player.pause() }
+        }
         if !external && !probing {
             player.isMuted = true
             if player.rate != 0 { player.pause() }
@@ -1323,7 +1379,7 @@ final class PlaybackController: ObservableObject {
                 notice = "Next playlist item is ready. Waiting for the receiver…"
             }
         }
-        if external && !probing && player.rate > 0 {
+        if external && !probing && !probeRestoring && !probeRestoreFailed && player.rate > 0 {
             hasPlayed = true
             player.isMuted = false
             notice = nil
@@ -1540,7 +1596,7 @@ final class PlaybackController: ObservableObject {
     private func updateNowPlaying() {
         let center = MPRemoteCommandCenter.shared()
         let hasItem = mediaItem != nil && failure == nil
-        center.playCommand.isEnabled = hasItem && !loading && snapshot.externalPlaybackActive && !probing
+        center.playCommand.isEnabled = hasItem && !loading && snapshot.externalPlaybackActive && !probing && !probeRestoring
         center.pauseCommand.isEnabled = hasItem
         center.stopCommand.isEnabled = hasItem || loading
         center.togglePlayPauseCommand.isEnabled = center.playCommand.isEnabled
@@ -1551,7 +1607,7 @@ final class PlaybackController: ObservableObject {
         if hasItem {
             var metadata: [String: Any] = [MPMediaItemPropertyTitle: title,
                 MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.video.rawValue,
-                MPNowPlayingInfoPropertyPlaybackRate: probing ? 0 : player.rate,
+                MPNowPlayingInfoPropertyPlaybackRate: (probing || probeRestoring) ? 0 : player.rate,
                 MPNowPlayingInfoPropertyIsLiveStream: snapshot.isLive]
             if let position = snapshot.position { metadata[MPNowPlayingInfoPropertyElapsedPlaybackTime] = position }
             if let duration = snapshot.duration { metadata[MPMediaItemPropertyPlaybackDuration] = duration }

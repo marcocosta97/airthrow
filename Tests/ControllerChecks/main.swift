@@ -7,6 +7,64 @@ private actor CancellationProbe {
     func wasCancelled() -> Bool { cancelled }
 }
 
+/// Exercise transport replies that occur during an AirPlay handoff, while a
+/// real AVPlayerItem still supplies readiness and video/seekable metadata.
+private final class HandoffPlayer: AVPlayer, @unchecked Sendable {
+    enum Reply { case interrupted, unanswered, stalePosition, restored }
+    private struct Transport {
+        var external = false
+        var position = 0.0
+        var rate: Float = 0
+        var replies: [Reply] = []
+        var seeks = 0
+    }
+    private let lock = NSLock()
+    nonisolated(unsafe) private var transport = Transport() // All access is protected by lock.
+
+    override var isExternalPlaybackActive: Bool { lock.withLock { transport.external } }
+    override var rate: Float {
+        get { lock.withLock { transport.rate } }
+        set { lock.withLock { transport.rate = newValue } }
+    }
+    override var timeControlStatus: AVPlayer.TimeControlStatus { rate == 0 ? .paused : .playing }
+    override func currentTime() -> CMTime {
+        CMTime(seconds: lock.withLock { transport.position }, preferredTimescale: 600)
+    }
+    override func play() { rate = 1 }
+    override func pause() { rate = 0 }
+    override func preroll(atRate rate: Float, completionHandler: (@Sendable (Bool) -> Void)? = nil) {
+        completionHandler?(true)
+    }
+    override func cancelPendingPrerolls() {}
+    override func seek(to time: CMTime, toleranceBefore: CMTime, toleranceAfter: CMTime,
+                       completionHandler: (@Sendable (Bool) -> Void)? = nil) {
+        let reply = lock.withLock {
+            transport.seeks += 1
+            let reply = transport.replies.isEmpty ? Reply.restored : transport.replies.removeFirst()
+            if case .restored = reply { transport.position = time.seconds }
+            return reply
+        }
+        switch reply {
+        case .interrupted: completionHandler?(false)
+        case .unanswered: break
+        case .stalePosition: completionHandler?(true)
+        case .restored: completionHandler?(true)
+        }
+    }
+    func handoff(at position: Double, replies: [Reply]) {
+        lock.withLock {
+            transport.external = true
+            transport.position = position
+            transport.rate = 1
+            transport.replies = replies
+            transport.seeks = 0
+        }
+    }
+    var seekCount: Int { lock.withLock { transport.seeks } }
+    func disconnect() { lock.withLock { transport.external = false } }
+    func setReplies(_ replies: [Reply]) { lock.withLock { transport.replies = replies } }
+}
+
 @main
 struct ControllerChecks {
     @MainActor static func main() async throws {
@@ -41,14 +99,14 @@ struct ControllerChecks {
         print("PASS URL replacement keeps player and directly swaps paused items")
 
         // Dismissing the system picker without choosing a receiver must end the
-        // muted negotiation quickly instead of pinning "Connecting to AirPlay…".
+        // muted negotiation after the route-selection grace period.
         controller.stop()
         try controller.load(base + "/video.mp4")
         try await waitFor(.awaitingReceiver)
         controller.pickerWillOpen()
         try await waitFor(.connecting)
         controller.pickerDidClose()
-        try await waitFor(.awaitingReceiver, seconds: 6)
+        try await waitFor(.awaitingReceiver, seconds: 36)
         try await Task.sleep(for: .milliseconds(200))
         try check(player.rate == 0 && player.isMuted && controller.snapshot.state == .awaitingReceiver,
                    "Dismissed picker left the controller negotiating")
@@ -61,8 +119,9 @@ struct ControllerChecks {
         try check(controller.snapshot.state == .idle && player.currentItem == nil && !controller.snapshot.externalPlaybackActive, "Empty picker interaction claimed a connected receiver or created media")
         try controller.load(base + "/video.mp4")
         try await waitFor(.connecting)
-        try check(player.isMuted && player.rate == 0, "Deferred route negotiation started visible playback")
-        try await waitFor(.awaitingReceiver, seconds: 16)
+        try check(player.isMuted && controller.snapshot.position == 0,
+                  "Deferred route negotiation exposed audible playback or its temporary position")
+        try await waitFor(.awaitingReceiver, seconds: 36)
         try await Task.sleep(for: .milliseconds(200))
         try check(player.rate == 0 && player.isMuted && player.currentTime().seconds < 0.1, "Cancelled picker negotiation did not stop and restore position")
         print("PASS receiver-first workflow defers muted negotiation and times out safely")
@@ -141,6 +200,88 @@ struct ControllerChecks {
         try check(replacementController.snapshot.state == .awaitingReceiver && replacementController.snapshot.queue == nil,
                   "Stale playlist extraction replaced the newer source")
         print("PASS URL replacement cancels playlist extraction and rejects stale queue results")
-        print("5/5 controller checks passed (no physical receiver)")
+
+        let handoffPlayer = HandoffPlayer()
+        let handoffController = PlaybackController(player: handoffPlayer, prepareSource: nil)
+        defer { handoffController.shutdown() }
+        func waitForHandoff(_ state: PlaybackState, seconds: Double = 12) async throws {
+            let deadline = Date().addingTimeInterval(seconds)
+            while Date() < deadline {
+                handoffController.refresh()
+                if handoffController.snapshot.state == state { return }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            try check(false, "Handoff did not reach \(state): \(handoffController.snapshot)")
+        }
+        try handoffController.load(base + "/video.mp4")
+        try await waitForHandoff(.awaitingReceiver)
+        handoffController.pickerWillOpen()
+        try await waitForHandoff(.connecting)
+        handoffPlayer.handoff(at: 3, replies: [.interrupted, .unanswered, .stalePosition, .restored])
+        handoffController.pickerDidClose()
+        handoffController.refresh()
+        try check(handoffController.snapshot.state == .connecting && handoffController.snapshot.position == 0,
+                  "Handoff exposed the muted probe's advanced position")
+        try check(handoffPlayer.rate == 0 && handoffPlayer.isMuted,
+                  "Handoff resumed or unmuted playback while rewinding")
+        handoffController.pause()
+        NotificationCenter.default.post(name: .AVPlayerItemDidPlayToEndTime,
+                                        object: handoffPlayer.currentItem)
+        try await Task.sleep(for: .milliseconds(50))
+        do { try handoffController.play(); try check(false, "Play raced the handoff rewind") }
+        catch let error as AppFailure { try check(error.code == .unsupportedOperation, "Unexpected Play error") }
+        do { try handoffController.seek(0); try check(false, "Seek raced the handoff rewind") }
+        catch let error as AppFailure { try check(error.code == .unsupportedOperation, "Unexpected seek error") }
+        try await waitForHandoff(.ready)
+        try check(handoffPlayer.seekCount == 4 && handoffPlayer.currentTime().seconds == 0,
+                  "Interrupted, unanswered, or stale-position seek was not retried")
+        try check(handoffPlayer.rate == 0 && handoffPlayer.isMuted,
+                  "Recovered handoff started playback before Play")
+        try handoffController.play()
+        try check(handoffPlayer.rate == 1 && !handoffPlayer.isMuted,
+                  "Play needed a manual rewind after automatic recovery")
+        print("PASS route handoff retries seeks, verifies zero, and survives Pause/late end notifications")
+
+        // Reconnecting a played item must retain the user's position.
+        handoffPlayer.handoff(at: 4, replies: [.restored])
+        handoffPlayer.disconnect()
+        handoffController.refresh()
+        handoffController.pickerWillOpen()
+        handoffPlayer.handoff(at: 7, replies: [.interrupted, .restored])
+        handoffController.pickerDidClose()
+        try await waitForHandoff(.paused)
+        try check(handoffPlayer.currentTime().seconds == 4 && handoffPlayer.rate == 0,
+                  "Reconnection discarded the previously played position")
+        print("PASS reconnecting a played item restores its position without autoplay")
+
+        handoffPlayer.disconnect()
+        handoffController.refresh()
+        handoffController.pickerWillOpen()
+        handoffPlayer.handoff(at: 6, replies: Array(repeating: .interrupted, count: 100))
+        handoffController.pickerDidClose()
+        try await waitForHandoff(.paused, seconds: 24)
+        try check(handoffController.notice?.contains("Press Play to retry") == true,
+                  "Exhausted rewind requested a manual seek")
+        handoffPlayer.setReplies([.restored])
+        try handoffController.play()
+        try check(handoffController.snapshot.state == .connecting && handoffPlayer.rate == 0,
+                  "Play started before retrying the failed rewind")
+        try await waitForHandoff(.playing)
+        try check(handoffPlayer.currentTime().seconds == 4,
+                  "Play did not recover the original position after the retry timeout")
+        print("PASS Play retries an exhausted handoff rewind before starting")
+
+        handoffPlayer.disconnect()
+        handoffController.refresh()
+        handoffController.pickerWillOpen()
+        handoffPlayer.handoff(at: 6, replies: [.unanswered])
+        handoffController.pickerDidClose()
+        try await Task.sleep(for: .milliseconds(100))
+        handoffController.stop()
+        try await Task.sleep(for: .milliseconds(500))
+        try check(handoffController.snapshot.state == .idle && handoffPlayer.currentItem == nil && handoffPlayer.rate == 0,
+                  "Stopped handoff completed into the unloaded session")
+        print("PASS Stop cancels a pending handoff rewind")
+        print("10/10 controller checks passed (simulated handoff; no physical receiver)")
     }
 }

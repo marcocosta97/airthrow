@@ -3,6 +3,7 @@
 
 Default checks inject candidates while exercising real AVPlayer loading.
 --yt-dlp adds generic extraction over local pages using the installed helper.
+--controller runs playback lifecycle and simulated AirPlay handoff regressions.
 This suite shares system media services with the native/preparation/controller
 suites, so run it sequentially with those.
 """
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.parse
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -23,6 +25,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--compile-only', action='store_true',
                     help='Build the checks without starting AVPlayer')
 parser.add_argument('--yt-dlp', help='Optional installed yt-dlp path for generic extraction over local fixture pages')
+parser.add_argument('--controller', action='store_true', help='Run ControllerChecks using the same fixtures')
 args = parser.parse_args()
 
 (ROOT / 'build').mkdir(exist_ok=True)
@@ -37,19 +40,21 @@ def run(command, timeout=180):
                           capture_output=True, text=True, timeout=timeout)
 
 
-# Original two-second fixtures only; never reuse a user-owned file. FFmpeg's
+# Original synthetic fixtures only; never reuse a user-owned file. FFmpeg's
 # software encoder keeps this test independent of AVAssetWriter's hardware path.
+fixture_seconds = '10' if args.controller else '2'
 ffmpeg = shutil.which('ffmpeg') or '/opt/homebrew/bin/ffmpeg'
 run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-n', '-f', 'lavfi',
-     '-i', 'testsrc2=size=320x180:rate=24', '-t', '2', '-c:v', 'libx264',
+     '-i', 'testsrc2=size=320x180:rate=24', '-t', fixture_seconds, '-c:v', 'libx264',
      '-pix_fmt', 'yuv420p', '-an', '-movflags', '+faststart', out / 'video.mp4'])
 run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-n', '-i', out / 'video.mp4',
-     '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '2',
+     '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', fixture_seconds,
      '-c:v', 'copy', '-c:a', 'aac', '-ac', '2', '-movflags', '+faststart', out / 'audio.mp4'])
 
 FILES = {
     '/video.mp4': (out / 'video.mp4').read_bytes(),
     '/audio.mp4': (out / 'audio.mp4').read_bytes(),
+    '/slow.mp4': (out / 'video.mp4').read_bytes(),
 }
 CONTENT_TYPES = {}
 if args.yt_dlp:
@@ -83,6 +88,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def respond(self, body):
         path = urllib.parse.urlsplit(self.path).path
+        if path == '/slow.mp4':
+            time.sleep(2)
         data = FILES.get(path)
         if data is None:
             self.send_error(404)
@@ -119,14 +126,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 pass
 
 
-binary = build / 'SourceChoiceChecks'
+checks = 'ControllerChecks' if args.controller else 'SourceChoiceChecks'
+binary = build / checks
 server = None
 try:
     run(['swiftc', '-swift-version', '6', '-parse-as-library',
          *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
          ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift',
          ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
-         ROOT / 'Tests/SourceChoiceChecks/main.swift', '-o', binary], timeout=180)
+         ROOT / 'Tests' / checks / 'main.swift', '-o', binary], timeout=180)
     print(f'Built {binary}')
     if args.compile_only:
         print('Compilation only requested; AVPlayer checks were not run.')
@@ -134,14 +142,15 @@ try:
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f'http://127.0.0.1:{server.server_port}'
-    arguments = [binary, base, out / 'video.mp4']
-    if args.yt_dlp:
+    arguments = [binary, base] if args.controller else [binary, base, out / 'video.mp4']
+    if args.yt_dlp and not args.controller:
         arguments.append(args.yt_dlp)
     result = run(arguments, timeout=300)
     print(result.stdout, end='')
     print(result.stderr, end='')
     (out / 'results.json').write_text(json.dumps(
-        dict(checks='passed', genericExtractor='passed' if args.yt_dlp else 'not run',
+        dict(checks='passed', suite=checks,
+             genericExtractor='passed' if args.yt_dlp and not args.controller else 'not run',
              receiver='untested'), indent=2) + '\n')
     print(f'Report: {out / "results.json"}')
 except subprocess.CalledProcessError as error:
