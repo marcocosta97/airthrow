@@ -124,13 +124,13 @@ struct SettingsView: View {
                 Toggle("Avoid video conversion", isOn: Binding(
                     get: { !controller.allowVideoConversion },
                     set: { controller.setVideoConversionAllowed(!$0) }))
-                Text("Copy compatible video, and convert audio when needed. This preference governs automatic source selection: when on, automatic choice avoids video encoding. Choosing an enhancement in Video options authorizes encoding for that item, whatever this setting is.")
+                Text("Automatic selection copies compatible video and converts audio when needed, avoiding video encoding. An enhancement in Video options still processes that video.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Toggle("Prefer higher quality", isOn: Binding(
                     get: { controller.preferQuality },
                     set: { controller.setPreferQuality($0) }))
-                Text("Automatic chooses higher quality even when it requires more processing. Applies to the next load or source change; an explicit enhancement is unaffected.")
+                Text("Automatic selection favors quality within your conversion preference, even if more processing is needed. Applies to the next load or source change; enhancements are unchanged.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -230,7 +230,7 @@ private struct CookieSourceView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         if cookieMode != "none" {
-            Text("Changes apply to the next load. Session markers do not guarantee account access or receiver playback.")
+            Text("Changes apply to the next load. Detected cookies do not guarantee sign-in or receiver playback.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }

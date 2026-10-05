@@ -20,29 +20,10 @@ enum ControllerMetrics {
     static let animationDuration: TimeInterval = 0.25
 }
 
-/// Window and section surfaces. Light mode keeps the system window background
-/// and the app's soft grey; dark mode uses a raised pair so grouped sections
-/// read against the window.
+/// Semantic surfaces follow the system appearance and accessibility contrast.
 enum SurfaceColor {
-    static let window = NSColor(name: nil) { appearance in
-        appearance.isDark ? NSColor(hex: 0x25292E) : .textBackgroundColor
-    }
-    static let section = NSColor(name: nil) { appearance in
-        appearance.isDark ? NSColor(hex: 0x2C2F34) : NSColor(hex: 0xF7F7F7)
-    }
-}
-
-private extension NSAppearance {
-    var isDark: Bool { bestMatch(from: [.darkAqua, .aqua]) == .darkAqua }
-}
-
-private extension NSColor {
-    convenience init(hex: Int) {
-        self.init(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255,
-                  green: CGFloat((hex >> 8) & 0xFF) / 255,
-                  blue: CGFloat(hex & 0xFF) / 255,
-                  alpha: 1)
-    }
+    static let window = NSColor.windowBackgroundColor
+    static let section = NSColor.controlBackgroundColor
 }
 
 @MainActor
@@ -103,7 +84,7 @@ struct ControllerView: View {
                                     .onSubmit(load)
                                     .accessibilityLabel("Video source")
                                     .accessibilityHint("Enter a URL or local file path. You can also drop a video file or link here.")
-                                    .help("A direct video URL, YouTube video or playlist, or local video file")
+                                    .help("A direct video URL, website video or playlist, or local video file")
                                 Button(action: chooseFile) { Image(systemName: "folder") }
                                     .help("Choose a local video file")
                                     .accessibilityLabel("Choose local video file")
@@ -111,7 +92,7 @@ struct ControllerView: View {
                                     .disabled(url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                                     .help("Load this video without starting playback")
                             }
-                            Text("Direct URL, YouTube, playlist, or local file")
+                            Text("Video URL, website, playlist, or local file")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
 
@@ -155,6 +136,7 @@ struct ControllerView: View {
                     } else {
                         VStack(alignment: .leading, spacing: 5) {
                             Text(status.title)
+                                .help(status.title)
                                 .font(.headline.weight(.semibold))
                                 .foregroundStyle(.primary)
                                 .multilineTextAlignment(.center)
@@ -264,7 +246,7 @@ struct ControllerView: View {
 
                         Button { controller.stop() } label: { Image(systemName: "stop.fill") }
                             .disabled(status.state == .idle)
-                            .help("Stop and unload video").accessibilityLabel("Stop")
+                            .help("Stop and unload video").accessibilityLabel("Stop and unload video")
 
                         Button { perform { try controller.skip(by: 10) } } label: {
                             Image(systemName: "goforward.10")
@@ -288,29 +270,31 @@ struct ControllerView: View {
 
                 Group {
                     if let message = status.error ?? controller.notice {
-                        HStack(alignment: .top, spacing: 8) {
-                            Image(systemName: status.error == nil ? "info.circle" : "exclamationmark.triangle")
-                            Text(message)
-                                .lineLimit(4)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .help(message)
-                                .textSelection(.enabled)
-                            Spacer(minLength: 0)
-                            if status.error == nil {
-                                Button { controller.clearNotice() } label: { Image(systemName: "xmark") }
-                                    .buttonStyle(.plain).accessibilityLabel("Dismiss message")
+                        ScrollView {
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: status.error == nil ? "info.circle" : "exclamationmark.triangle")
+                                    .accessibilityHidden(true)
+                                Text(message)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .help(message)
+                                    .textSelection(.enabled)
+                                Spacer(minLength: 0)
+                                if status.error == nil {
+                                    Button { controller.clearNotice() } label: { Image(systemName: "xmark") }
+                                        .buttonStyle(.plain).accessibilityLabel("Dismiss message")
+                                }
                             }
+                            .font(.callout)
+                            .foregroundStyle(status.error == nil ? Color.secondary : Color.primary)
                         }
-                        .font(.callout)
-                        .foregroundStyle(status.error == nil ? Color.secondary : Color.primary)
                     } else {
                         Text(status.state == .idle ? "Load a video, then press Play when your receiver is ready." : "Playback continues when you close this window.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                // A fixed height keeps the sections above from shifting when a
-                // multi-line error or notice replaces the single-line caption.
-                .frame(maxWidth: .infinity, minHeight: 50, maxHeight: 50, alignment: .topLeading)
+                // Preserve the compact layout while allowing the complete
+                // recovery message to scroll instead of truncating it.
+                .frame(maxWidth: .infinity, minHeight: 34, maxHeight: 34, alignment: .topLeading)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)

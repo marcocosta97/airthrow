@@ -65,6 +65,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         snapshotObservation = controller.$snapshot
             .map { $0.queue != nil }
             .removeDuplicates()
+            // @Published emits before storing the new snapshot. Defer AppKit
+            // layout until the controller and inspector can read that value.
+            .receive(on: RunLoop.main)
             .sink { [weak self] available in
                 self?.updatePlaylistAvailability(available)
         }
@@ -191,6 +194,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     /// in one coordinated animation instead of two competing ones.
     private func setInspector(collapsed: Bool) {
         guard let inspectorItem, inspectorItem.isCollapsed != collapsed else { return }
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            inspectorItem.isCollapsed = collapsed
+            return
+        }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = ControllerMetrics.animationDuration
             inspectorItem.animator().isCollapsed = collapsed
@@ -290,6 +297,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         ])
     }
 
+    @objc private func showHelp() {
+        guard let url = URL(string: "https://github.com/marcocosta97/airthrow#play-a-video") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     private func makeMenu() {
         let main = NSMenu()
         let appMenuItem = NSMenuItem()
@@ -297,7 +309,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let about = appMenu.addItem(withTitle: "About AirThrow", action: #selector(showAbout), keyEquivalent: "")
         about.target = self
         appMenu.addItem(.separator())
-        let settings = appMenu.addItem(withTitle: "Settings", action: #selector(showSettings), keyEquivalent: ",")
+        let settings = appMenu.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
         appMenu.addItem(.separator())
         let show = appMenu.addItem(withTitle: "Show Controller", action: #selector(showWindow), keyEquivalent: "0")
@@ -316,6 +328,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editItem.submenu = edit
         main.addItem(editItem)
+        let helpItem = NSMenuItem()
+        let help = NSMenu(title: "Help")
+        let guide = help.addItem(withTitle: "AirThrow Help", action: #selector(showHelp), keyEquivalent: "")
+        guide.target = self
+        helpItem.submenu = help
+        main.addItem(helpItem)
+        NSApp.helpMenu = help
         NSApp.mainMenu = main
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -414,7 +433,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         case .stop: "Stop"
         case .skipForward: "Forward 10 Seconds"
         case .next: "Next Playlist Item"
-        case .showController: "Show AirThrow"
+        case .showController: "Show Controller"
         case .quit: "Quit"
         }
     }

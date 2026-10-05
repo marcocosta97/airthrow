@@ -32,7 +32,7 @@ struct PlaylistView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline) {
-                Text(queue.title).font(.headline).lineLimit(2)
+                Text(queue.title).font(.headline).lineLimit(2).help(queue.title)
                 Spacer(minLength: 8)
                 Text("\(queue.currentIndex + 1) of \(queue.items.count)")
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
@@ -47,6 +47,7 @@ struct PlaylistView: View {
                             .foregroundStyle(.secondary)
                             .frame(minWidth: 20, alignment: .trailing)
                         Text(item.title)
+                            .help(item.title)
                             .lineLimit(2)
                             .foregroundStyle(item.state == .skipped ? .secondary : .primary)
                         Spacer(minLength: 0)

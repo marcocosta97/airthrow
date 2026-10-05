@@ -64,6 +64,14 @@ struct VideoMenuView: View {
         return "Changing the target reloads from the start, paused."
     }
 
+    private var outputExplanation: String {
+        if isLive { return "Enhancement is available only for on-demand video." }
+        if !mediaReady { return "Video options become available when the source is ready." }
+        if enhancementAction == .original { return "Choose an enhancement to enable output resolution." }
+        if controller.requires4KOutput { return "This source requires 4K output and a compatible receiver." }
+        return "4K needs a compatible receiver."
+    }
+
     /// The chosen source, independent of any prepared output quality.
     private var sourceLabel: String {
         guard let id = status.selectedSourceID,
@@ -159,10 +167,18 @@ struct VideoMenuView: View {
                             .accessibilityLabel("Subtitles")
                         }
                     }
-                    Text("Video and enhancement changes reload paused.")
-                        .font(.caption).foregroundStyle(.secondary)
                     Divider()
                 }
+                Text("Enhancement").font(.subheadline.weight(.medium))
+                Picker("Enhancement", selection: Binding(get: { enhancementAction },
+                                                         set: { chooseAction($0) })) {
+                    ForEach(EnhancementAction.allCases, id: \.self) { option in
+                        Text(option.label).tag(option)
+                    }
+                }
+                .pickerStyle(.radioGroup)
+                .labelsHidden()
+                .disabled(!mediaReady || isLive)
                 Text("Upscale output")
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(canChooseOutput ? Color.primary : Color.secondary)
@@ -176,16 +192,14 @@ struct VideoMenuView: View {
                 .frame(maxWidth: .infinity)
                 .disabled(!canChooseOutput)
                 .help(outputHelp)
-                Text("Enhancement").font(.subheadline.weight(.medium))
-                Picker("Enhancement", selection: Binding(get: { enhancementAction },
-                                                         set: { chooseAction($0) })) {
-                    ForEach(EnhancementAction.allCases, id: \.self) { option in
-                        Text(option.label).tag(option)
-                    }
-                }
-                .pickerStyle(.radioGroup)
-                .labelsHidden()
-                .disabled(!mediaReady || isLive)
+                Text(outputExplanation)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(isLive
+                     ? "Changing video reloads the live stream, paused."
+                     : "Changing video or enhancement restarts the video from the beginning, paused.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(12)
             .frame(width: 210, alignment: .leading)
