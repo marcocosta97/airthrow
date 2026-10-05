@@ -1,0 +1,210 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build (for example v0.2.0)"
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: Build and verify
+    runs-on: xcode-27
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          uname -m
+          swift --version
+          xcodebuild -version
+
+      - name: Require Apple Silicon
+        run: |
+          if [[ "$(uname -m)" != "arm64" ]]; then
+            echo "::error::Release builds must run on arm64"
+            exit 1
+          fi
+
+      - name: Validate release tag
+        env:
+          TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Invalid release tag: ${TAG}"
+            exit 1
+          fi
+          echo "Building release ${TAG}"
+
+      - name: Verify tag matches checkout
+        env:
+          TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          git fetch --force --no-tags origin "+refs/tags/${TAG}:refs/tags/${TAG}"
+          tag_commit="$(git rev-list -n 1 "refs/tags/${TAG}")"
+          git checkout --detach "$tag_commit"
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$tag_commit" origin/main; then
+            echo "::error::Tag ${TAG} is not an ancestor of origin/main"
+            exit 1
+          fi
+          echo "Tag ${TAG} resolves to ${tag_commit}"
+
+      - name: Build
+        run: swift build --disable-sandbox
+
+      - name: Core checks
+        run: .build/debug/CoreChecks
+
+      - name: Source registry checks
+        run: .build/debug/SourceRegistryChecks
+
+      - name: Package release
+        env:
+          TAG: ${{ env.RELEASE_TAG }}
+        run: bash scripts/package-release.sh "$TAG"
+
+      - name: Verify release artifacts
+        env:
+          TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          asset="build/release/AirThrow-${version}-arm64.zip"
+          sums="build/release/SHA256SUMS"
+          if [[ ! -f "$asset" ]]; then
+            echo "::error::Missing ${asset}"
+            exit 1
+          fi
+          if [[ ! -f "$sums" ]]; then
+            echo "::error::Missing ${sums}"
+            exit 1
+          fi
+          expected="AirThrow-${version}-arm64.zip"
+          entries=0
+          manifest_hash=""
+          while read -r hash name || [[ -n "${hash:-}" ]]; do
+            if [[ -z "${hash:-}" ]]; then
+              continue
+            fi
+            name="${name#\*}"
+            if [[ ! "$hash" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::Malformed hash in SHA256SUMS: ${hash}"
+              exit 1
+            fi
+            if [[ "$name" != "$expected" ]]; then
+              echo "::error::SHA256SUMS lists unexpected file: ${name}"
+              exit 1
+            fi
+            manifest_hash="$hash"
+            entries=$((entries + 1))
+          done < "$sums"
+          if [[ "$entries" -ne 1 ]]; then
+            echo "::error::SHA256SUMS must list exactly one file: ${expected}"
+            exit 1
+          fi
+          actual="$(shasum -a 256 "$asset" | awk '{print $1}')"
+          if [[ "$actual" != "$manifest_hash" ]]; then
+            echo "::error::SHA256 mismatch for ${expected}"
+            exit 1
+          fi
+          echo "Verified ${expected}"
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: |
+            build/release/AirThrow-*-arm64.zip
+            build/release/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Draft release
+    needs: build
+    runs-on: macos-26
+    permissions:
+      contents: write
+    env:
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: build/release
+
+      - name: Prepare release notes
+        env:
+          TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          mkdir -p build/release
+          {
+            printf '# AirThrow %s\n\n' "$version"
+            cat <<'EOF'
+          Apple Silicon (arm64) build for macOS 14 (Sonoma) and later.
+
+          This build is ad-hoc signed and not notarized. On first launch macOS may
+          block it: open System Settings > Privacy & Security and choose
+          "Open Anyway" for AirThrow.app. The bundled `athrow` CLI may require
+          separate approval.
+
+          Homebrew users: no `brew upgrade` until the tap cask is updated after
+          this release is published.
+          EOF
+          } > build/release/RELEASE_NOTES.md
+
+      - name: Create or update draft release
+        env:
+          TAG: ${{ env.RELEASE_TAG }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Invalid release tag: ${TAG}"
+            exit 1
+          fi
+          version="${TAG#v}"
+          asset="build/release/AirThrow-${version}-arm64.zip"
+          sums="build/release/SHA256SUMS"
+          notes="build/release/RELEASE_NOTES.md"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            draft="$(gh release view "$TAG" --json isDraft --jq '.isDraft')"
+            if [[ "$draft" != "true" ]]; then
+              echo "::error::Release ${TAG} is already published; refusing to modify it"
+              exit 1
+            fi
+            echo "Updating existing draft release ${TAG}"
+            gh release upload "$TAG" "$asset" "$sums" --clobber
+          else
+            echo "Creating draft release ${TAG}"
+            gh release create "$TAG" \
+              --draft \
+              --verify-tag \
+              --title "AirThrow ${version}" \
+              --notes-file "$notes" \
+              "$asset" "$sums"
+          fi

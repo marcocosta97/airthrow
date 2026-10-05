@@ -1,0 +1,217 @@
+name: Update Homebrew tap
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Published release tag to (re)publish to the tap (for example v0.2.0)"
+        required: true
+        type: string
+
+concurrency:
+  group: update-tap
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+  TAP_REPO: marcocosta97/homebrew-airthrow
+
+jobs:
+  tap:
+    name: Update cask
+    runs-on: macos-26
+    steps:
+      - name: Checkout workflow source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: source
+
+      - name: Validate release tag
+        env:
+          TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Invalid release tag: ${TAG}"
+            exit 1
+          fi
+
+      - name: Verify published stable release
+        env:
+          TAG: ${{ env.RELEASE_TAG }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REPOSITORY}" != "marcocosta97/airthrow" ]]; then
+            echo "::error::Refusing to update the tap from ${GITHUB_REPOSITORY}"
+            exit 1
+          fi
+          private="$(gh repo view --json isPrivate --jq .isPrivate)"
+          [[ "$private" == "false" ]] || { echo "::error::AirThrow must be public before updating the tap"; exit 1; }
+          info="$(gh release view "$TAG" --json isDraft,isPrerelease,tagName --jq '[.isDraft,.isPrerelease,.tagName] | @tsv')"
+          is_draft="${info%%$'\t'*}"
+          remainder="${info#*$'\t'}"
+          is_prerelease="${remainder%%$'\t'*}"
+          tag_name="${remainder#*$'\t'}"
+          if [[ "$is_draft" != "false" ]]; then
+            echo "::error::Refusing to publish draft release ${TAG} to the tap"
+            exit 1
+          fi
+          if [[ "$is_prerelease" != "false" ]]; then
+            echo "::error::Refusing to publish prerelease ${TAG} to the tap"
+            exit 1
+          fi
+          if [[ "$tag_name" != "$TAG" ]]; then
+            echo "::error::Release tag mismatch: ${tag_name}"
+            exit 1
+          fi
+
+      - name: Download release assets
+        env:
+          TAG: ${{ env.RELEASE_TAG }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          mkdir -p download
+          gh release download "$TAG" \
+            --pattern "AirThrow-${version}-arm64.zip" \
+            --pattern "SHA256SUMS" \
+            --dir download \
+            --clobber
+
+      - name: Verify downloaded assets
+        env:
+          TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          asset="download/AirThrow-${version}-arm64.zip"
+          sums="download/SHA256SUMS"
+          if [[ ! -f "$asset" ]]; then
+            echo "::error::Missing ${asset}"
+            exit 1
+          fi
+          if [[ ! -f "$sums" ]]; then
+            echo "::error::Missing ${sums}"
+            exit 1
+          fi
+          expected="AirThrow-${version}-arm64.zip"
+          entries=0
+          sha=""
+          while read -r hash name || [[ -n "${hash:-}" ]]; do
+            if [[ -z "${hash:-}" ]]; then
+              continue
+            fi
+            name="${name#\*}"
+            if [[ ! "$hash" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::Malformed hash in SHA256SUMS: ${hash}"
+              exit 1
+            fi
+            if [[ "$name" != "$expected" ]]; then
+              echo "::error::SHA256SUMS lists unexpected file: ${name}"
+              exit 1
+            fi
+            sha="$hash"
+            entries=$((entries + 1))
+          done < "$sums"
+          if [[ "$entries" -ne 1 ]]; then
+            echo "::error::SHA256SUMS must list exactly one file: ${expected}"
+            exit 1
+          fi
+          actual="$(shasum -a 256 "$asset" | awk '{print $1}')"
+          if [[ "$actual" != "$sha" ]]; then
+            echo "::error::SHA256 mismatch for ${expected}"
+            exit 1
+          fi
+          {
+            printf 'VERSION=%s\n' "$version"
+            printf 'SHA256=%s\n' "$sha"
+          } >> "$GITHUB_ENV"
+
+      - name: Fetch current tap cask
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p tap-state
+          : > tap-state/current.rb
+          if sha="$(gh api "repos/${TAP_REPO}/contents/Casks/airthrow.rb" --jq '.sha' 2>/dev/null)"; then
+            printf '%s\n' "$sha" > tap-state/sha
+            gh api "repos/${TAP_REPO}/contents/Casks/airthrow.rb" \
+              -H "Accept: application/vnd.github.raw" > tap-state/current.rb
+          else
+            echo "Tap cask is absent; this will be the first publish."
+          fi
+
+      - name: Compare tap cask version
+        id: compare
+        run: |
+          set -euo pipefail
+          version="${VERSION:?}"
+          current_version="$(sed -n 's/^  version "\([0-9][0-9.]*\)"$/\1/p' tap-state/current.rb | head -n1)"
+          if [[ -z "$current_version" ]]; then
+            echo "No existing cask version; proceeding with ${version}."
+            exit 0
+          fi
+          relation="$(python3 - "$version" "$current_version" <<'PY'
+          import sys
+          
+          
+          def parts(value):
+              return tuple(int(component) for component in value.split("."))
+          
+          
+          new = parts(sys.argv[1])
+          current = parts(sys.argv[2])
+          print((new > current) - (new < current))
+          PY
+          )"
+          case "$relation" in
+            0)
+              expected="$(python3 source/scripts/generate-cask.py "$VERSION" "$SHA256")"
+              actual="$(cat tap-state/current.rb)"
+              if [[ "$expected" != "$actual" ]]; then
+                echo "::error::Existing cask differs for the same version; publish a new release instead"
+                exit 1
+              fi
+              echo "Tap cask already at ${version}; nothing to update."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              ;;
+            -1)
+              echo "::error::Tap cask ${current_version} is newer than release ${version}; aborting"
+              exit 1
+              ;;
+          esac
+
+      - name: Generate and update cask
+        if: steps.compare.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 source/scripts/generate-cask.py "$VERSION" "$SHA256" > tap-state/airthrow.rb
+          if [[ -s tap-state/current.rb ]] && cmp -s tap-state/airthrow.rb tap-state/current.rb; then
+            echo "Generated cask already matches the tap; nothing to update."
+            exit 0
+          fi
+          content="$(base64 < tap-state/airthrow.rb | tr -d '\n')"
+          previous_sha="$(cat tap-state/sha 2>/dev/null || true)"
+          if [[ -n "$previous_sha" ]]; then
+            gh api --method PUT "repos/${TAP_REPO}/contents/Casks/airthrow.rb" \
+              -f message="airthrow ${VERSION}" \
+              -f content="$content" \
+              -f sha="$previous_sha" >/dev/null
+          else
+            gh api --method PUT "repos/${TAP_REPO}/contents/Casks/airthrow.rb" \
+              -f message="airthrow ${VERSION}" \
+              -f content="$content" >/dev/null
+          fi
+          echo "Updated ${TAP_REPO} Casks/airthrow.rb to ${VERSION}."
