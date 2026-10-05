@@ -77,6 +77,9 @@ public struct YTDLPSourceAdapter: SourceAdapter {
             guard !choices.isEmpty else { throw ResolutionFailure.failed }
             return choices
         } catch ResolutionFailure.failed {
+            // Recognized website pages retain their extraction/access checks;
+            // only ambiguous direct inputs receive the native fallback.
+            guard WebsiteService.service(for: url) == nil else { throw ResolutionFailure.failed }
             // Successful extraction can still return incomplete metadata or no
             // eligible presentation for an extensionless media URL. Inspect the
             // original input through the normal native loading path, just as
@@ -85,6 +88,7 @@ public struct YTDLPSourceAdapter: SourceAdapter {
             try Task.checkCancellation()
             return DirectSourceAdapter.candidates(url)
         } catch ResolutionFailure.unsupportedPage {
+            guard WebsiteService.service(for: url) == nil else { throw ResolutionFailure.failed }
             try Task.checkCancellation()
             return DirectSourceAdapter.candidates(url)
         }
