@@ -3,6 +3,19 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 configuration="${1:-${CONFIGURATION:-release}}"
 build_dir="${AIRTHROW_BUILD_DIR:-build}"
+# Optional release overrides, applied to the staged Info.plist before signing.
+# Strict semver formatting: no v prefix, no prerelease/metadata, no leading zeros.
+version="${AIRTHROW_VERSION:-}"
+build_number="${AIRTHROW_BUILD_NUMBER:-}"
+valid_semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+if [[ -n "$version" && ! "$version" =~ $valid_semver ]]; then
+    printf 'AIRTHROW_VERSION must be a strict x.y.z version, got: %s\n' "$version" >&2
+    exit 2
+fi
+if [[ -n "$build_number" && ! "$build_number" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'AIRTHROW_BUILD_NUMBER must be positive digits, got: %s\n' "$build_number" >&2
+    exit 2
+fi
 mkdir -p "$build_dir"
 # Command Line Tools' SwiftPM records the deployment target as the linked SDK
 # version, which opts the app out of the current system design (Liquid Glass).
@@ -20,6 +33,12 @@ cp "$bin_dir/AirThrowApp" "$app/Contents/MacOS/AirThrowApp"
 cp "$bin_dir/athrow" "$app/Contents/MacOS/athrow"
 cp "$bin_dir/athrow" "$build_dir/athrow"
 cp Resources/Info.plist "$app/Contents/Info.plist"
+if [[ -n "$version" ]]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
+fi
+if [[ -n "$build_number" ]]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build_number" "$app/Contents/Info.plist"
+fi
 bash scripts/write-build-commit.sh "$app/Contents/Resources/BuildCommit.txt"
 # Compile the Icon Composer document so macOS renders the Liquid Glass icon,
 # including its light, dark, and tinted appearances (Assets.car), with a loose
