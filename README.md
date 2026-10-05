@@ -7,6 +7,7 @@
 <p align="center"><strong>Videos on your TV. Your Mac stays the remote.</strong></p>
 
 <p align="center">
+  <a href="#installation">Installation</a> ·
   <a href="#build-and-run">Build</a> ·
   <a href="#play-a-video">Usage</a> ·
   <a href="#limitations">Limitations</a>
@@ -20,7 +21,7 @@ your screen.
   <img src="docs/images/controller.png" width="530" alt="AirThrow with a Remotion sample video loaded, ready to choose an AirPlay receiver">
 </p>
 
-- **Links and files** — direct video URLs, website streams, local videos and playlists.
+- **Links and files** — direct video URLs, website streams (e.g. Youtube, Twitch), local videos and playlists.
 - **Playback options** — video and audio sources, supported subtitles, and optional
   clean up and upscaling to 1080p or 4K.
 - **One session** — control playback from the app, menu bar or `athrow` CLI.
