@@ -83,49 +83,29 @@ jobs:
           mkdir -p download
           gh release download "$TAG" \
             --pattern "AirThrow-${version}-arm64.zip" \
-            --pattern "SHA256SUMS" \
             --dir download \
             --clobber
 
       - name: Verify downloaded assets
         env:
           TAG: ${{ env.RELEASE_TAG }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           version="${TAG#v}"
           asset="download/AirThrow-${version}-arm64.zip"
-          sums="download/SHA256SUMS"
           if [[ ! -f "$asset" ]]; then
             echo "::error::Missing ${asset}"
             exit 1
           fi
-          if [[ ! -f "$sums" ]]; then
-            echo "::error::Missing ${sums}"
-            exit 1
-          fi
           expected="AirThrow-${version}-arm64.zip"
-          entries=0
-          sha=""
-          while read -r hash name || [[ -n "${hash:-}" ]]; do
-            if [[ -z "${hash:-}" ]]; then
-              continue
-            fi
-            name="${name#\*}"
-            if [[ ! "$hash" =~ ^[0-9a-f]{64}$ ]]; then
-              echo "::error::Malformed hash in SHA256SUMS: ${hash}"
-              exit 1
-            fi
-            if [[ "$name" != "$expected" ]]; then
-              echo "::error::SHA256SUMS lists unexpected file: ${name}"
-              exit 1
-            fi
-            sha="$hash"
-            entries=$((entries + 1))
-          done < "$sums"
-          if [[ "$entries" -ne 1 ]]; then
-            echo "::error::SHA256SUMS must list exactly one file: ${expected}"
+          digest="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" \
+            --jq ".assets[] | select(.name == \"${expected}\") | .digest")"
+          if [[ ! "$digest" =~ ^sha256:([0-9a-f]{64})$ ]]; then
+            echo "::error::Missing or invalid GitHub SHA256 digest for ${expected}"
             exit 1
           fi
+          sha="${digest#sha256:}"
           actual="$(shasum -a 256 "$asset" | awk '{print $1}')"
           if [[ "$actual" != "$sha" ]]; then
             echo "::error::SHA256 mismatch for ${expected}"

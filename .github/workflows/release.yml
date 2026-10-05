@@ -91,52 +91,17 @@ jobs:
           set -euo pipefail
           version="${TAG#v}"
           asset="build/release/AirThrow-${version}-arm64.zip"
-          sums="build/release/SHA256SUMS"
           if [[ ! -f "$asset" ]]; then
             echo "::error::Missing ${asset}"
             exit 1
           fi
-          if [[ ! -f "$sums" ]]; then
-            echo "::error::Missing ${sums}"
-            exit 1
-          fi
-          expected="AirThrow-${version}-arm64.zip"
-          entries=0
-          manifest_hash=""
-          while read -r hash name || [[ -n "${hash:-}" ]]; do
-            if [[ -z "${hash:-}" ]]; then
-              continue
-            fi
-            name="${name#\*}"
-            if [[ ! "$hash" =~ ^[0-9a-f]{64}$ ]]; then
-              echo "::error::Malformed hash in SHA256SUMS: ${hash}"
-              exit 1
-            fi
-            if [[ "$name" != "$expected" ]]; then
-              echo "::error::SHA256SUMS lists unexpected file: ${name}"
-              exit 1
-            fi
-            manifest_hash="$hash"
-            entries=$((entries + 1))
-          done < "$sums"
-          if [[ "$entries" -ne 1 ]]; then
-            echo "::error::SHA256SUMS must list exactly one file: ${expected}"
-            exit 1
-          fi
-          actual="$(shasum -a 256 "$asset" | awk '{print $1}')"
-          if [[ "$actual" != "$manifest_hash" ]]; then
-            echo "::error::SHA256 mismatch for ${expected}"
-            exit 1
-          fi
-          echo "Verified ${expected}"
+          unzip -tq "$asset"
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:
           name: release-artifacts
-          path: |
-            build/release/AirThrow-*-arm64.zip
-            build/release/SHA256SUMS
+          path: build/release/AirThrow-*-arm64.zip
           if-no-files-found: error
           retention-days: 7
 
@@ -189,7 +154,6 @@ jobs:
           fi
           version="${TAG#v}"
           asset="build/release/AirThrow-${version}-arm64.zip"
-          sums="build/release/SHA256SUMS"
           notes="build/release/RELEASE_NOTES.md"
           if gh release view "$TAG" >/dev/null 2>&1; then
             draft="$(gh release view "$TAG" --json isDraft --jq '.isDraft')"
@@ -198,7 +162,7 @@ jobs:
               exit 1
             fi
             echo "Updating existing draft release ${TAG}"
-            gh release upload "$TAG" "$asset" "$sums" --clobber
+            gh release upload "$TAG" "$asset" --clobber
           else
             echo "Creating draft release ${TAG}"
             gh release create "$TAG" \
@@ -206,5 +170,5 @@ jobs:
               --verify-tag \
               --title "AirThrow ${version}" \
               --notes-file "$notes" \
-              "$asset" "$sums"
+              "$asset"
           fi

@@ -38,8 +38,4 @@ release_dir="$build_dir/release"
 mkdir -p "$release_dir"
 release_zip="$release_dir/AirThrow-$version-arm64.zip"
 cp "$build_dir/AirThrow.zip" "$release_zip"
-(
-    cd "$release_dir"
-    shasum -a 256 "AirThrow-$version-arm64.zip" > SHA256SUMS
-)
-printf 'Packaged %s\nChecksums: %s/SHA256SUMS\n' "$release_zip" "$release_dir"
+printf 'Packaged %s\n' "$release_zip"
