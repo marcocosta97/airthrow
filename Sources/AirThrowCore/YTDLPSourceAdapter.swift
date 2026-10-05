@@ -8,11 +8,20 @@ public struct YTDLPSourceAdapter: SourceAdapter {
     public let isFallback = true
     private let environment: [String: String]
     private let sessions: WebsiteSessions
+    private let nativeProbe: @Sendable (URL) async throws -> Bool
 
     public init(environment: [String: String] = ProcessInfo.processInfo.environment,
                 sessions: WebsiteSessions = WebsiteSessions()) {
         self.environment = environment
         self.sessions = sessions
+        self.nativeProbe = { try await NativeSourceProbe.hasPlayableVideo(at: $0) }
+    }
+
+    init(environment: [String: String], sessions: WebsiteSessions = WebsiteSessions(),
+         nativeProbe: @escaping @Sendable (URL) async throws -> Bool) {
+        self.environment = environment
+        self.sessions = sessions
+        self.nativeProbe = nativeProbe
     }
 
     public func candidates(for url: URL) async throws -> [MediaCandidate] {
@@ -20,6 +29,18 @@ public struct YTDLPSourceAdapter: SourceAdapter {
         let finder = HelperExecutables(environment: environment)
         guard let helper = finder.executable("yt-dlp", override: "AIRTHROW_YTDLP") else {
             return DirectSourceAdapter.candidates(url)
+        }
+        // Known website pages need extraction. Ambiguous links may already be
+        // complete media, so give native inspection a short head start.
+        if WebsiteService.service(for: url) == nil {
+            let playable = try await nativeProbe(url)
+            try Task.checkCancellation()
+            if playable {
+                // Probe evidence may vary between loads; the original direct
+                // presentation must retain the same identity when it does.
+                let direct = DirectSourceAdapter.candidates(url)[0]
+                return [MediaCandidate(source: ResolvedSource(url: url, videoKnownPresent: true), id: direct.id)]
+            }
         }
         var arguments = ["--ignore-config", "--no-plugin-dirs", "--no-cache-dir",
                          "--no-remote-components", "--no-js-runtimes"]
@@ -55,8 +76,17 @@ public struct YTDLPSourceAdapter: SourceAdapter {
                 allowAuthenticated: scratch.path != nil)
             guard !choices.isEmpty else { throw ResolutionFailure.failed }
             return choices
+        } catch ResolutionFailure.failed {
+            // Successful extraction can still return incomplete metadata or no
+            // eligible presentation for an extensionless media URL. Inspect the
+            // original input through the normal native loading path, just as
+            // when extraction fails. Do not reuse extracted URLs or headers,
+            // or claim video evidence before AVPlayer verifies the input.
+            try Task.checkCancellation()
+            return DirectSourceAdapter.candidates(url)
         } catch ResolutionFailure.unsupportedPage {
-            throw ResolutionFailure.failed
+            try Task.checkCancellation()
+            return DirectSourceAdapter.candidates(url)
         }
     }
 }

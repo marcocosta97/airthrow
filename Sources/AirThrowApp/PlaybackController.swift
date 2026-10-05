@@ -372,7 +372,17 @@ final class PlaybackController: ObservableObject {
                 $0.source.url == selectedSource.url && $0.source.audio?.url == selectedSource.audio?.url
             })?.id
         } else { pinnedSourceID = nil }
-        startLoad(url, preservingQueue: queue != nil, titleOverride: title, sourceChoice: sourceChoice,
+        // A direct input is already the presentation being enhanced. Reuse its
+        // unmodified plan rather than rediscovering it and pinning an identity
+        // whose probe/extractor metadata may change. Website pages still resolve
+        // again so expiring extracted URLs and explicit choices are revalidated.
+        let directSource = selectedSource.flatMap { selected -> ResolvedSource? in
+            guard selected.url == url, selected.audio == nil else { return nil }
+            return sourceCandidates.first(where: {
+                $0.source.url == selected.url && $0.source.headers == selected.headers && $0.source.audio == nil
+            })?.source
+        }
+        startLoad(url, fallback: directSource, preservingQueue: queue != nil, titleOverride: title, sourceChoice: sourceChoice,
                   changingSource: true, enhancement: enhancement,
                   enhancementOutput4K: enhancement.targetHeight.map { $0 == 2160 } ?? enhancementOutput4K,
                   pinnedSourceID: pinnedSourceID)

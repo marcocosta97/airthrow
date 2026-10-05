@@ -68,6 +68,26 @@ struct PreparationChecks {
             let (data, response) = try await session.data(for: request)
             return (data, response as! HTTPURLResponse)
         }
+        let nativeStreamURL = URL(string: base + "/native-stream?signature=do-not-log")!
+        let nativeStream = try await SourceResolver(environment: ["AIRTHROW_YTDLP": "/usr/bin/false"])
+            .resolve(nativeStreamURL)
+        try check(nativeStream.url == nativeStreamURL && nativeStream.videoKnownPresent && !nativeStream.needsPreparation,
+                  "Extensionless HLS did not enter the native-first path")
+        for choice in [VideoEnhancement.upscale1080, .cleanup1080] {
+            let enhanced = try await preparer.prepare(nativeStream.withEnhancement(choice))
+            try check(enhanced.playbackPath == .videoConversion && enhanced.videoHeight == 1080,
+                      "Native-first extensionless HLS enhancement did not produce 1080p video")
+            let asset = AVURLAsset(url: enhanced.url)
+            try check(try await asset.load(.isPlayable), "Enhanced native HLS output was not playable")
+            try check(try await !asset.loadTracks(withMediaType: .video).isEmpty,
+                      "Enhanced native HLS output lost its video")
+            try check(try await !asset.loadTracks(withMediaType: .audio).isEmpty,
+                      "Enhanced native HLS output lost its audio")
+            let (data, _) = try await fetch(enhanced.url)
+            try data.write(to: directory.appendingPathComponent("native-hls-\(choice.rawValue).mp4"))
+            enhanced.stop()
+        }
+        print("PASS native-first extensionless HLS upscale and cleanup output with playable video and audio")
         let source = ResolvedSource(url: URL(string: base + "/combined.mkv")!)
         var prepared: PreparedMedia? = try await preparer.prepare(source, mode: .completeFile)
         let endpoint = prepared!.url

@@ -32,6 +32,7 @@ def fraction(value):
 
 ffmpeg('-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
        '-t', '2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ac', '2', '-movflags', '+faststart', OUT / 'combined.mp4')
+ffmpeg('-i', OUT / 'combined.mp4', '-c', 'copy', '-hls_time', '1', '-hls_playlist_type', 'vod', OUT / 'source-hls.m3u8')
 ffmpeg('-i', OUT / 'combined.mp4', '-map', '0', '-c', 'copy', OUT / 'combined.mkv')
 (OUT / 'subtitle-it.srt').write_text('1\n00:00:00,200 --> 00:00:01,200\nCiao\n', encoding='utf-8')
 (OUT / 'subtitle-en.srt').write_text('1\n00:00:00,200 --> 00:00:01,200\nHello\n', encoding='utf-8')
@@ -99,6 +100,8 @@ hardware_failure.chmod(0o700)
 FILES = {f'/{name}': (OUT / name).read_bytes() for name in ['combined.mp4', 'combined.mkv', 'subtitles.mkv', 'video.mp4', 'audio.m4a',
                                                             'flac.mkv', 'multitrack.mkv', 'long.mp4', 'vp9-opus.mkv',
                                                             'hdr.mkv', 'uhd.mkv', 'hevc-sdr.mkv', 'highfps.mkv', 'tenbit.mkv']}
+FILES['/native-stream'] = (OUT / 'source-hls.m3u8').read_bytes()
+FILES.update({f'/{path.name}': path.read_bytes() for path in OUT.glob('source-hls*.ts')})
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -123,6 +126,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             start = int(first or 0)
             end = min(int(last) if last else end, end)
         self.send_response(206 if requested else 200)
+        if urllib.parse.urlsplit(self.path).path == '/native-stream':
+            self.send_header('Content-Type', 'application/vnd.apple.mpegurl')
         self.send_header('Content-Length', str(end - start + 1))
         self.send_header('Accept-Ranges', 'bytes')
         if requested:
@@ -188,6 +193,13 @@ try:
             enhanced = [s for s in streams(OUT / f'{preset}.mp4') if s['codec_type'] == 'video']
             assert enhanced and int(enhanced[0]['height']) == height and enhanced[0]['codec_name'] == codec, \
                 f'{preset} did not produce expected SDR output'
+        for preset in ['upscale_1080', 'cleanup_1080']:
+            output = streams(OUT / f'native-hls-{preset}.mp4')
+            video = [stream for stream in output if stream['codec_type'] == 'video']
+            audio = [stream for stream in output if stream['codec_type'] == 'audio']
+            assert len(video) == 1 and video[0]['codec_name'] == 'h264' and video[0]['pix_fmt'] == 'yuv420p' \
+                and int(video[0]['height']) == 1080, f'{preset}: native HLS enhancement lost its video profile'
+            assert len(audio) == 1 and audio[0]['codec_name'] == 'aac', f'{preset}: native HLS enhancement lost AAC audio'
         hevc_copy = [s for s in streams(OUT / 'hevc-remuxed.mp4') if s['codec_type'] == 'video']
         assert hevc_copy and hevc_copy[0]['codec_name'] == 'hevc' and hevc_copy[0]['codec_tag_string'] == 'hvc1', \
             'SDR HEVC was not remuxed as hvc1'

@@ -314,6 +314,53 @@ struct MediaChecks {
             }
             try check(false, "Resolved load did not settle")
         }
+        if cases.contains(where: { $0.name == "HLS without URL extension" && $0.path != nil }) {
+            let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("athrow-native-fallback-" + UUID().uuidString)
+            try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: scratch) }
+            let helper = scratch.appendingPathComponent("yt-dlp")
+            let callsFile = scratch.appendingPathComponent("calls")
+            try "#!/bin/sh\necho call >> '\(callsFile.path)'\nprintf '%s' '{\"_type\":\"video\",\"formats\":[]}'\n"
+                .write(to: helper, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+            let environment = ["AIRTHROW_YTDLP": helper.path, "AIRTHROW_DENO": "/missing/deno"]
+            let nativeResolver = SourceResolver(environment: environment)
+            let direct = try await nativeResolver.resolve(URL(string: base + "/hls-no-extension?signature=do-not-log")!)
+            try check(direct.videoKnownPresent && !direct.needsPreparation,
+                      "Native probe did not recognize extensionless HLS")
+            try check(!FileManager.default.fileExists(atPath: callsFile.path),
+                      "Playable extensionless HLS invoked yt-dlp")
+            let start = ContinuousClock.now
+            let slowURL = URL(string: base + "/slow.mp4")!
+            try check(try await !NativeSourceProbe.hasPlayableVideo(at: slowURL, timeout: .milliseconds(100)),
+                      "Native probe ignored its deadline")
+            try check(start.duration(to: .now) < .seconds(1), "Native probe did not promptly cancel timed-out loading")
+            let cancellationStart = ContinuousClock.now
+            let probe = Task { try await NativeSourceProbe.hasPlayableVideo(at: slowURL) }
+            try await Task.sleep(for: .milliseconds(50))
+            probe.cancel()
+            do { _ = try await probe.value; try check(false, "Cancelled native inspection returned a result") }
+            catch is CancellationError {}
+            try check(cancellationStart.duration(to: .now) < .seconds(1), "Native inspection ignored cancellation")
+            // Force inconclusive native inspection to retain the previous
+            // successful-but-unusable extraction regression coverage.
+            let adapter = YTDLPSourceAdapter(environment: environment, nativeProbe: { _ in false })
+            let resolver = SourceResolver(environment: environment, registry: try SourceRegistry(adapters: [adapter]))
+            let nativeFallback = PlaybackController(resolveCandidates: { try await resolver.candidates(for: $0) }, prepareSource: nil)
+            try nativeFallback.load(base + "/hls-no-extension?signature=do-not-log")
+            try await waitForResolved(nativeFallback)
+            try check(nativeFallback.snapshot.state == .awaitingReceiver,
+                      "Successful but unusable extraction blocked extensionless HLS loading")
+            try check(nativeFallback.player.rate == 0 && nativeFallback.player.isMuted,
+                      "Native fallback started playback")
+            let calls = try String(contentsOf: callsFile, encoding: .utf8).split(separator: "\n")
+            try check(calls.count == 1, "Native fallback recursively invoked extraction")
+            try nativeFallback.load(base + "/missing-media?signature=do-not-log")
+            try await waitForResolved(nativeFallback)
+            try check(nativeFallback.snapshot.state == .failed,
+                      "Native fallback accepted an input with no playable video")
+            await nativeFallback.shutdownAndWait()
+        }
         let page = "https://www.youtube.com/watch?v=BaW_jenozKc"
         let targetURL = URL(string: base + "/audio.mp4?signature=do-not-log")!
         let genericPage = "https://video.example/watch?id=do-not-log"

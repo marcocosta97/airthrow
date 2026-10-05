@@ -192,6 +192,44 @@ public struct SourceResolver: Sendable {
     public static func playlistPage(_ url: URL) -> URL? { YouTubeSourceAdapter.playlistPage(url) }
 }
 
+/// Inspect ambiguous links without creating another player or changing the route.
+/// A deadline cancels AVFoundation loading as well as the inspection task.
+enum NativeSourceProbe {
+    static func hasPlayableVideo(at url: URL, timeout: Duration = .seconds(3)) async throws -> Bool {
+        let asset = AVURLAsset(url: url)
+        return try await withTaskCancellationHandler {
+            let result = try await withThrowingTaskGroup(of: Bool.self) { group in
+                defer { group.cancelAll(); asset.cancelLoading() }
+                group.addTask {
+                    do {
+                        guard try await asset.load(.isPlayable),
+                              try await !asset.load(.hasProtectedContent) else { return false }
+                        let tracks = try await asset.loadTracks(withMediaType: .video)
+                        if !tracks.isEmpty { return true }
+                        // HLS may omit AVAsset tracks even though its presentation has video.
+                        let video = await HLSVideoEvidence.hasVideo(at: url)
+                        try Task.checkCancellation()
+                        return video
+                    } catch {
+                        try Task.checkCancellation()
+                        return false
+                    }
+                }
+                group.addTask {
+                    try await Task.sleep(for: timeout)
+                    asset.cancelLoading()
+                    return false
+                }
+                return try await group.next() ?? false
+            }
+            try Task.checkCancellation()
+            return result
+        } onCancel: {
+            asset.cancelLoading()
+        }
+    }
+}
+
 /// Conservative recognition of a native HLS presentation, not a playlist
 /// rewriter. AVPlayer owns rendition selection, fetching and synchronization.
 enum HLSMaster {
@@ -349,7 +387,12 @@ public enum HLSVideoEvidence {
             guard let reference = reference(in: data, at: url) else { return false }
             if reference.isPlaylist { return await hasVideo(at: reference.url, depth: depth + 1) }
             let asset = AVURLAsset(url: reference.url)
-            return try await !asset.loadTracks(withMediaType: .video).isEmpty
+            return try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                return try await !asset.loadTracks(withMediaType: .video).isEmpty
+            } onCancel: {
+                asset.cancelLoading()
+            }
         } catch { return false }
     }
 

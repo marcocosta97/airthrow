@@ -89,9 +89,13 @@ struct ResolverChecks {
 
     static func genericChecks(temp: URL, helper: (String, String) throws -> String,
                               combined: [String: Any]) async throws {
+        func discovery(environment: [String: String]) throws -> SourceResolver {
+            let adapter = YTDLPSourceAdapter(environment: environment, nativeProbe: { _ in false })
+            return SourceResolver(environment: environment, registry: try SourceRegistry(adapters: [adapter]))
+        }
         let page = URL(string: "https://video.example/watch?id=private-query")!
         let missing = ["AIRTHROW_YTDLP": "/missing/yt-dlp", "AIRTHROW_DENO": "/missing/deno"]
-        let absent = SourceResolver(environment: missing)
+        let absent = try discovery(environment: missing)
         try check(SourceResolver.needsResolution(page) && !SourceResolver.isWebsite(page),
                   "Generic page was not routed to discovery")
         try check(!SourceResolver.needsResolution(temp.appendingPathComponent("video.mp4")),
@@ -110,7 +114,7 @@ struct ResolverChecks {
         func resolver(_ data: Data) throws -> SourceResolver {
             let executable = try helper("generic-" + UUID().uuidString,
                 "cat <<'JSON'\n\(String(decoding: data, as: UTF8.self))\nJSON\n")
-            return SourceResolver(environment: ["AIRTHROW_YTDLP": executable, "AIRTHROW_DENO": "/missing/deno"])
+            return try discovery(environment: ["AIRTHROW_YTDLP": executable, "AIRTHROW_DENO": "/missing/deno"])
         }
         let inspected = try await resolver(metadata([combined])).resolve(page)
         try check(inspected.videoKnownPresent && inspected.playbackPath == .direct,
@@ -159,22 +163,57 @@ struct ResolverChecks {
                         [whole.merging(["fragments": [["url": "https://cdn.example/fragment"]]]) { _, rhs in rhs }],
                         [whole.merging(["protocol": "http_dash_segments"]) { _, rhs in rhs }]] {
             let rejected = try resolver(metadata(formats))
-            try await expect(.failed) { _ = try await rejected.resolve(page) }
+            let fallback = try await rejected.resolve(extensionless)
+            try check(fallback.url == extensionless && fallback.headers.isEmpty
+                      && !fallback.videoKnownPresent && !fallback.needsPreparation,
+                      "Ineligible generic metadata prevented inspection of the original input")
         }
         let infoHeaders = try resolver(metadata([combined], extra: ["http_headers": ["Authorization": "private"]]))
-        try await expect(.failed) { _ = try await infoHeaders.resolve(page) }
+        let headerFallback = try await infoHeaders.resolve(extensionless)
+        try check(headerFallback.url == extensionless && headerFallback.headers.isEmpty
+                  && !headerFallback.videoKnownPresent,
+                  "Generic fallback reused extracted credentials or video evidence")
         let drm = try resolver(metadata([combined], extra: ["has_drm": true]))
         try await expect(.protectedMedia) { _ = try await drm.resolve(page) }
         let malformed = try resolver(Data("not JSON".utf8))
-        try await expect(.failed) { _ = try await malformed.resolve(page) }
+        try check(try await malformed.resolve(extensionless).url == extensionless,
+                  "Malformed generic metadata prevented native inspection")
         let playlist = try resolver(metadata([combined], extra: ["_type": "playlist", "entries": []]))
-        try await expect(.failed) { _ = try await playlist.resolve(page) }
+        try check(try await playlist.resolve(extensionless).url == extensionless,
+                  "Unsupported generic metadata prevented native inspection")
 
         let raw = try metadata([combined])
         let controlled = try helper("generic-controlled", "printf '%s\\n' \"$@\" > '\(temp.path)/generic-args'\ncat <<'JSON'\n\(String(decoding: raw, as: UTF8.self))\nJSON\n")
-        let configured = SourceResolver(environment: ["AIRTHROW_YTDLP": controlled, "AIRTHROW_DENO": "/missing/deno",
-                                                       "AIRTHROW_YTDLP_COOKIES": "/missing/cookies"],
-                                        cookies: .file(temp.appendingPathComponent("missing-cookies")))
+        let probeEnvironment = ["AIRTHROW_YTDLP": controlled, "AIRTHROW_DENO": "/missing/deno"]
+        let nativeFirst = YTDLPSourceAdapter(environment: probeEnvironment, nativeProbe: { _ in true })
+        let nativeChoice = try await nativeFirst.candidates(for: extensionless)
+        try check(nativeChoice.count == 1 && nativeChoice[0].source.url == extensionless
+                  && nativeChoice[0].source.videoKnownPresent,
+                  "Confirmed native input did not bypass extraction")
+        try check(nativeChoice[0].id == DirectSourceAdapter.candidates(extensionless)[0].id,
+                  "Native probe evidence changed the direct presentation identity")
+        try check(!FileManager.default.fileExists(atPath: temp.appendingPathComponent("generic-args").path),
+                  "Playable native input invoked yt-dlp")
+        let knownWebsite = YTDLPSourceAdapter(environment: probeEnvironment, nativeProbe: { _ in throw CancellationError() })
+        for rawURL in ["https://vimeo.com/123", "https://www.twitch.tv/example", "https://x.com/example/status/123",
+                       "https://www.instagram.com/p/example/"] {
+            try check(try await !knownWebsite.candidates(for: URL(string: rawURL)!).isEmpty,
+                      "Recognized website entered native inspection")
+        }
+        try FileManager.default.removeItem(at: temp.appendingPathComponent("generic-args"))
+        let slowProbe = YTDLPSourceAdapter(environment: probeEnvironment, nativeProbe: { _ in
+            try await Task.sleep(for: .seconds(90))
+            return false
+        })
+        let probing = Task { try await slowProbe.candidates(for: extensionless) }
+        try await Task.sleep(for: .milliseconds(50))
+        probing.cancel()
+        do { _ = try await probing.value; try check(false, "Cancelled native probe returned candidates") }
+        catch is CancellationError {}
+        try check(!FileManager.default.fileExists(atPath: temp.appendingPathComponent("generic-args").path),
+                  "Cancelled native probe launched extraction")
+        let configured = try discovery(environment: ["AIRTHROW_YTDLP": controlled, "AIRTHROW_DENO": "/missing/deno",
+                                                       "AIRTHROW_YTDLP_COOKIES": "/missing/cookies"])
         _ = try await configured.resolve(page)
         let arguments = try String(contentsOf: temp.appendingPathComponent("generic-args"), encoding: .utf8)
             .split(separator: "\n").map(String.init)
@@ -194,23 +233,23 @@ struct ResolverChecks {
                   "Recognized media invoked generic extraction")
 
         let rejected = try helper("generic-rejected", "echo call >> '\(temp.path)/generic-calls'\nexit 1\n")
-        let fallback = SourceResolver(environment: ["AIRTHROW_YTDLP": rejected, "AIRTHROW_DENO": "/missing/deno"])
+        let fallback = try discovery(environment: ["AIRTHROW_YTDLP": rejected, "AIRTHROW_DENO": "/missing/deno"])
         try check(try await fallback.resolve(extensionless).url == extensionless, "Rejected extraction lost native fallback")
         let calls = try String(contentsOf: temp.appendingPathComponent("generic-calls"), encoding: .utf8)
         try check(calls.split(separator: "\n").count == 1, "Generic fallback recursively extracted")
         let cannotLaunch = try helper("generic-unlaunchable", "exit 0\n")
         try Data("not an executable format".utf8).write(to: URL(fileURLWithPath: cannotLaunch))
-        try check(try await SourceResolver(environment: ["AIRTHROW_YTDLP": cannotLaunch]).resolve(page).url == page,
+        try check(try await discovery(environment: ["AIRTHROW_YTDLP": cannotLaunch]).resolve(page).url == page,
                   "Unavailable generic helper launch did not retain native fallback")
         let empty = try helper("generic-empty", "exit 0\n")
-        try check(try await SourceResolver(environment: ["AIRTHROW_YTDLP": empty]).resolve(page).url == page,
+        try check(try await discovery(environment: ["AIRTHROW_YTDLP": empty]).resolve(page).url == page,
                   "Empty extraction lost native fallback")
         print("PASS generic routing, shared selection, unknown-codec inspection, eligibility, bounded fallback and cookie isolation")
 
         let noisy = try helper("generic-noisy", "while :; do echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done\n")
-        try await expect(.tooMuchOutput) { _ = try await SourceResolver(environment: ["AIRTHROW_YTDLP": noisy]).resolve(page) }
+        try await expect(.tooMuchOutput) { _ = try await discovery(environment: ["AIRTHROW_YTDLP": noisy]).resolve(page) }
         let sleeper = try helper("generic-sleeper", "sleep 90 &\necho $! > '\(temp.path)/generic-child'\nwait\n")
-        let sleeping = SourceResolver(environment: ["AIRTHROW_YTDLP": sleeper, "AIRTHROW_DENO": "/missing/deno"])
+        let sleeping = try discovery(environment: ["AIRTHROW_YTDLP": sleeper, "AIRTHROW_DENO": "/missing/deno"])
         let task = Task { try await sleeping.resolve(page) }
         let childFile = temp.appendingPathComponent("generic-child")
         let startDeadline = ContinuousClock.now.advanced(by: .seconds(5))

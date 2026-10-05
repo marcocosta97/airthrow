@@ -187,11 +187,12 @@ struct SourceChoiceChecks {
                                   height: 2160, plannedPath: .remux)
         try await enhancementReload(website: website, source: native1080,
                                     alternate: alternate, preparer: preparer)
+        try await nativeEnhancementNoRediscovery(url: audioURL, preparer: preparer)
         let genericPage = URL(string: "https://video.example/watch?id=generic-private-query")!
         try await explicitChoiceReResolves(website: genericPage, high: native1080, low: native720)
         try await staleResolutionRejected(website: genericPage, videoURL: videoURL, native: native720)
         try await snapshotIsPrivate(base: base, website: genericPage, secret: secret)
-        print("23/23 source-choice controller checks passed (no physical receiver)")
+        print("24/24 source-choice controller checks passed (no physical receiver)")
         if CommandLine.arguments.count == 4 {
             try await genericExtraction(base: base, helper: CommandLine.arguments[3])
         }
@@ -312,6 +313,40 @@ struct SourceChoiceChecks {
                   "Changing video discarded the available Italian audio track")
         print("PASS video choice preserves the selected audio language when paired tracks offer it")
         await controller.shutdownAndWait()
+    }
+
+    static func nativeEnhancementNoRediscovery(url: URL, preparer: MediaPreparer) async throws {
+        // Native video evidence can disappear on the next bounded inspection.
+        // The different default identities reproduce the enhancement pin failure.
+        let confirmed = MediaCandidate(source: ResolvedSource(url: url, videoKnownPresent: true))
+        let unverified = DirectSourceAdapter.candidates(url)
+        let resolver = ScriptedResolver([url.absoluteString: [
+            .init(candidates: [confirmed]), .init(candidates: unverified)
+        ]])
+        let requests = EnhancementRequests()
+        let controller = PlaybackController(resolveCandidates: { try await resolver.candidates(for: $0) },
+                                            allowVideoConversion: false, prepareSource: { source in
+            await requests.record(source)
+            return try await preparer.prepare(source)
+        })
+        try controller.load(url.absoluteString)
+        _ = try await settle(controller)
+        let player = controller.player
+        for choice in [VideoEnhancement.upscale1080, .cleanup1080, .original] {
+            try controller.selectEnhancement(choice)
+            let status = try await settle(controller, seconds: 35)
+            try check(status.videoEnhancement == choice && controller.player === player && controller.player.rate == 0,
+                      "Native enhancement switch failed or replaced the persistent player")
+            try check(status.playbackPath == (choice == .original ? .direct : .videoConversion),
+                      "Native enhancement switch retained the wrong processing plan")
+        }
+        let count = await resolver.count()
+        let choices = await requests.choices
+        let urls = await requests.urls
+        try check(count == 1 && choices == [.upscale1080, .cleanup1080] && urls == [url, url],
+                  "Enhancement rediscovered the native input or failed to restore its original plan")
+        await controller.shutdownAndWait()
+        print("PASS native enhancement changes reuse the loaded presentation across changing probe metadata")
     }
 
     static func enhancementReload(website: URL, source: MediaCandidate,

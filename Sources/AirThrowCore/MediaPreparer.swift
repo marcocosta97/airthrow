@@ -304,12 +304,17 @@ public struct MediaPreparer: Sendable {
                   let ffprobe = finder.executable("ffprobe", override: "AIRTHROW_FFPROBE") else {
                 throw PreparationFailure.unavailable
             }
+            // Native-first links can be playable HLS without an extension or
+            // extractor delivery metadata. Let the demuxer inspect unknown
+            // network inputs as either a file or HLS; protocol restrictions
+            // remain the same for every remote input.
+            let allowHLSInput = source.delivery != .file
             let videoInput = try await probe(source.url, headers: source.headers, executable: ffprobe,
-                                             hls: source.delivery == .hls)
+                                             hls: allowHLSInput)
             let audioInput: Probe
             if let audio = source.audio {
                 audioInput = try await probe(audio.url, headers: audio.headers, executable: ffprobe,
-                                              hls: source.delivery == .hls)
+                                              hls: allowHLSInput)
             } else { audioInput = videoInput }
             // Keep text subtitles as soft tracks in finite MP4 delivery. MPEG-TS
             // EVENT output cannot carry these tracks as selectable renditions,
@@ -353,10 +358,10 @@ public struct MediaPreparer: Sendable {
             func conversionArguments(encoder: String) throws -> [String] {
                 var arguments = ["-hide_banner", "-loglevel", "error", "-nostdin", "-n"]
                     + (try Self.inputArguments(url: source.url, headers: source.headers,
-                                               hls: source.delivery == .hls))
+                                               hls: allowHLSInput))
                 if let audio = source.audio {
                     arguments += try Self.inputArguments(url: audio.url, headers: audio.headers,
-                                                         hls: source.delivery == .hls)
+                                                         hls: allowHLSInput)
                 }
                 arguments += ["-map", "0:\(plan.video.index)", "-map", "\(plan.audioInput):\(plan.audio.index)"]
                 if mode == .completeFile {
