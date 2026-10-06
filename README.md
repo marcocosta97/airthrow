@@ -97,11 +97,6 @@ containers may be prepared or converted on the Mac first.
 
 ## Limitations
 
-- Seekable video conversion uses a limited playback cache; seeking outside it
-  prepares that part again. Set the cache window and space limit in **Settings →
-  Prepared video storage**. Stream copying prepares sequentially; text subtitles wait
-  for complete preparation. Receiver seeking during sequential preparation is
-  not yet verified.
 - Video conversion is off by default. Optional **Upscale** and **Clean up and
   upscale** work on finite SDR video at 1080p or 4K; 4K requires a compatible
   receiver. Enhancements never downscale.
