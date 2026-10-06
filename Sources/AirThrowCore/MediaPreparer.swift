@@ -377,16 +377,57 @@ public struct MediaPreparer: Sendable {
                 && audioInput.format.format_name != "hls"
             if bounded { bounded = try await Self.supportsRandomAccess(source.url, headers: source.headers) }
             if bounded, let audio = source.audio { bounded = try await Self.supportsRandomAccess(audio.url, headers: audio.headers) }
+            var remuxTimeline: RemuxTimeline?
+            if mode == .progressiveHLS, !source.isLive, !preferences.retainAll, preferences.remuxCache,
+               plan.videoAction == .copy, plan.audioAction == .copy,
+               plan.audio.codec_name == "aac",
+               ["h264", "hevc"].contains(plan.video.codec_name ?? ""),
+               ["mov,mp4,m4a,3gp,3g2,mj2", "matroska,webm"].contains(videoInput.format.format_name ?? "") {
+                do {
+                    var randomAudio = true
+                    if let audio = source.audio { randomAudio = try await Self.supportsRandomAccess(audio.url, headers: audio.headers) }
+                    if randomAudio {
+                        if source.url.isFileURL {
+                            let arguments = ["-v", "error"] + (try Self.inputArguments(url: source.url, headers: [:]))
+                                + ["-select_streams", String(plan.video.index), "-show_packets", "-show_entries",
+                                   "packet=pts,dts,flags,pos,size", "-of", "compact=p=0"]
+                            // Local inspection remains bounded; remote files use
+                            // container indexes instead of scanning the media body.
+                            let packets = try await HelperProcess.run(executable: ffprobe, arguments: arguments,
+                                                                      timeout: .seconds(20), outputLimit: 64 * 1024 * 1024)
+                            remuxTimeline = try RemuxTimeline(packets: packets, file: source.url,
+                                codec: plan.video.codec_name!, videoTimeBase: plan.video.time_base,
+                                audioTimeBase: plan.audio.time_base,
+                                sourceStart: Double(videoInput.format.start_time ?? "") ?? 0,
+                                duration: videoDuration!, matroska: videoInput.format.format_name == "matroska,webm")
+                        } else {
+                            remuxTimeline = try await RemoteRemuxIndex.timeline(url: source.url, headers: source.headers,
+                                stream: plan.video.index, codec: plan.video.codec_name!, videoTimeBase: plan.video.time_base,
+                                audioTimeBase: plan.audio.time_base, sourceStart: Double(videoInput.format.start_time ?? "") ?? 0,
+                                duration: videoDuration!, matroska: videoInput.format.format_name == "matroska,webm")
+                        }
+                        let audioOffset = (Double(videoInput.format.start_time ?? "") ?? 0)
+                            - (Double(audioInput.format.start_time ?? "") ?? 0)
+                        guard audioOffset.isFinite, abs(audioOffset) < 86_400 else { throw PreparationFailure.unsupported }
+                        remuxTimeline?.audioOffset = audioOffset
+                    }
+                } catch is CancellationError { throw CancellationError() }
+                catch { try Task.checkCancellation(); remuxTimeline = nil } // Unsupported indexes retain sequential remux.
+            }
+            bounded = bounded || remuxTimeline != nil
             let videoBytes = Int64(videoInput.format.size ?? "") ?? 0
             let audioBytes = source.audio == nil ? 0 : (Int64(audioInput.format.size ?? "") ?? 0)
             // MPEG-TS packetization and per-segment tables add overhead the source
             // container did not have. Reserve headroom so a source admitted here
             // still fits under the same prepared-media cap during progressive output.
             let sourceLimit = mode == .progressiveHLS ? maximumBytes - maximumBytes / 10 : maximumBytes
-            if !source.isLive && !bounded && plan.videoAction == .copy && plan.audioAction == .copy {
-                guard videoBytes >= 0, audioBytes >= 0, videoBytes < sourceLimit, audioBytes < sourceLimit,
-                      videoBytes + audioBytes < sourceLimit else { throw PreparationFailure.storageLimit }
+            func validateSequentialCopySize() throws {
+                if !source.isLive && plan.videoAction == .copy && plan.audioAction == .copy {
+                    guard videoBytes >= 0, audioBytes >= 0, videoBytes < sourceLimit, audioBytes < sourceLimit,
+                          videoBytes + audioBytes < sourceLimit else { throw PreparationFailure.storageLimit }
+                }
             }
+            if !bounded { try validateSequentialCopySize() }
             await onPlan?(plan.path)
             let workspace = try PreparationWorkspace()
             let space = try FileManager.default.attributesOfFileSystem(forPath: workspace.directory.path)
@@ -399,11 +440,12 @@ public struct MediaPreparer: Sendable {
                 throw PreparationFailure.diskSpace
             }
             let output = workspace.directory.appendingPathComponent("media.mp4")
-            func conversionArguments(encoder: String, precise: Bool = false) throws -> [String] {
+            func conversionArguments(encoder: String, precise: Bool = false, alignRemux: Bool = false) throws -> [String] {
                 var arguments = ["-hide_banner", "-loglevel", "error", "-nostdin", "-n"]
                     + (try Self.inputArguments(url: source.url, headers: source.headers,
                                                hls: allowHLSInput))
                 if let audio = source.audio {
+                    if alignRemux, let remuxTimeline { arguments += ["-itsoffset", String(remuxTimeline.audioOffset)] }
                     arguments += try Self.inputArguments(url: audio.url, headers: audio.headers,
                                                          hls: allowHLSInput)
                 }
@@ -442,10 +484,27 @@ public struct MediaPreparer: Sendable {
             // retry once in software; the item is never restarted after handoff.
             func produce(encoder: String) async throws -> PreparedMedia {
                 if bounded {
-                    return try await cached(workspace: workspace,
-                                            arguments: conversionArguments(encoder: encoder, precise: true),
-                                            executable: ffmpeg, host: host, duration: videoDuration!,
-                                            plan: plan, ffprobe: ffprobe)
+                    do {
+                        return try await cached(workspace: workspace,
+                                                arguments: conversionArguments(encoder: encoder, precise: plan.videoAction == .convert, alignRemux: true),
+                                                executable: ffmpeg, host: host, duration: videoDuration!,
+                                                plan: plan, ffprobe: ffprobe, remuxTimeline: remuxTimeline,
+                                                remuxProbe: remuxTimeline?.inspectBoundaries == true
+                                                    ? (["-v", "error"] + (try Self.inputArguments(url: source.url, headers: source.headers))
+                                                        + ["-select_streams", String(plan.video.index), "-show_packets", "-show_entries",
+                                                           "packet=pts,dts", "-of", "compact=p=0"]) : nil)
+                    } catch {
+                        // Retry copy in the original delivery mode only before
+                        // handing off a URL. Cancellation/quota/disk failures
+                        // retain their specific meaning and never trigger retry.
+                        var canFallBack = false
+                        if let failure = error as? PreparationFailure {
+                            canFallBack = [.failed, .unsupported, .stalled].contains(failure)
+                        } else if case ResolutionFailure.failed = error { canFallBack = true }
+                        guard remuxTimeline != nil, canFallBack else { throw error }
+                        try Task.checkCancellation()
+                        try validateSequentialCopySize()
+                    }
                 }
                 let arguments = try conversionArguments(encoder: encoder)
                 if source.isLive {
@@ -547,29 +606,47 @@ public struct MediaPreparer: Sendable {
     }
 
     private func cached(workspace: PreparationWorkspace, arguments: [String], executable: String,
-                        host: String, duration: Double, plan: PreparationPlan, ffprobe: String) async throws -> PreparedMedia {
-        let fragmented = plan.fragmentedHLS
+                        host: String, duration: Double, plan: PreparationPlan, ffprobe: String,
+                        remuxTimeline: RemuxTimeline? = nil, remuxProbe: [String]? = nil) async throws -> PreparedMedia {
+        let fragmented = remuxTimeline != nil || plan.fragmentedHLS
         let cache = try await CachedHLS(workspace: workspace, duration: duration, fragmented: fragmented,
-                                      preferences: preferences) { index, start, length, directory in
+                                      preferences: preferences, starts: remuxTimeline?.starts) { index, start, length, directory in
             var chunk = arguments
-            // Apply input seeking to both video and a separately selected audio.
-            for offset in chunk.indices.reversed() where chunk[offset] == "-i" {
-                chunk.insert(contentsOf: ["-ss", String(start)], at: offset)
+            if let remuxTimeline {
+                var boundaries: (Int64?, Int64?)?
+                if let remuxProbe {
+                    do {
+                        let packets = try await HelperProcess.run(executable: ffprobe,
+                            arguments: remuxProbe + ["-read_intervals", remuxTimeline.boundaryInterval(index: index, duration: duration)],
+                            timeout: .seconds(20), outputLimit: 1024 * 1024)
+                        boundaries = try remuxTimeline.boundaries(packets, index: index)
+                    } catch ResolutionFailure.timedOut { throw PreparationFailure.stalled }
+                }
+                let trim = remuxTimeline.arguments(index: index, length: length, boundaries: boundaries)
+                for offset in chunk.indices.reversed() where chunk[offset] == "-i" {
+                    chunk.insert(contentsOf: trim.input, at: offset)
+                }
+                chunk += trim.output
+            } else {
+                // Apply accurate input seeking to video and separately selected audio.
+                for offset in chunk.indices.reversed() where chunk[offset] == "-i" {
+                    chunk.insert(contentsOf: ["-ss", String(start)], at: offset)
+                }
+                if let filter = chunk.firstIndex(of: "-vf") { chunk[filter + 1] += ",setpts=PTS-STARTPTS" }
+                chunk += ["-af", "asetpts=PTS-STARTPTS,apad", "-t", String(length)]
             }
-            if let filter = chunk.firstIndex(of: "-vf") { chunk[filter + 1] += ",setpts=PTS-STARTPTS" }
-            chunk += ["-af", "asetpts=PTS-STARTPTS,apad", "-t", String(length),
-                      "-f", "hls", "-hls_segment_type", fragmented ? "fmp4" : "mpegts",
+            chunk += ["-f", "hls", "-hls_segment_type", fragmented ? "fmp4" : "mpegts",
                       "-hls_time", "86400", "-hls_playlist_type", "vod", "-hls_flags", "temp_file",
                       "-start_number", String(index),
                       "-hls_segment_filename", directory.appendingPathComponent(fragmented ? "segment%06d.m4s" : "segment%06d.ts").path]
             if fragmented { chunk += ["-hls_fmp4_init_filename", String(format: "init%06d.mp4", index)] }
             chunk += [directory.appendingPathComponent("part.m3u8").path]
+            let initialization = fragmented ? String(format: "init%06d.mp4", index) : "init.mp4"
             do {
                 _ = try await HelperProcess.run(executable: executable, arguments: chunk,
                                                 timeout: index == 0 ? startupTimeout : timeout, outputLimit: 64 * 1024,
                                                 monitor: { try workspace.checkSize(maximumBytes) })
             } catch ResolutionFailure.timedOut { throw PreparationFailure.stalled }
-            let initialization = fragmented ? String(format: "init%06d.mp4", index) : "init.mp4"
             let manifest = try HLSPlaylist(directory: directory, name: "part.m3u8", initialization: initialization)
             guard manifest.complete, manifest.count == 1,
                   abs(manifest.duration - length) < 0.15,
@@ -987,7 +1064,7 @@ public struct MediaPreparer: Sendable {
             options = try Self.inputOptions(headers: headers, hls: hls)
         }
         let arguments = ["-v", "error"] + options + ["-show_entries",
-            "format=duration,size,format_name:stream=index,codec_type,codec_name,codec_tag_string,pix_fmt,width,height,profile,channels,sample_rate,color_range,color_transfer,color_primaries,color_space,avg_frame_rate,r_frame_rate:stream_disposition=attached_pic:stream_side_data:stream_tags=language,title",
+            "format=duration,size,format_name,start_time:stream=time_base,index,codec_type,codec_name,codec_tag_string,pix_fmt,width,height,profile,channels,sample_rate,color_range,color_transfer,color_primaries,color_space,avg_frame_rate,r_frame_rate:stream_disposition=attached_pic:stream_side_data:stream_tags=language,title",
             "-of", "json", "-i", isLocal ? url.path : url.absoluteString]
         let data = try await runProbe(executable: executable, arguments: arguments,
                                       timeout: .seconds(mpegts ? 8 : 40), retry: !isLocal)
@@ -1015,7 +1092,7 @@ public struct MediaPreparer: Sendable {
     private struct Probe: Decodable {
         let streams: [Stream]
         let format: Format
-        struct Format: Decodable { let duration: String?; let size: String?; let format_name: String? }
+        struct Format: Decodable { let duration: String?; let size: String?; let format_name: String?; let start_time: String? }
         var finiteDuration: Double {
             get throws {
                 guard let duration = Double(format.duration ?? ""), duration.isFinite, duration > 0 else { throw PreparationFailure.unsupported }
@@ -1026,6 +1103,7 @@ public struct MediaPreparer: Sendable {
     }
     private struct Stream: Decodable {
         let index: Int
+        let time_base: String?
         let codec_type: String?
         let codec_name: String?
         let codec_tag_string: String?

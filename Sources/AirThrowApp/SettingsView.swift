@@ -107,6 +107,7 @@ struct SettingsView: View {
     @AppStorage("afterPlaybackBehavior") private var behavior = AfterPlaybackBehavior.keepConnected.rawValue
     @AppStorage(PreparationPreferences.maximumGiBKey) private var preparationGiB = 2
     @AppStorage(PreparationPreferences.retainAllKey) private var retainAll = false
+    @AppStorage(PreparationPreferences.remuxCacheKey) private var remuxCache = false
     @AppStorage(PreparationPreferences.windowSecondsKey) private var windowSeconds = 60
 
     var body: some View {
@@ -149,7 +150,6 @@ struct SettingsView: View {
                         Text("\(value) GB").tag(value)
                     }
                 }
-                Toggle("Keep all prepared video", isOn: $retainAll)
                 if !retainAll {
                     Picker("Playback cache window", selection: $windowSeconds) {
                         Text("30 seconds").tag(30)
@@ -159,6 +159,13 @@ struct SettingsView: View {
                         Text("10 minutes").tag(600)
                     }
                 }
+                Toggle("Keep all prepared video", isOn: $retainAll)
+                Toggle("Remux on demand (experimental)", isOn: $remuxCache)
+                    .disabled(retainAll)
+                    .help("Requires a seekable source with compatible video and audio. Other sources prepare sequentially. Changes apply to the next load.")
+                Text("Produces only the parts needed for playback, without re-encoding. Works with local files and compatible remote sources.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Section("Cookies") {
                 CookieSourceView(cookieStatus: cookieStatus)

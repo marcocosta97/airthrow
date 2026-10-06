@@ -23,21 +23,27 @@ final class CachedHLS {
     var onFailure: ((PreparationFailure) -> Void)?
     private(set) var videoHeight: Int?
     private(set) var videoFrameRate: Double?
-    var count: Int {
-        let chunks = Int(ceil(duration / Self.chunkSeconds))
-        // Container audio can outlast the final video frame by milliseconds.
-        // Fold that tail into the last real chunk, rather than making an empty
-        // video segment that fails only at the end of a long viewing session.
-        return chunks > 1 && duration - Double(chunks - 1) * Self.chunkSeconds < 0.25 ? chunks - 1 : chunks
-    }
+    private let starts: [Double]
+    var count: Int { starts.count }
 
     init(workspace: PreparationWorkspace, duration: Double, fragmented: Bool,
-         preferences: PreparationPreferences,
+         preferences: PreparationPreferences, starts: [Double]? = nil,
          generate: @escaping @Sendable (Int, Double, Double, URL) async throws -> (height: Int?, frameRate: Double?)) throws {
         self.workspace = workspace; self.duration = duration; self.fragmented = fragmented
+        if let starts {
+            guard starts.first == 0, starts.count <= 100_000,
+                  starts.allSatisfy({ $0.isFinite && $0 >= 0 && $0 < duration }),
+                  zip(starts, starts.dropFirst()).allSatisfy({ $0 < $1 }) else { throw PreparationFailure.unsupported }
+            self.starts = starts
+        } else {
+            var count = Int(ceil(duration / Self.chunkSeconds))
+            // Avoid a final chunk containing only the container's fractional audio tail.
+            if count > 1 && duration - Double(count - 1) * Self.chunkSeconds < 0.25 { count -= 1 }
+            self.starts = (0..<count).map { Double($0) * Self.chunkSeconds }
+        }
         maximumBytes = preferences.maximumBytes; windowSeconds = preferences.windowSeconds
         self.generate = generate
-        let target = Int(ceil(max(Self.chunkSeconds, duration - Double(count - 1) * Self.chunkSeconds)))
+        let target = Int(ceil(max(Self.chunkSeconds, (0..<count).map { length($0) }.max() ?? Self.chunkSeconds)))
         var playlist = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:\(target)\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MEDIA-SEQUENCE:0\n"
         for index in 0..<count {
             if index > 0 { playlist += "#EXT-X-DISCONTINUITY\n" }
@@ -52,7 +58,7 @@ final class CachedHLS {
     deinit { for job in jobs.values { job.cancel() } }
 
     private func length(_ index: Int) -> Double {
-        index == count - 1 ? duration - Double(index) * Self.chunkSeconds : Self.chunkSeconds
+        (index == count - 1 ? duration : starts[index + 1]) - starts[index]
     }
     private func directory(_ index: Int) -> URL { workspace.directory.appendingPathComponent("chunk\(index)", isDirectory: true) }
     private func segmentName(_ index: Int) -> String { String(format: "segment%06d.%@", index, fragmented ? "m4s" : "ts") }
@@ -116,7 +122,7 @@ final class CachedHLS {
         let workspace = workspace
         let generate = generate
         let directory = directory(index)
-        let start = Double(index) * Self.chunkSeconds
+        let start = starts[index]
         let length = length(index)
         let job = Task { [weak self] in
             defer { self?.jobs.removeValue(forKey: index); self?.onActivity?(!(self?.jobs.isEmpty ?? true)) }
@@ -161,10 +167,19 @@ final class CachedHLS {
             return
         }
         guard jobs.isEmpty else { return }
-        let first = min(count - 1, Int(position / Self.chunkSeconds))
-        let last = min(count - 1, Int((position + windowSeconds / 2) / Self.chunkSeconds))
+        let first = chunkIndex(at: position)
+        let last = chunkIndex(at: position + windowSeconds / 2)
         guard let next = (first...last).first(where: { retained[$0] == nil }) else { return }
         Task { [weak self] in _ = try? await self?.ensure(next) }
+    }
+
+    private func chunkIndex(at seconds: Double) -> Int {
+        var low = 0, high = count
+        while low < high {
+            let middle = (low + high) / 2
+            if starts[middle] <= seconds { low = middle + 1 } else { high = middle }
+        }
+        return max(0, low - 1)
     }
 
     private func prune(toBudget: Bool = false, protecting protected: Int? = nil, reserving reserve: Int64 = 0) {
@@ -174,7 +189,7 @@ final class CachedHLS {
         // Keep recently advertised chunks briefly, including AVPlayer prefetch.
         // Active HTTP clients are pinned regardless of age or playback position.
         for (index, used) in retained where pins[index] == nil && jobs[index] == nil && index != protected {
-            let start = Double(index) * Self.chunkSeconds
+            let start = starts[index]
             if (start + length(index) < low || start > high), now.timeIntervalSince(used) >= 15 {
                 remove(index)
             }
