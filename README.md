@@ -4,7 +4,7 @@
 
 <h1 align="center">AirThrow</h1>
 
-<p align="center"><strong>Videos on your TV. Your Mac stays the remote.</strong></p>
+<p align="center"><strong>Throw anything, AirPlay everything.</strong><sup><a href="#limitations">(*)</a></sup></p>
 
 <p align="center">
   <a href="#installation">Installation</a> ·
@@ -97,14 +97,12 @@ containers may be prepared or converted on the Mac first.
 
 ## Limitations
 
-- Video conversion is off by default. Optional **Upscale** and **Clean up and
-  upscale** work on finite SDR video at 1080p or 4K; 4K requires a compatible
-  receiver. Enhancements never downscale.
-- Native subtitles are available when the media exposes supported tracks.
-  Image-based subtitles, burn-in, and subtitles in Mac-prepared live streams are
-  unsupported.
-- HDR/Dolby Vision processing, AI Super Resolution, and surround preservation
-  are unsupported. Receiver compatibility still depends on the device.
+- Playback depends on website, media format and receiver compatibility;
+  DRM-protected media is unsupported.
+- Enhancements require finite SDR video and never downscale. HDR/Dolby Vision
+  processing and surround preservation are unsupported.
+- Image-based subtitles, subtitle burn-in and subtitles in Mac-prepared live
+  streams are unsupported.
 
 ## License
 
