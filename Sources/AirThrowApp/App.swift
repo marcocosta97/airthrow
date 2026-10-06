@@ -26,7 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private let presentation = ControllerPresentation()
     private let server = CommandServer()
     private var window: NSWindow?
-    private var settingsWindow: NSWindow?
+    private var windowControls: NSToolbarItemGroup?
     private var splitViewController: NSSplitViewController?
     private var inspectorItem: NSSplitViewItem?
     private var inspectorObservation: NSKeyValueObservation?
@@ -75,10 +75,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             .sink { [weak self] snapshot in
                 self?.refreshOpenMenu(snapshot)
         }
-        presentationObservation = presentation.$playlistVisible
-            .removeDuplicates()
-            .sink { [weak self] visible in
+        presentationObservation = Publishers.CombineLatest(
+            presentation.$playlistVisible.removeDuplicates(),
+            presentation.$settingsVisible.removeDuplicates())
+            .sink { [weak self] visible, settingsVisible in
+                // Settings scrolls behind the toolbar; the compact player
+                // retains its original transparent titlebar and spacing.
+                self?.window?.titlebarAppearsTransparent = !settingsVisible
+                self?.window?.titlebarSeparatorStyle = settingsVisible ? .automatic : .none
                 self?.setInspector(collapsed: !visible)
+                self?.windowControls?.setSelected(settingsVisible, at: 0)
+                self?.windowControls?.setSelected(visible, at: 1)
             }
         didFinishLaunching = true
         openPendingFiles()
@@ -102,8 +109,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     @objc func showWindow() {
+        presentation.settingsVisible = false
+        revealWindow()
+    }
+
+    private func revealWindow() {
         if window == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: ControllerMetrics.width, height: Self.controllerHeight), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+            let window = ControllerWindow(contentRect: NSRect(x: 0, y: 0, width: ControllerMetrics.width, height: Self.controllerHeight), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+            window.presentation = presentation
             window.title = "AirThrow"
             window.backgroundColor = SurfaceColor.window
             window.titlebarAppearsTransparent = true
@@ -111,7 +124,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             window.isReleasedWhenClosed = false
             window.delegate = self
 
-            let mainHosting = NSHostingController(rootView: ControllerView(controller: controller))
+            let mainHosting = NSHostingController(rootView: ControllerWindowView(
+                controller: controller, cookieStatus: cookieStatus, presentation: presentation))
             mainHosting.sizingOptions = []
             mainHosting.preferredContentSize = NSSize(width: ControllerMetrics.width, height: Self.controllerHeight)
             let playlistHosting = NSHostingController(rootView: PlaylistPanel(controller: controller))
@@ -159,11 +173,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // MARK: - Toolbar
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, NSToolbarItem.Identifier("AirPlayReceiver"), .toggleInspector]
+        [.flexibleSpace, NSToolbarItem.Identifier("AirPlayReceiver"), .space,
+         NSToolbarItem.Identifier("WindowControls")]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, NSToolbarItem.Identifier("AirPlayReceiver"), .toggleInspector]
+        toolbarDefaultItemIdentifiers(toolbar)
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
@@ -177,14 +192,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 .frame(width: 40, height: 30))
             return item
         }
-        guard itemIdentifier == .toggleInspector else { return nil }
-        let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-        item.label = "Playlist"
-        item.paletteLabel = "Playlist"
-        item.toolTip = "Show or hide the playlist"
-        item.target = splitViewController
-        item.action = #selector(NSSplitViewController.toggleInspector(_:))
-        return item
+        guard itemIdentifier == NSToolbarItem.Identifier("WindowControls"),
+              let settingsImage = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "Settings"),
+              let playlistImage = NSImage(systemSymbolName: "sidebar.right", accessibilityDescription: "Playlist")
+        else { return nil }
+        let group = NSToolbarItemGroup(itemIdentifier: itemIdentifier,
+            images: [settingsImage, playlistImage], selectionMode: .selectAny,
+            labels: ["Settings", "Playlist"], target: self,
+            action: #selector(toggleWindowControl(_:)))
+        group.label = "Window controls"
+        group.controlRepresentation = .expanded
+        group.setSelected(presentation.settingsVisible, at: 0)
+        group.setSelected(presentation.playlistVisible, at: 1)
+        if let control = group.view as? NSSegmentedControl {
+            control.setToolTip("Show or hide Settings (⌘,)", forSegment: 0)
+            control.setToolTip("Show or hide the playlist", forSegment: 1)
+        }
+        windowControls = group
+        return group
+    }
+
+    @objc private func toggleWindowControl(_ sender: NSToolbarItemGroup) {
+        if sender.selectedIndex == 0 {
+            window?.makeFirstResponder(nil)
+            presentation.settingsVisible.toggle()
+        } else if sender.selectedIndex == 1 {
+            presentation.playlistVisible.toggle()
+        }
     }
 
     /// Horizontal resizing only: the proposed width is honored, the height is
@@ -215,20 +249,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     @objc private func showSettings() {
-        if settingsWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 560),
-                                  styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
-            window.title = "AirThrow Settings"
-            window.backgroundColor = .textBackgroundColor
-            window.titlebarAppearsTransparent = true
-            window.titlebarSeparatorStyle = .none
-            window.isReleasedWhenClosed = false
-            window.contentView = NSHostingView(rootView: SettingsView(controller: controller, cookieStatus: cookieStatus))
-            window.center()
-            settingsWindow = window
-        }
-        NSApp.activate(ignoringOtherApps: true)
-        settingsWindow?.makeKeyAndOrderFront(nil)
+        revealWindow()
+        window?.makeFirstResponder(nil)
+        presentation.settingsVisible = true
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -479,6 +502,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
     }
 
+}
+
+/// Escape dismisses the Settings page through the native responder chain,
+/// including when focus is on the window rather than a form control.
+@MainActor
+private final class ControllerWindow: NSWindow {
+    weak var presentation: ControllerPresentation?
+
+    override func cancelOperation(_ sender: Any?) {
+        if presentation?.settingsVisible == true {
+            presentation?.settingsVisible = false
+        } else {
+            super.cancelOperation(sender)
+        }
+    }
 }
 
 @MainActor

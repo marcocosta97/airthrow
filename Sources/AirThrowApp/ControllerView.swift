@@ -28,6 +28,33 @@ enum SurfaceColor {
 @MainActor
 final class ControllerPresentation: ObservableObject {
     @Published var playlistVisible = false
+    @Published var settingsVisible = false
+}
+
+/// Keep the controller alive while Settings covers it, retaining source input
+/// and the playback view's local state across page changes.
+struct ControllerWindowView: View {
+    @ObservedObject var controller: PlaybackController
+    @ObservedObject var cookieStatus: CookieStatusModel
+    @ObservedObject var presentation: ControllerPresentation
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        ZStack {
+            ControllerView(controller: controller)
+                .opacity(presentation.settingsVisible ? 0 : 1)
+                .allowsHitTesting(!presentation.settingsVisible)
+                .disabled(presentation.settingsVisible)
+                .accessibilityHidden(presentation.settingsVisible)
+
+            if presentation.settingsVisible {
+                SettingsView(controller: controller, cookieStatus: cookieStatus)
+                    .transition(.opacity)
+            }
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.18),
+                   value: presentation.settingsVisible)
+    }
 }
 
 struct ControllerView: View {

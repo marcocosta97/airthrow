@@ -5,7 +5,7 @@ import SwiftUI
 import AirThrowCore
 #endif
 
-/// Cookie-source check state for the Settings window. Held by the app delegate
+/// Cookie-source check state for the Settings page. Held by the app delegate
 /// so the view can observe it without a `@State` macro (unavailable to the
 /// Command Line Tools SwiftUI build).
 @MainActor
@@ -116,6 +116,7 @@ struct SettingsView: View {
                 Toggle("Show a waiting screen on the TV", isOn: Binding(
                     get: { controller.showReceiverWaitingScreen },
                     set: { controller.setShowReceiverWaitingScreen($0) }))
+                    .background(SettingsScrollStyle().allowsHitTesting(false))
                 Text("When choosing a receiver with no video loaded, show AirThrow on a black background. Stays on until you load a video, press Stop, or leave on the TV.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -173,10 +174,52 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
-        .padding(8)
-        .frame(width: 440, height: 560)
-        .background(Color(nsColor: .textBackgroundColor))
+        .contentMargins(.top, 0, for: .scrollContent)
+        .settingsScrollEdgeEffect()
+        .padding(.horizontal, 8)
+        .padding(.bottom, 8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { cookieStatus.discoverBrowsers() }
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func settingsScrollEdgeEffect() -> some View {
+        if #available(macOS 26, *) {
+            scrollEdgeEffectStyle(.soft, for: .top)
+        } else {
+            self
+        }
+    }
+}
+
+/// Apply AppKit's fading overlay indicators to this Form's own scroll view.
+/// Mount inside a row so the lookup stays within the Settings scroll hierarchy.
+private struct SettingsScrollStyle: NSViewRepresentable {
+    func makeNSView(context: Context) -> ScrollStyleView { ScrollStyleView() }
+    func updateNSView(_ view: ScrollStyleView, context: Context) {
+        view.applyStyle()
+    }
+
+    final class ScrollStyleView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            applyStyle()
+        }
+
+        override func viewDidMoveToSuperview() {
+            super.viewDidMoveToSuperview()
+            applyStyle()
+        }
+
+        func applyStyle() {
+            // SwiftUI can attach the row before its scroll ancestor is ready.
+            DispatchQueue.main.async { [weak self] in
+                guard let scrollView = self?.enclosingScrollView else { return }
+                scrollView.scrollerStyle = .overlay
+            }
+        }
     }
 }
 
