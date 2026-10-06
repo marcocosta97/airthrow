@@ -56,9 +56,9 @@ This produces a locally signed app, a ZIP archive, and the `build/athrow` CLI.
 
 1. Paste a direct video URL, a website link, or a local file path, or drop a
    file onto the source area, then click **Load**.
-2. Choose video and audio options while it loads, if the source offers them.
-   Once ready, choose a subtitle track in **Video → Source → Subtitles** if one
-   is available.
+2. In **Video options**, choose the source, enhancement and output resolution,
+   then close the menu to reload once, paused. Audio and supported subtitles
+   can be selected under **Source**.
 3. Click the AirPlay button and choose a video-capable receiver, then press
    **Play** when the video and route are ready.
 
@@ -97,6 +97,11 @@ containers may be prepared or converted on the Mac first.
 
 ## Limitations
 
+- Seekable video conversion uses a limited playback cache; seeking outside it
+  prepares that part again. Set the cache window and space limit in **Settings →
+  Prepared video storage**. Stream copying prepares sequentially; text subtitles wait
+  for complete preparation. Receiver seeking during sequential preparation is
+  not yet verified.
 - Video conversion is off by default. Optional **Upscale** and **Clean up and
   upscale** work on finite SDR video at 1080p or 4K; 4K requires a compatible
   receiver. Enhancements never downscale.

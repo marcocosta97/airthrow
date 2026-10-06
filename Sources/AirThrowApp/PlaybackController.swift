@@ -67,6 +67,11 @@ final class PlaybackController: ObservableObject {
             $0.source.url == selectedSource.url && $0.source.audio?.url == selectedSource.audio?.url
         }?.height ?? 0) > 1080
     }
+    func requires4KOutput(for sourceID: String?) -> Bool {
+        guard let sourceID else { return requires4KOutput }
+        guard let index = sourceCandidates.indices.first(where: { sourceOptionID($0) == sourceID }) else { return false }
+        return (sourceCandidates[index].height ?? 0) > 1080
+    }
     private var originalSourceURL: URL?
     private var sourceCandidates: [MediaCandidate] = []
     private var sourceChoice: String?
@@ -137,7 +142,7 @@ final class PlaybackController: ObservableObject {
          resolvePlaylist: @escaping @Sendable (URL) async throws -> ResolvedPlaylist = {
         try await SourceResolver(sessions: WebsiteCookiePreference.current()).resolvePlaylist($0)
     }, prepareSource: (@Sendable (ResolvedSource) async throws -> PreparedMedia)? = {
-        try await MediaPreparer().prepare($0)
+        try await MediaPreparer(preferences: .current()).prepare($0)
     }, afterPlaybackBehavior: @escaping @MainActor () -> AfterPlaybackBehavior = {
         guard let raw = UserDefaults.standard.string(forKey: "afterPlaybackBehavior") else { return .keepConnected }
         return AfterPlaybackBehavior(rawValue: raw) ?? .keepConnected
@@ -348,6 +353,57 @@ final class PlaybackController: ObservableObject {
         case .cleanup1080, .cleanup4K:
             try selectEnhancement(enabled ? .cleanup4K : .cleanup1080)
         }
+    }
+
+    /// Apply the popover's staged video and enhancement choices in one load.
+    /// A nil source ID keeps the current presentation, including its language.
+    /// Enhancement cases encode their output resolution; output4K only chooses
+    /// the next enhancement's resolution when requesting Original.
+    func applyVideoOptions(sourceID: String?, enhancement: VideoEnhancement, output4K: Bool) throws {
+        guard let url = originalSourceURL, selectedSource != nil else {
+            throw AppFailure(.unsupportedOperation, "Wait for source discovery to finish.")
+        }
+        let target4K = enhancement.targetHeight.map { $0 == 2160 }
+            ?? (output4K || requires4KOutput(for: sourceID))
+        if sourceID == nil {
+            if enhancement != videoEnhancement { try selectEnhancement(enhancement) }
+            enhancementOutput4K = target4K
+            refresh()
+            return
+        }
+        let candidateID: String?
+        if sourceID == "automatic" { candidateID = nil }
+        else {
+            guard let index = sourceCandidates.indices.first(where: { sourceOptionID($0) == sourceID }) else {
+                throw AppFailure(.invalidRequest, "This source choice has expired. Open Video options again.")
+            }
+            let picked = sourceCandidates[index]
+            let policy: ConversionPolicy = enhancement == .original ? conversionPolicy : .allowVideo
+            let matching = picked.source.audio == nil ? nil : sourceCandidates.first { candidate in
+                candidate.source.url == picked.source.url && candidate.source.headers == picked.source.headers
+                    && candidate.source.playbackPath == picked.source.playbackPath
+                    && preferredAudioLanguage != nil
+                    && candidate.audioDescription?.components(separatedBy: " · ").first == preferredAudioLanguage
+                    && candidate.unavailableReason(for: policy) == nil
+            }
+            let candidate = matching ?? picked
+            guard sourceCandidates.filter({ $0.id == candidate.id }).count == 1 else {
+                throw AppFailure(.unsupportedOperation, "This source cannot be identified uniquely. Choose Automatic.")
+            }
+            if let reason = candidate.unavailableReason(for: policy) {
+                throw AppFailure(.unsupportedOperation, reason)
+            }
+            guard enhancement.targetHeight != 1080 || (candidate.height ?? 0) <= 1080 else {
+                throw AppFailure(.unsupportedOperation, "This source is above 1080p. Choose 4K to avoid downscaling.")
+            }
+            candidateID = candidate.id
+        }
+        guard enhancement == .original || !snapshot.isLive else {
+            throw AppFailure(.unsupportedOperation, "Enhancement is available for on-demand video, not live streams.")
+        }
+        startLoad(url, preservingQueue: queue != nil, titleOverride: title, sourceChoice: candidateID,
+                  changingSource: true, enhancement: enhancement,
+                  enhancementOutput4K: target4K)
     }
 
     /// A per-item enhancement: prepare this item's video on the Mac (upscale or
@@ -1374,6 +1430,9 @@ final class PlaybackController: ObservableObject {
             if player.rate != 0 { player.pause() }
         }
         let item = mediaItem
+        if let position = finite(player.currentTime().seconds) {
+            preparedMedia?.updatePlaybackPosition(position, playing: playbackRequested && !probing && !probeRestoring)
+        }
         if item?.status == .failed && failure == nil {
             fail(MediaDiagnostics.reason(for: item?.error,
                 fallback: hasPlayed ? .playbackInterrupted : .loadFailed))
@@ -1434,6 +1493,7 @@ final class PlaybackController: ObservableObject {
         next.error = failure
         next.errorReason = failureReason
         next.loadingPhase = resolving ? "resolving" : (preparing ? "preparing" : nil)
+        next.preparationInProgress = preparedMedia?.sourceDuration != nil && preparedMedia?.isProducing == true && !loading ? true : nil
         next.playbackPath = failure == nil
             ? (actualPlaybackPath ?? (preparing ? selectedSource?.plannedPath : selectedSource?.playbackPath)) : nil
         next.quality = selectedQuality

@@ -25,7 +25,7 @@ struct PreparationChecks {
                       "Remote container did not enter preparation")
             var environment = ProcessInfo.processInfo.environment
             environment["AIRTHROW_MEDIA_HOST"] = "127.0.0.1"
-            let prepared = try await MediaPreparer(environment: environment).prepare(source,
+            let prepared = try await MediaPreparer(environment: environment, preferences: PreparationPreferences(retainAll: true)).prepare(source,
                 onPlan: { print("Remote inspection selected \($0.label)") })
             defer { prepared.stop() }
             try check(prepared.videoHeight != nil, "Remote inspection lost video quality")
@@ -40,7 +40,7 @@ struct PreparationChecks {
             do {
                 let source = try await SourceResolver().resolve(MediaInput.url(CommandLine.arguments[2]))
                 guard source.needsPreparation else { print("Direct source selected; preparation not needed"); return }
-                let prepared = try await MediaPreparer().prepare(source)
+                let prepared = try await MediaPreparer(preferences: PreparationPreferences(retainAll: true)).prepare(source)
                 defer { prepared.stop() }
                 let asset = AVURLAsset(url: prepared.url)
                 let video = try await asset.loadTracks(withMediaType: .video)
@@ -58,7 +58,7 @@ struct PreparationChecks {
         let directory = URL(fileURLWithPath: CommandLine.arguments[2])
         var environment = ProcessInfo.processInfo.environment
         environment["AIRTHROW_MEDIA_HOST"] = "127.0.0.1"
-        let preparer = MediaPreparer(environment: environment)
+        let preparer = MediaPreparer(environment: environment, preferences: PreparationPreferences(retainAll: true))
         let session = URLSession(configuration: .ephemeral)
         defer { session.invalidateAndCancel() }
         func fetch(_ url: URL, method: String = "GET", range: String? = nil) async throws -> (Data, HTTPURLResponse) {
@@ -74,7 +74,7 @@ struct PreparationChecks {
         try check(nativeStream.url == nativeStreamURL && nativeStream.videoKnownPresent && !nativeStream.needsPreparation,
                   "Extensionless HLS did not enter the native-first path")
         for choice in [VideoEnhancement.upscale1080, .cleanup1080] {
-            let enhanced = try await preparer.prepare(nativeStream.withEnhancement(choice))
+            let enhanced = try await preparer.prepare(nativeStream.withEnhancement(choice), mode: .completeFile)
             try check(enhanced.playbackPath == .videoConversion && enhanced.videoHeight == 1080,
                       "Native-first extensionless HLS enhancement did not produce 1080p video")
             let asset = AVURLAsset(url: enhanced.url)
@@ -155,6 +155,16 @@ struct PreparationChecks {
         liveSubtitleMedia.stop()
         print("PASS live preparation retains video/audio with unsupported text subtitles")
 
+        let liveHEVC = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/hevc-sdr.mkv")!, isLive: true))
+        let (liveHEVCPlaylist, _) = try await fetch(liveHEVC.url)
+        try check(String(decoding: liveHEVCPlaylist, as: UTF8.self).contains("#EXT-X-MAP:URI=\"init.mp4\"")
+                  && liveHEVC.playbackPath == .remux, "Live HEVC did not use fragmented MP4")
+        try check(try await AVURLAsset(url: liveHEVC.url).load(.isPlayable), "Live HEVC HLS is not playable")
+        await liveHEVC.waitForProducer()
+        try check(liveHEVC.productionFailure == nil, "Live HEVC producer failed")
+        liveHEVC.stop()
+        print("PASS live HEVC retains copied tracks in playable fragmented MP4")
+
         let localFile = directory.appendingPathComponent("combined.mp4")
         let localSource = try await SourceResolver().resolve(MediaInput.localFile(localFile))
         var localDelivery: PreparedMedia? = try await preparer.prepare(localSource)
@@ -189,9 +199,9 @@ struct PreparationChecks {
         try check(mpegConverted.playbackPath == .videoConversion && mpegConverted.videoHeight == 180,
                   "MPEG-PS conversion lost the source's path or quality")
         let mpegAsset = AVURLAsset(url: mpegConverted.url)
-        try check(try await mpegAsset.load(.isPlayable), "Converted MPEG-PS is not a playable MP4")
+        try check(try await mpegAsset.load(.isPlayable), "Converted MPEG-PS is not playable")
         mpegConverted.stop()
-        print("PASS synthetic MPEG-PS inspection, opt-in conversion and playable MP4")
+        print("PASS synthetic MPEG-PS inspection, opt-in conversion and playable HLS")
 
         let split = ResolvedSource(url: URL(string: base + "/video.mp4")!,
             audio: MediaTrack(url: URL(string: base + "/audio.m4a")!), plannedPath: .remux)
@@ -264,7 +274,7 @@ struct PreparationChecks {
         try uhdData.write(to: directory.appendingPathComponent("uhd-converted.mp4"))
         uhdConverted.stop()
         let hevcCopy = try await preparer.prepare(
-            ResolvedSource(url: URL(string: base + "/hevc-sdr.mkv")!, needsPreparation: true))
+            ResolvedSource(url: URL(string: base + "/hevc-sdr.mkv")!, needsPreparation: true), mode: .completeFile)
         try check(hevcCopy.playbackPath == .remux && hevcCopy.videoHeight == 180,
                   "Compatible SDR HEVC was not remuxed")
         let (hevcData, _) = try await fetch(hevcCopy.url)
@@ -276,7 +286,7 @@ struct PreparationChecks {
         } catch PreparationFailure.conversionWouldDownscale {}
         for choice in [VideoEnhancement.upscale1080, .cleanup1080, .upscale4K, .cleanup4K] {
             print("Checking enhancement \(choice.rawValue)")
-            let enhanced = try await preparer.prepare(source.withEnhancement(choice))
+            let enhanced = try await preparer.prepare(source.withEnhancement(choice), mode: .completeFile)
             try check(enhanced.playbackPath == .videoConversion
                       && enhanced.videoHeight == choice.targetHeight,
                       "Enhancement did not produce its selected output height")
@@ -308,14 +318,14 @@ struct PreparationChecks {
         softwareEnvironment["AIRTHROW_FFMPEG"] = directory.appendingPathComponent("software-ffmpeg").path
         let softwareSource = ResolvedSource(url: URL(string: base + "/vp9-opus.mkv")!,
                                             needsPreparation: true, conversionPolicy: .allowVideo)
-        let softwareConverted = try await MediaPreparer(environment: softwareEnvironment)
+        let softwareConverted = try await MediaPreparer(environment: softwareEnvironment, preferences: PreparationPreferences(retainAll: true))
             .prepare(softwareSource, mode: .completeFile)
         try check(softwareConverted.playbackPath == .videoConversion, "Software fallback did not convert")
         let (softwareData, _) = try await fetch(softwareConverted.url)
         try softwareData.write(to: directory.appendingPathComponent("software-converted.mp4"))
         softwareConverted.stop()
-        let software4K = try await MediaPreparer(environment: softwareEnvironment)
-            .prepare(source.withEnhancement(.upscale4K))
+        let software4K = try await MediaPreparer(environment: softwareEnvironment, preferences: PreparationPreferences(retainAll: true))
+            .prepare(source.withEnhancement(.upscale4K), mode: .completeFile)
         try check(software4K.videoHeight == 2160, "4K software fallback did not upscale")
         let (software4KData, _) = try await fetch(software4K.url)
         try software4KData.write(to: directory.appendingPathComponent("software-4k.mp4"))
@@ -323,7 +333,7 @@ struct PreparationChecks {
         var noEncoderEnvironment = environment
         noEncoderEnvironment["AIRTHROW_FFMPEG"] = directory.appendingPathComponent("no-encoder-ffmpeg").path
         try await expect(.preparationFailed) {
-            _ = try await MediaPreparer(environment: noEncoderEnvironment)
+            _ = try await MediaPreparer(environment: noEncoderEnvironment, preferences: PreparationPreferences(retainAll: true))
                 .prepare(softwareSource, mode: .completeFile)
         }
 
@@ -344,10 +354,10 @@ struct PreparationChecks {
         print("PASS selective audio/video conversion, opt-in video, 4K/100fps bounds, 10-bit/HDR refusal, software fallback, onPlan")
 
         let shortLimit = MediaPreparer(environment: environment, maximumBytes: 1000)
-        try await expect(.preparationLimit) { _ = try await shortLimit.prepare(source) }
+        try await expect(.preparationStorageLimit) { _ = try await shortLimit.prepare(source) }
         var missingEnvironment = environment
         missingEnvironment["AIRTHROW_FFMPEG"] = "/missing/ffmpeg"
-        let missingHelper = MediaPreparer(environment: missingEnvironment)
+        let missingHelper = MediaPreparer(environment: missingEnvironment, preferences: PreparationPreferences(retainAll: true))
         try await expect(.preparerUnavailable) { _ = try await missingHelper.prepare(source) }
         print("PASS size limit and missing helpers")
 
@@ -357,7 +367,7 @@ struct PreparationChecks {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: slow.path)
         var slowEnvironment = environment
         slowEnvironment["AIRTHROW_FFMPEG"] = slow.path
-        let slowPreparer = MediaPreparer(environment: slowEnvironment)
+        let slowPreparer = MediaPreparer(environment: slowEnvironment, preferences: PreparationPreferences(retainAll: true))
         let cancelled = Task { try await slowPreparer.prepare(source) }
         try await Task.sleep(for: .milliseconds(600))
         cancelled.cancel()
@@ -394,7 +404,7 @@ struct PreparationChecks {
         try check(Set(try FileManager.default.contentsOfDirectory(atPath: cache.path)).isEmpty,
                   "Quit left a cancelled job's temporary media behind")
 
-        let controlledPreparer = MediaPreparer(environment: environment)
+        let controlledPreparer = MediaPreparer(environment: environment, preferences: PreparationPreferences(retainAll: true))
         let controller = PlaybackController(prepareSource: { try await controlledPreparer.prepare($0) })
         defer { controller.shutdown() }
         func settled() async throws {

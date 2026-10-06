@@ -105,6 +105,9 @@ struct SettingsView: View {
     @ObservedObject var controller: PlaybackController
     @ObservedObject var cookieStatus: CookieStatusModel
     @AppStorage("afterPlaybackBehavior") private var behavior = AfterPlaybackBehavior.keepConnected.rawValue
+    @AppStorage(PreparationPreferences.maximumGiBKey) private var preparationGiB = 2
+    @AppStorage(PreparationPreferences.retainAllKey) private var retainAll = false
+    @AppStorage(PreparationPreferences.windowSecondsKey) private var windowSeconds = 60
 
     var body: some View {
         Form {
@@ -139,6 +142,23 @@ struct SettingsView: View {
                 Text("Automatic selection favors quality within your conversion preference, even if more processing is needed. Applies to the next load or source change; enhancements are unchanged.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            Section("Prepared video storage") {
+                Picker("Maximum preparation space", selection: $preparationGiB) {
+                    ForEach([1, 2, 4, 8, 16, 32, 64], id: \.self) { value in
+                        Text("\(value) GB").tag(value)
+                    }
+                }
+                Toggle("Keep all prepared video", isOn: $retainAll)
+                if !retainAll {
+                    Picker("Playback cache window", selection: $windowSeconds) {
+                        Text("30 seconds").tag(30)
+                        Text("1 minute").tag(60)
+                        Text("2 minutes").tag(120)
+                        Text("5 minutes").tag(300)
+                        Text("10 minutes").tag(600)
+                    }
+                }
             }
             Section("Cookies") {
                 CookieSourceView(cookieStatus: cookieStatus)

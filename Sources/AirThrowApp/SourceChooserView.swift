@@ -11,6 +11,10 @@ import AirThrowCore
 struct VideoMenuView: View {
     @ObservedObject var controller: PlaybackController
     @SwiftUI.State private var showingOptions = false
+    @SwiftUI.State private var draftVideo = "automatic"
+    @SwiftUI.State private var draftAction: EnhancementAction = .original
+    @SwiftUI.State private var draftOutput4K = false
+    @SwiftUI.State private var draftSourceIDs: [String] = []
     private var status: PlaybackSnapshot { controller.snapshot }
     private var sources: [SourceOptionSnapshot] { status.sources ?? [] }
     private var audioOptions: [AudioOptionSnapshot] { status.audioOptions ?? [] }
@@ -55,20 +59,29 @@ struct VideoMenuView: View {
     }
 
     private var isLive: Bool { status.isLive }
-    private var mediaReady: Bool { status.playbackPath != nil }
-    private var canChooseOutput: Bool { mediaReady && !isLive && enhancementAction != .original }
+    private var mediaReady: Bool {
+        status.playbackPath != nil || (status.state == .failed && status.videoEnhancement != nil && !sources.isEmpty)
+    }
+    private var canChooseOutput: Bool { mediaReady && !isLive && draftAction != .original }
+    private var requires4K: Bool {
+        controller.requires4KOutput(for: draftVideo == videoSelection ? nil : draftVideo)
+    }
+    private var hasChanges: Bool {
+        draftVideo != videoSelection || draftAction != enhancementAction
+            || (draftAction != .original && draftOutput4K != controller.enhancementOutput4K)
+    }
     private var outputHelp: String {
         if isLive { return "Enhancement is available only for on-demand video." }
-        if enhancementAction == .original { return "Choose an enhancement to change the output resolution." }
-        if controller.requires4KOutput { return "This source is above 1080p, so enhancement uses 4K." }
-        return "Changing the target reloads from the start, paused."
+        if draftAction == .original { return "Choose an enhancement to change the output resolution." }
+        if requires4K { return "This source is above 1080p, so enhancement uses 4K." }
+        return "Choose the output resolution before closing this menu."
     }
 
     private var outputExplanation: String {
         if isLive { return "Enhancement is available only for on-demand video." }
         if !mediaReady { return "Video options become available when the source is ready." }
-        if enhancementAction == .original { return "Choose an enhancement to enable output resolution." }
-        if controller.requires4KOutput { return "This source requires 4K output and a compatible receiver." }
+        if draftAction == .original { return "Choose an enhancement to enable output resolution." }
+        if requires4K { return "This source requires 4K output and a compatible receiver." }
         return "4K needs a compatible receiver."
     }
 
@@ -95,6 +108,7 @@ struct VideoMenuView: View {
 
     var body: some View {
         Button {
+            if !showingOptions { resetDraft() }
             showingOptions.toggle()
         } label: {
             HStack(spacing: 4) {
@@ -118,7 +132,7 @@ struct VideoMenuView: View {
                         HStack(spacing: 8) {
                             Text("Video").font(.caption)
                             Spacer(minLength: 0)
-                            Picker("Video", selection: Binding(get: { videoSelection }, set: { chooseSource($0) })) {
+                            Picker("Video", selection: $draftVideo) {
                                 Text("Automatic").tag("automatic")
                                 ForEach(videoOptions) { option in
                                     Text(videoRow(option))
@@ -170,8 +184,7 @@ struct VideoMenuView: View {
                     Divider()
                 }
                 Text("Enhancement").font(.subheadline.weight(.medium))
-                Picker("Enhancement", selection: Binding(get: { enhancementAction },
-                                                         set: { chooseAction($0) })) {
+                Picker("Enhancement", selection: $draftAction) {
                     ForEach(EnhancementAction.allCases, id: \.self) { option in
                         Text(option.label).tag(option)
                     }
@@ -182,9 +195,8 @@ struct VideoMenuView: View {
                 Text("Upscale output")
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(canChooseOutput ? Color.primary : Color.secondary)
-                Picker("Upscale output", selection: Binding(get: { controller.enhancementOutput4K },
-                                                          set: { chooseOutput4K($0) })) {
-                    Text("1080p").tag(false).disabled(controller.requires4KOutput)
+                Picker("Upscale output", selection: $draftOutput4K) {
+                    Text("1080p").tag(false).disabled(requires4K)
                     Text("4K").tag(true)
                 }
                 .pickerStyle(.segmented)
@@ -196,13 +208,22 @@ struct VideoMenuView: View {
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Text(isLive
-                     ? "Changing video reloads the live stream, paused."
-                     : "Changing video or enhancement restarts the video from the beginning, paused.")
+                     ? "Closing this menu applies changes and reloads paused."
+                     : "Closing this menu applies changes and restarts the video, paused.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(12)
             .frame(width: 210, alignment: .leading)
+        }
+        .onChange(of: showingOptions) { _, isPresented in
+            if !isPresented { applyDraft() }
+        }
+        .onChange(of: sources.map(\.id)) { _, _ in
+            if showingOptions { resetDraft() }
+        }
+        .onChange(of: draftVideo) { _, _ in
+            if requires4K { draftOutput4K = true }
         }
     }
 
@@ -216,20 +237,29 @@ struct VideoMenuView: View {
         [option.label, option.unavailableReason].compactMap { $0 }.joined(separator: " · ")
     }
 
-    private func chooseSource(_ id: String) {
-        guard id != videoSelection || status.state == .failed else { return }
+    private func resetDraft() {
+        draftVideo = videoSelection
+        draftAction = enhancementAction
+        draftOutput4K = controller.enhancementOutput4K
+        draftSourceIDs = sources.map(\.id)
+    }
+
+    private func applyDraft() {
+        // Stop/replacement can dismiss the popover too. Only commit a draft
+        // that still belongs to the same source session, and only once.
+        guard hasChanges, mediaReady, draftSourceIDs == sources.map(\.id) else { return }
         do {
-            try controller.selectVideo(id)
-            showingOptions = false
-        }
-        catch { controller.displayError(error) }
+            try controller.applyVideoOptions(
+                sourceID: draftVideo == videoSelection ? nil : draftVideo,
+                enhancement: draftAction.enhancement(output4K: draftOutput4K),
+                output4K: draftOutput4K)
+        } catch { controller.displayError(error) }
     }
 
     private func chooseAudio(_ id: String) {
         guard id != audioSelection else { return }
         do {
             try controller.selectAudio(id)
-            showingOptions = false
         }
         catch { controller.displayError(error) }
     }
@@ -238,26 +268,6 @@ struct VideoMenuView: View {
         guard id != subtitleSelection else { return }
         do {
             try controller.selectSubtitle(id)
-            showingOptions = false
-        }
-        catch { controller.displayError(error) }
-    }
-
-    private func chooseAction(_ action: EnhancementAction) {
-        guard action != enhancementAction else { return }
-        let option = action.enhancement(output4K: controller.enhancementOutput4K)
-        do {
-            try controller.selectEnhancement(option)
-            showingOptions = false
-        }
-        catch { controller.displayError(error) }
-    }
-
-    private func chooseOutput4K(_ enabled: Bool) {
-        guard canChooseOutput, enabled != controller.enhancementOutput4K else { return }
-        do {
-            try controller.setEnhancementOutput4K(enabled)
-            showingOptions = false
         }
         catch { controller.displayError(error) }
     }

@@ -17,9 +17,9 @@ struct ProgressiveChecks {
         let directory = URL(fileURLWithPath: CommandLine.arguments[2])
         var environment = ProcessInfo.processInfo.environment
         environment["AIRTHROW_MEDIA_HOST"] = "127.0.0.1"
-        environment["AIRTHROW_PREPARATION_MODE"] = "progressive-hls"
+        environment.removeValue(forKey: "AIRTHROW_PREPARATION_MODE")
         environment["AIRTHROW_FFMPEG"] = directory.appendingPathComponent("paced-ffmpeg").path
-        let preparer = MediaPreparer(environment: environment)
+        let preparer = MediaPreparer(environment: environment, preferences: PreparationPreferences(retainAll: true))
         let source = ResolvedSource(url: URL(string: base + "/long.mp4")!, needsPreparation: true)
         let cache = FileManager.default.temporaryDirectory.appendingPathComponent("athrow-prepared-v1")
         MediaPreparer.cleanAbandonedFiles()
@@ -33,6 +33,39 @@ struct ProgressiveChecks {
             let (data, response) = try await session.data(for: request)
             return (data, response as! HTTPURLResponse)
         }
+        for choice in [VideoEnhancement.cleanup1080, .upscale4K] {
+            let controller = PlaybackController(resolveSource: { _ in source },
+                prepareSource: { try await preparer.prepare($0) })
+            try controller.load("https://example.com/video")
+            var deadline = Date().addingTimeInterval(20)
+            while controller.snapshot.state == .loading, Date() < deadline {
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            try check(controller.snapshot.state == .awaitingReceiver, "Original progressive fixture did not load")
+            try controller.selectEnhancement(choice)
+            deadline = Date().addingTimeInterval(20)
+            while controller.snapshot.state == .loading, Date() < deadline {
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            try check(controller.snapshot.state == .awaitingReceiver && controller.snapshot.duration == 20
+                      && !controller.snapshot.isLive && controller.snapshot.preparationInProgress == true
+                      && controller.snapshot.videoEnhancement == choice
+                      && controller.player.rate == 0 && controller.player.isMuted,
+                      "Progressive \(choice.rawValue) native player: \(String(decoding: try JSONEncoder().encode(controller.snapshot), as: UTF8.self))")
+            let endpoint = (controller.player.currentItem!.asset as! AVURLAsset).url
+            let (playlist, _) = try await fetch(endpoint)
+            try check(!String(decoding: playlist, as: UTF8.self).contains("#EXT-X-ENDLIST"),
+                      "Native enhanced player readiness waited for completion")
+            try check((controller.snapshot.position ?? 99) < 1 && (controller.snapshot.seekableRanges.last?.end ?? 0) < 20,
+                      "Enhanced growing HLS started at the live edge or exposed unprepared seeks")
+            do { try controller.seek(19); try check(false, "Enhanced seek escaped the prepared range") }
+            catch let error as AppFailure { try check(error.code == .unsupportedOperation, "Enhanced seek failed incorrectly") }
+            await controller.shutdownAndWait()
+            do { _ = try await fetch(endpoint); try check(false, "Enhanced shutdown retained delivery") }
+            catch is URLError {}
+        }
+        print("PASS progressive cleanup/4K native controller readiness, finite timeline, bounded seek and shutdown")
+
         let started = Date()
         let prepared = try await preparer.prepare(source)
         defer { prepared.stop() }
@@ -58,8 +91,10 @@ struct ProgressiveChecks {
             try check(denied.statusCode == 404, "Unexpected HLS resource exposed")
         }
         try check(MediaHTTPServer.isSegmentName("segment1000000.ts")
+                  && MediaHTTPServer.isSegmentName("segment1000000.m4s")
                   && !MediaHTTPServer.isSegmentName("segment.ts")
                   && !MediaHTTPServer.isSegmentName("segment1x.ts")
+                  && !MediaHTTPServer.isSegmentName("segment000000.m4s.tmp")
                   && !MediaHTTPServer.isSegmentName("other.ts"),
                   "Segment-name validation rejected a widened index or accepted a non-segment")
         // Fetch repeatedly across atomic playlist replacements; Content-Length must always match.
@@ -87,14 +122,88 @@ struct ProgressiveChecks {
 
         var fallbackEnvironment = environment
         fallbackEnvironment["AIRTHROW_FFMPEG"] = directory.appendingPathComponent("fallback-ffmpeg").path
-        let fallback = try await MediaPreparer(environment: fallbackEnvironment).prepare(source)
+        let fallback = try await MediaPreparer(environment: fallbackEnvironment, preferences: PreparationPreferences(retainAll: true)).prepare(source)
         try check(fallback.url.pathExtension == "mp4", "Startup failure did not use complete-file fallback")
         fallback.stop()
         print("PASS complete-file fallback before handoff")
 
+        // Every enhancement hands off a verified buffer while encoding continues.
+        // 4K uses HEVC/fMP4; no whole-file wait and no special environment opt-in.
+        for choice in [VideoEnhancement.upscale1080, .cleanup1080, .upscale4K, .cleanup4K] {
+            let started = Date()
+            let enhanced = try await preparer.prepare(source.withEnhancement(choice))
+            try check(enhanced.isProducing && enhanced.url.pathExtension == "m3u8"
+                      && enhanced.videoHeight == choice.targetHeight,
+                      "\(choice.rawValue) waited for a complete file or lost its output resolution")
+            let (playlist, _) = try await fetch(enhanced.url)
+            let text = String(decoding: playlist, as: UTF8.self)
+            try check(!text.contains("#EXT-X-ENDLIST"), "\(choice.rawValue) was complete before handoff")
+            if choice.targetHeight == 2160 {
+                try check(text.contains("#EXT-X-MAP:URI=\"init.mp4\"") && text.contains(".m4s"),
+                          "HEVC was not packaged as fragmented MP4")
+                let initURL = enhanced.url.deletingLastPathComponent().appendingPathComponent("init.mp4")
+                let (initialization, response) = try await fetch(initURL)
+                let (head, headResponse) = try await fetch(initURL, method: "HEAD")
+                let (partial, partialResponse) = try await fetch(initURL, range: "bytes=0-99")
+                try check(response.value(forHTTPHeaderField: "Content-Type") == "video/mp4"
+                          && initialization.count > 100 && head.isEmpty
+                          && headResponse.expectedContentLength == initialization.count
+                          && partialResponse.statusCode == 206 && partial == initialization.prefix(100),
+                          "fMP4 initialization delivery failed")
+                let (_, hidden) = try await fetch(enhanced.url.deletingLastPathComponent()
+                    .appendingPathComponent("inspection.mp4"))
+                try check(hidden.statusCode == 404, "Private segment inspection was served")
+            }
+            let asset = AVURLAsset(url: enhanced.url)
+            try check(try await asset.load(.isPlayable), "Progressive \(choice.rawValue) is not natively playable")
+            let ready = Date().timeIntervalSince(started)
+            await enhanced.waitForProducer()
+            try check(enhanced.productionFailure == nil, "\(choice.rawValue) failed after handoff")
+            let (complete, _) = try await fetch(enhanced.url)
+            try check(String(decoding: complete, as: UTF8.self).contains("#EXT-X-ENDLIST"),
+                      "\(choice.rawValue) never finalized its playlist")
+            enhanced.stop()
+            print("PASS progressive \(choice.rawValue), playable before completion, ready in \(String(format: "%.2f", ready))s")
+        }
+        let encoded = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/long-vp9.mkv")!,
+            needsPreparation: true, conversionPolicy: .allowVideo))
+        try check(encoded.isProducing && encoded.url.pathExtension == "m3u8"
+                  && encoded.playbackPath == .videoConversion,
+                  "Unsupported format conversion waited for a complete file")
+        encoded.stop()
+        await encoded.waitForProducer()
+        let audioConverted = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/long-flac.mkv")!,
+            needsPreparation: true))
+        try check(audioConverted.isProducing && audioConverted.url.pathExtension == "m3u8"
+                  && audioConverted.playbackPath == .audioConversion,
+                  "Audio conversion waited for a complete file")
+        audioConverted.stop()
+        await audioConverted.waitForProducer()
+        let copiedHEVC = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/hevc-sdr.mkv")!,
+            needsPreparation: true))
+        let (hevcPlaylist, _) = try await fetch(copiedHEVC.url)
+        try check(copiedHEVC.playbackPath == .remux && String(decoding: hevcPlaylist, as: UTF8.self).contains(".m4s"),
+                  "Copied HEVC used MPEG-TS")
+        try check(try await AVURLAsset(url: copiedHEVC.url).load(.isPlayable), "Copied HEVC HLS is not playable")
+        copiedHEVC.stop()
+        await copiedHEVC.waitForProducer()
+        print("PASS default progressive unsupported-video/audio conversion, cancellation and HEVC remux")
+
+        // Slow finite processing can buffer during playback, but it must still
+        // publish its startup buffer rather than convert the whole file first.
+        var slowEnvironment = environment
+        slowEnvironment["AIRTHROW_FFMPEG"] = directory.appendingPathComponent("below-realtime-ffmpeg").path
+        let slowPrepared = try await MediaPreparer(environment: slowEnvironment, preferences: PreparationPreferences(retainAll: true)).prepare(source.withEnhancement(.cleanup1080))
+        try check(slowPrepared.isProducing && slowPrepared.url.pathExtension == "m3u8",
+                  "Below-realtime finite conversion fell back to a whole-file wait")
+        slowPrepared.stop()
+        await slowPrepared.waitForProducer()
+        print("PASS below-realtime finite processing hands off its buffer and cancels cleanly")
+
+
         var hardwareFailureEnvironment = environment
         hardwareFailureEnvironment["AIRTHROW_FFMPEG"] = directory.appendingPathComponent("hardware-failure-ffmpeg").path
-        let recovered = try await MediaPreparer(environment: hardwareFailureEnvironment).prepare(
+        let recovered = try await MediaPreparer(environment: hardwareFailureEnvironment, preferences: PreparationPreferences(retainAll: true)).prepare(
             ResolvedSource(url: URL(string: base + "/vp9-opus.mkv")!, needsPreparation: true,
                            conversionPolicy: .allowVideo))
         try check(recovered.url.pathExtension == "m3u8" && recovered.playbackPath == .videoConversion,
@@ -105,6 +214,18 @@ struct ProgressiveChecks {
         recovered.stop()
         await recovered.waitForProducer()
         print("PASS hardware startup failure switches directly to software without a second hardware job")
+
+        try FileManager.default.removeItem(at: directory.appendingPathComponent("encoder-attempts.txt"))
+        let recoveredHEVC = try await MediaPreparer(environment: hardwareFailureEnvironment, preferences: PreparationPreferences(retainAll: true)).prepare(
+            ResolvedSource(url: URL(string: base + "/combined.mp4")!).withEnhancement(.upscale4K))
+        try check(recoveredHEVC.url.pathExtension == "m3u8" && recoveredHEVC.videoHeight == 2160,
+                  "HEVC hardware startup failure did not recover through software HLS")
+        let hevcAttempts = try String(contentsOf: directory.appendingPathComponent("encoder-attempts.txt"), encoding: .utf8)
+        try check(hevcAttempts.split(separator: "\n") == ["hardware-preflight", "hardware-job", "software-job"],
+                  "HEVC hardware was retried before software fallback: \(hevcAttempts)")
+        recoveredHEVC.stop()
+        await recoveredHEVC.waitForProducer()
+        print("PASS HEVC hardware startup failure switches directly to software fragmented MP4")
 
         let timedPreparer = MediaPreparer(environment: environment, maximumBytes: 2 * 1024 * 1024 * 1024,
                                           startupTimeout: .milliseconds(200))
@@ -117,7 +238,7 @@ struct ProgressiveChecks {
             _ = try await MediaPreparer(environment: limitedEnvironment, maximumBytes: 2 * 1024 * 1024).prepare(source)
             try check(false, "Unfinished HLS segment escaped aggregate size limit")
         } catch let failure as PreparationFailure {
-            try check(failure == .limit, "Aggregate HLS limit used the wrong error")
+            try check(failure == .storageLimit, "Aggregate HLS limit used the wrong error")
         }
         // MPEG-TS overhead means a source just under the cap must be rejected
         // before download instead of overflowing mid-remux.
@@ -128,7 +249,7 @@ struct ProgressiveChecks {
                                         maximumBytes: sourceBytes + sourceBytes / 16).prepare(source)
             try check(false, "Source-size pre-check ignored MPEG-TS overhead")
         } catch let failure as PreparationFailure {
-            try check(failure == .limit, "Source-size pre-check used the wrong error")
+            try check(failure == .storageLimit, "Source-size pre-check used the wrong error")
         }
         let split = ResolvedSource(url: URL(string: base + "/video.mp4")!,
                                    audio: MediaTrack(url: URL(string: base + "/audio.m4a")!))
@@ -195,7 +316,7 @@ struct ProgressiveChecks {
 
         var failedEnvironment = environment
         failedEnvironment["AIRTHROW_FFMPEG"] = directory.appendingPathComponent("failing-ffmpeg").path
-        let failingPreparer = MediaPreparer(environment: failedEnvironment)
+        let failingPreparer = MediaPreparer(environment: failedEnvironment, preferences: PreparationPreferences(retainAll: true))
         let failingController = PlaybackController(resolveSource: { _ in source }, prepareSource: { try await failingPreparer.prepare($0) })
         try failingController.load("https://example.com/video")
         var sawHLSItem = false

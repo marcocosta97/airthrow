@@ -56,6 +56,7 @@ struct ControllerView: View {
     }
     private var playbackDetail: String {
         var parts: [String] = []
+        if status.preparationInProgress == true { parts.append("Preparing ahead") }
         if let activeEnhancement { parts.append(activeEnhancement.label) }
         if let path = status.playbackPath { parts.append(path.label) }
         if let quality = status.quality {
@@ -64,6 +65,9 @@ struct ControllerView: View {
         return parts.joined(separator: " · ")
     }
     private var playbackDetailHelp: String {
+        if status.preparationInProgress == true {
+            return "Ready to play while this Mac prepares the remaining video. Seeking is limited to the prepared portion."
+        }
         if let activeEnhancement {
             return "\(activeEnhancement.label): prepared on this Mac. Changing it reloads from the start, paused. 4K needs a compatible receiver."
         }
@@ -262,6 +266,12 @@ struct ControllerView: View {
                                     .help(message)
                                     .textSelection(.enabled)
                                 Spacer(minLength: 0)
+                                if status.errorReason == .preparationStorageLimit {
+                                    Button("Settings…") {
+                                        NSApp.sendAction(NSSelectorFromString("showSettings"), to: NSApp.delegate, from: nil)
+                                    }
+                                    .controlSize(.small)
+                                }
                                 if status.error == nil {
                                     Button { controller.clearNotice() } label: { Image(systemName: "xmark") }
                                         .buttonStyle(.plain).accessibilityLabel("Dismiss message")

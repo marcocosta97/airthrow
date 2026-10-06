@@ -3,6 +3,8 @@ import Network
 import SystemConfiguration
 import Darwin
 
+enum MediaResourceFailure: Error { case notFound }
+
 /// Session media under an unguessable path; no proxy or directory routes.
 @MainActor
 public final class MediaHTTPServer {
@@ -19,6 +21,8 @@ public final class MediaHTTPServer {
     private var startupTimeout: Task<Void, Never>?
     private var clients: [ObjectIdentifier: Client] = [:]
     private var stopped = false
+    private var loadResource: (@MainActor @Sendable (String) async throws -> URL)?
+    private var releaseResource: (@MainActor @Sendable (URL) -> Void)?
 
     // Mutable client state is used exclusively on the main queue, like the listener callbacks.
     private final class Client: @unchecked Sendable {
@@ -27,12 +31,17 @@ public final class MediaHTTPServer {
         var file: FileHandle?
         var remaining: Int64 = 0
         var timeout: Task<Void, Never>?
+        var loading: Task<Void, Never>?
+        var loadedResource: URL?
         init(_ connection: NWConnection) { self.connection = connection }
-        deinit { try? file?.close(); timeout?.cancel() }
+        deinit { try? file?.close(); timeout?.cancel(); loading?.cancel() }
     }
 
-    public static func start(file: URL, host: String? = nil, hls: Bool = false) async throws -> MediaHTTPServer {
-        let server = try MediaHTTPServer(file: file, host: host ?? localAddress(), hls: hls)
+    public static func start(file: URL, host: String? = nil, hls: Bool = false,
+                             loadResource: (@MainActor @Sendable (String) async throws -> URL)? = nil,
+                             releaseResource: (@MainActor @Sendable (URL) -> Void)? = nil) async throws -> MediaHTTPServer {
+        let server = try MediaHTTPServer(file: file, host: host ?? localAddress(), hls: hls,
+                                         loadResource: loadResource, releaseResource: releaseResource)
         try await withTaskCancellationHandler {
             try Task.checkCancellation()
             try await withCheckedThrowingContinuation { continuation in
@@ -67,10 +76,13 @@ public final class MediaHTTPServer {
         return server
     }
 
-    private init(file: URL, host: String, hls: Bool) throws {
+    private init(file: URL, host: String, hls: Bool,
+                 loadResource: (@MainActor @Sendable (String) async throws -> URL)?,
+                 releaseResource: (@MainActor @Sendable (URL) -> Void)?) throws {
         var address = in_addr()
         guard inet_pton(AF_INET, host, &address) == 1 else { throw PreparationFailure.delivery }
         self.file = file; self.host = host; self.hls = hls
+        self.loadResource = loadResource; self.releaseResource = releaseResource
         let ext = file.pathExtension.lowercased()
         if hls {
             mediaName = "media.m3u8"
@@ -127,6 +139,7 @@ public final class MediaHTTPServer {
         listener.cancel()
         listener.stateUpdateHandler = nil; listener.newConnectionHandler = nil
         for client in Array(clients.values) { finish(client) }
+        loadResource = nil; releaseResource = nil
     }
 
     deinit {
@@ -144,18 +157,20 @@ public final class MediaHTTPServer {
         receive(client)
     }
 
-    private func armTimeout(_ client: Client) {
+    private func armTimeout(_ client: Client, seconds: Double = 15) {
         client.timeout?.cancel()
         client.timeout = Task { [weak self, weak client] in
-            try? await Task.sleep(for: .seconds(15))
+            try? await Task.sleep(for: .seconds(seconds))
             if !Task.isCancelled, let client { self?.finish(client) }
         }
     }
 
     private func finish(_ client: Client) {
         client.timeout?.cancel()
+        client.loading?.cancel()
         client.connection.cancel()
         try? client.file?.close(); client.file = nil
+        if let resource = client.loadedResource { releaseResource?(resource); client.loadedResource = nil }
         clients.removeValue(forKey: ObjectIdentifier(client))
     }
 
@@ -185,9 +200,10 @@ public final class MediaHTTPServer {
             resource = file
             contentType = mediaContentType
         } else if hls, requested.hasPrefix(prefix),
-                  Self.isSegmentName(String(requested.dropFirst(prefix.count))) {
+                  (Self.isSegmentName(String(requested.dropFirst(prefix.count)))
+                   || Self.isInitName(String(requested.dropFirst(prefix.count)))) {
             resource = file.deletingLastPathComponent().appendingPathComponent(String(requested.dropFirst(prefix.count)))
-            contentType = "video/mp2t"
+            contentType = resource.pathExtension == "ts" ? "video/mp2t" : "video/mp4"
         } else { reply(client, code: "404 Not Found"); return }
         guard request[0] == "GET" || request[0] == "HEAD" else { reply(client, code: "405 Method Not Allowed", extra: "Allow: GET, HEAD\r\n"); return }
         var headers: [String: String] = [:]
@@ -200,6 +216,38 @@ public final class MediaHTTPServer {
         guard headers["transfer-encoding"] == nil, headers["content-length"] == nil || headers["content-length"] == "0" else {
             reply(client, code: "400 Bad Request"); return
         }
+        if requested != path, let loadResource {
+            armTimeout(client, seconds: 600)
+            let name = String(requested.dropFirst(prefix.count))
+            // Stop clears the server's callbacks while this request may still
+            // be awaiting its provider. Keep the matching release callback so
+            // a resource delivered after cancellation cannot lose its pin.
+            let release = releaseResource
+            client.loading = Task { [weak self, weak client] in
+                guard let self, let client else { return }
+                do {
+                    let loaded = try await loadResource(name)
+                    guard !Task.isCancelled, !self.stopped,
+                          self.clients[ObjectIdentifier(client)] != nil else {
+                        release?(loaded); return
+                    }
+                    client.loadedResource = loaded
+                    self.deliver(client, resource: loaded, contentType: contentType,
+                                 method: String(request[0]), headers: headers)
+                } catch {
+                    if !Task.isCancelled, self.clients[ObjectIdentifier(client)] != nil {
+                        self.reply(client, code: error is MediaResourceFailure ? "404 Not Found" : "503 Service Unavailable")
+                    }
+                }
+            }
+        } else {
+            deliver(client, resource: resource, contentType: contentType,
+                    method: String(request[0]), headers: headers)
+        }
+    }
+
+    private func deliver(_ client: Client, resource: URL, contentType: String,
+                         method: String, headers: [String: String]) {
         // Open once, then stat that descriptor: an atomic playlist replacement must
         // not mix the previous Content-Length with the new playlist body.
         let fd = open(resource.path, O_RDONLY | O_NOFOLLOW)
@@ -213,14 +261,14 @@ public final class MediaHTTPServer {
         let size = Int64(info.st_size)
         var start: Int64 = 0, end = size - 1
         var partial = false
-        if request[0] == "GET", let range = headers["range"], headers["if-range"] == nil {
+        if method == "GET", let range = headers["range"], headers["if-range"] == nil {
             guard let interval = Self.byteRange(range, size: size) else {
                 reply(client, code: "416 Range Not Satisfiable", extra: "Content-Range: bytes */\(size)\r\n"); return
             }
             (start, end) = interval; partial = true
         }
         do {
-            if request[0] == "GET" {
+            if method == "GET" {
                 try client.file?.seek(toOffset: UInt64(start))
                 client.remaining = end - start + 1
             }
@@ -232,9 +280,17 @@ public final class MediaHTTPServer {
     }
 
     nonisolated static func isSegmentName(_ name: String) -> Bool {
-        guard name.hasPrefix("segment"), name.hasSuffix(".ts") else { return false }
+        let suffix = name.hasSuffix(".ts") ? ".ts" : ".m4s"
+        guard name.hasPrefix("segment"), name.hasSuffix(suffix) else { return false }
         // ffmpeg's %06d widens past six digits, so the index is not width-fixed.
-        let digits = name.dropFirst(7).dropLast(3)
+        let digits = name.dropFirst(7).dropLast(suffix.count)
+        return !digits.isEmpty && digits.allSatisfy { $0.isASCII && $0.isNumber }
+    }
+
+    nonisolated static func isInitName(_ name: String) -> Bool {
+        if name == "init.mp4" { return true }
+        guard name.hasPrefix("init"), name.hasSuffix(".mp4") else { return false }
+        let digits = name.dropFirst(4).dropLast(4)
         return !digits.isEmpty && digits.allSatisfy { $0.isASCII && $0.isNumber }
     }
 

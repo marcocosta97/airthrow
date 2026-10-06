@@ -181,6 +181,8 @@ public enum MediaFailureReason: String, Codable, Sendable {
     case preparationRequired = "preparation_required"
     case preparerUnavailable = "preparer_unavailable", preparationFailed = "preparation_failed"
     case preparationLimit = "preparation_limit", deliveryUnavailable = "delivery_unavailable"
+    case preparationStorageLimit = "preparation_storage_limit"
+    case preparationDiskSpace = "preparation_disk_space", preparationStalled = "preparation_stalled"
 
     public var message: String {
         switch self {
@@ -194,6 +196,9 @@ public enum MediaFailureReason: String, Codable, Sendable {
         case .preparerUnavailable: "Preparing this video needs FFmpeg and ffprobe. Install FFmpeg with Homebrew, then load the link again."
         case .preparationFailed: "Could not prepare the video. Check the source, connection and available disk space, then load it again."
         case .preparationLimit: "Preparation exceeded a size, duration or time limit, or there is insufficient disk space. Try a smaller or lower-bitrate source."
+        case .preparationStorageLimit: "Preparing this video reached the configured space limit. Increase Maximum preparation space in Settings → Prepared video storage, or choose a lower output resolution, then load again."
+        case .preparationDiskSpace: "There is not enough free disk space to prepare this video. Free some space on the Mac, then load again."
+        case .preparationStalled: "Preparing this part of the video timed out. Check the source connection or choose a lower output resolution, then load again."
         case .deliveryUnavailable: "Could not serve the prepared video. Connect the Mac and receiver to the same local network, then load it again."
         case .network: "Could not reach the media. Check the connection and try loading it again."
         case .sourceUnavailable: "The media is unavailable or requires access. Try a fresh direct video URL."
@@ -225,6 +230,8 @@ public struct PlaybackSnapshot: Codable, Sendable, Equatable {
     public var errorReason: MediaFailureReason?
     /// Additive protocol-v1 field; playback state remains loading during extraction.
     public var loadingPhase: String?
+    /// Finite prepared media is playable while the producer continues ahead.
+    public var preparationInProgress: Bool?
     /// Selected processing path, not evidence that playback has started.
     public var playbackPath: PlaybackPath?
     /// Quality label of the selected presentation (for example "720p60"),
