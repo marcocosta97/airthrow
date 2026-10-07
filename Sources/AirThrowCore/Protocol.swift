@@ -60,16 +60,16 @@ public enum PlaybackPath: String, Codable, Sendable {
         switch self {
         case .direct: "Direct playback"
         case .remux: "Remuxed playback"
-        case .audioConversion: "Audio conversion"
-        case .videoConversion: "Video conversion"
+        case .audioConversion: "Audio re-encoding"
+        case .videoConversion: "Video re-encoding"
         }
     }
     public var explanation: String {
         switch self {
         case .direct: "Tier 1: Plays the source directly — the receiver fetches a remote URL, or this Mac serves a local file in place — with no prepared copy."
         case .remux: "Tier 2: Copies audio and video into compatible media on this Mac without re-encoding. Preparation may continue during playback."
-        case .audioConversion: "Tier 3: Copies the video and converts audio to AAC on this Mac. Preparation may continue during playback."
-        case .videoConversion: "Tier 4: Converts SDR video on this Mac. Automatic conversion is H.264 up to 1080p; an explicit enhancement may produce 1080p H.264 or 4K HEVC. Uses more processing and may take longer to start."
+        case .audioConversion: "Tier 3: Copies the video and re-encodes audio to AAC on this Mac. Preparation may continue during playback."
+        case .videoConversion: "Tier 4: Re-encodes SDR video on this Mac. Automatic re-encoding is H.264 up to 1080p; an explicit enhancement may produce 1080p H.264 or 4K HEVC. Uses more processing and may take longer to start."
         }
     }
 }
@@ -192,7 +192,7 @@ public enum MediaFailureReason: String, Codable, Sendable {
         case .unsupportedWebsite: "Choose a public YouTube video, playlist, Mix or live stream. Sign-in and not-yet-started premieres are not supported."
         case .signInRequired: "YouTube asked for sign-in verification. Add or refresh cookies in Settings → YouTube access, then load again. A cookies file is a snapshot and can expire; a browser source stays current."
         case .liveUnsupported: "This live stream has no supported presentation. Protected media, unsafe tracks and some delivery methods are unsupported."
-        case .preparationRequired: "This source cannot use the current preparation settings. Allow video conversion for supported SDR sources, or choose another source. HDR, protected media and some delivery methods are unsupported."
+        case .preparationRequired: "This source cannot use the current preparation settings. Allow video re-encoding for supported SDR sources, or choose another source. HDR, protected media and some delivery methods are unsupported."
         case .preparerUnavailable: "Preparing this video needs FFmpeg and ffprobe. Install FFmpeg with Homebrew, then load the link again."
         case .preparationFailed: "Could not prepare the video. Check the source, connection and available disk space, then load it again."
         case .preparationLimit: "Preparation exceeded a size, duration or time limit, or there is insufficient disk space. Try a smaller or lower-bitrate source."

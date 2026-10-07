@@ -132,16 +132,16 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Section("Media preparation") {
-                Toggle("Avoid video conversion", isOn: Binding(
+                Toggle("Avoid video re-encoding", isOn: Binding(
                     get: { !controller.allowVideoConversion },
                     set: { controller.setVideoConversionAllowed(!$0) }))
-                Text("Automatic selection copies compatible video and converts audio when needed, avoiding video encoding. An enhancement in Video options still processes that video.")
+                Text("Automatic selection copies compatible video and re-encodes audio when needed. Enhancements in Video options can still re-encode video.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Toggle("Prefer higher quality", isOn: Binding(
                     get: { controller.preferQuality },
                     set: { controller.setPreferQuality($0) }))
-                Text("Automatic selection favors quality within your conversion preference, even if more processing is needed. Applies to the next load or source change; enhancements are unchanged.")
+                Text("Automatic selection favors quality within your re-encoding preference, even if more processing is needed. Applies to the next load or source change; enhancements are unchanged.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }

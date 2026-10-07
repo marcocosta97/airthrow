@@ -312,7 +312,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                     throw AppFailure(.invalidRequest, "Choose allow-video or avoid-video.")
                 }
                 controller.setVideoConversionAllowed(allowed)
-                return Response(message: "Conversion preference saved. Applies to the next load or source choice.", status: controller.snapshot)
+                return Response(message: "Re-encoding preference saved. Applies to the next load or source choice.", status: controller.snapshot)
             }
             return Response(message: request.command == .status ? controller.snapshot.state.rawValue : "Done.", status: controller.snapshot)
         } catch {

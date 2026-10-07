@@ -9,8 +9,7 @@
 <p align="center">
   <a href="#installation">Installation</a> ·
   <a href="#build-and-run">Build</a> ·
-  <a href="#play-a-video">Usage</a> ·
-  <a href="#limitations">Limitations</a>
+  <a href="#play-a-video">Usage</a>
 </p>
 
 AirThrow sends video links and local files to Apple TV and other video-capable
@@ -70,30 +69,25 @@ the laptop lid closed, use [Amphetamine](https://apps.apple.com/app/amphetamine/
 or a similar tool configured to prevent lid-close sleep. AirThrow does not manage
 that setting.
 
-## Website links (experimental)
+## Website links
 
 With `yt-dlp`, `deno`, and `ffmpeg` installed, paste a public YouTube watch,
 Shorts, `youtu.be`, playlist, or Mix link in the same field. AirThrow finds the
-best playable source, preferring one the receiver can play directly. Dedicated
-playlist links create a queue of up to 100 items.
+best playable source, preferring one the receiver can play directly.
 
 Other public video pages use yt-dlp's automatic extractor selection. Playback
 depends on the returned media. DRM and media requiring custom request headers
 are unsupported.
 
 In **Settings → Cookies**, choose a browser or a Netscape `cookies.txt` file.
-Files automatically show recognized services; browser extraction has a services
-dropdown. YouTube, Twitch, X, Instagram and Vimeo are supported. Only the loaded
+YouTube, Twitch, X, Instagram and Vimeo are supported. Only the loaded
 website’s cookies are used; values are never shown or logged. Safari needs Full
-Disk Access; Chrome-family browsers may ask for Keychain access. Account access
-does not guarantee receiver playback.
+Disk Access; Chrome-family browsers may ask for Keychain access.
 
-## Local files (experimental)
+## Local files
 
 Choose a local video with the folder button, drop it on the source area, or pass
-its path to `athrow open`. MP4, M4V, MOV, MKV, and WebM are supported. A
-receiver-compatible MP4 or MOV is served in place with no size limit; other
-containers may be prepared or converted on the Mac first.
+its path to `athrow open`.
 
 ## Limitations
 
@@ -103,6 +97,22 @@ containers may be prepared or converted on the Mac first.
   processing and surround preservation are unsupported.
 - Image-based subtitles, subtitle burn-in and subtitles in Mac-prepared live
   streams are unsupported.
+
+### Compatibility
+
+🟢 Direct · 🔁 Remux · 🔧 Re-encode · ⏳ WIP · 🚫 Incompatible
+
+| Input | Support / path |
+|---|:---:|
+| MP4/M4V/MOV · H.264 or HEVC + AAC | 🟢 |
+| HLS URL · H.264 or HEVC + AAC | 🟢 |
+| MKV · H.264 or HEVC + AAC | 🔁 |
+| MKV · H.264 or HEVC + FLAC/Opus | 🔧 audio |
+| WebM · VP9/AV1 SDR 8-bit + Opus | 🔧 |
+| HDR/DV processing | ⏳ |
+| DRM-protected media | 🚫 |
+
+Direct playback needs no media processing on the Mac; remux repackages existing tracks, while re-encoding processes audio and/or video on the Mac.
 
 ## License
 

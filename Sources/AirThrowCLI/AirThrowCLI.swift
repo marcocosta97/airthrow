@@ -21,7 +21,7 @@ struct AirThrowCLI {
       athrow sources         List available quality/source choices and their IDs
       athrow source ID       Reload a listed source, paused (or use automatic)
       athrow conversion allow-video|avoid-video
-                                Set video conversion preference for future loads
+                                Set video re-encoding preference for future loads
       athrow show            Open the controller and choose a receiver
 
     --json is available on every command. Receiver selection uses the app's
@@ -90,7 +90,7 @@ struct AirThrowCLI {
             print("\(response.message)\nState: \(status.state.rawValue)\nExternal video: \(status.externalPlaybackActive ? "yes" : "no")")
             print("Title: \(status.title)")
             if let path = status.playbackPath { print("Playback path: \(path.label) (tier \(path.tier))") }
-            if let allowed = status.allowVideoConversion { print("Video conversion: \(allowed ? "allowed" : "avoided")") }
+            if let allowed = status.allowVideoConversion { print("Video re-encoding: \(allowed ? "allowed" : "avoided")") }
             if showSources, let sources = status.sources {
                 print("Source selection: \(status.selectedSourceID ?? "automatic")")
                 for source in sources {

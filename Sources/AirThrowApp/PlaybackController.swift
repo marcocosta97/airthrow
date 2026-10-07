@@ -873,7 +873,7 @@ final class PlaybackController: ObservableObject {
                 if case let PreparationFailure.videoConversionRequired(height, frameRate) = error {
                     self.selectedQuality = Self.qualityLabel(height: height, frameRate: frameRate)
                     self.fail(.preparationRequired,
-                              message: "This source needs video conversion. Turn off Avoid video conversion in Settings, then reload.")
+                              message: "This source needs video re-encoding. Turn off Avoid video re-encoding in Settings, then reload.")
                     return
                 }
                 if case PreparationFailure.conversionWouldDownscale = error {

@@ -49,7 +49,7 @@ public struct MediaCandidate: Sendable {
     public func unavailableReason(for policy: ConversionPolicy) -> String? {
         if let unavailableReason { return unavailableReason }
         if policy == .avoidVideo, source.playbackPath == .videoConversion {
-            return "Video conversion is off. This source needs video conversion."
+            return "Video re-encoding is off. This source needs video re-encoding."
         }
         return nil
     }
