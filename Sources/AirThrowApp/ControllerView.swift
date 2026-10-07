@@ -349,7 +349,14 @@ struct ControllerView: View {
             dropTargeted = $0
         }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: dropTargeted)
-        .onAppear { if !dropTargeted { urlFocused = true } }
+        .onAppear {
+            // An already loaded session should open ready for transport keys.
+            urlFocused = status.state == .idle && !dropTargeted
+        }
+        .onChange(of: canControl) { _, ready in
+            // Loads from the CLI, shared links and playlists also leave editing.
+            if ready { urlFocused = false }
+        }
     }
 
     private func section<Content: View>(
