@@ -61,16 +61,33 @@ final class PlaybackController: ObservableObject {
     /// `.original` for every new item; a source-quality change keeps it.
     private var videoEnhancement: VideoEnhancement = .original
     @Published private(set) var enhancementOutput4K = false
+    private var inspectedSourceHeight: (url: URL, height: Double)?
+    func sourceHeight(for sourceID: String? = nil) -> Double? {
+        let source: ResolvedSource?
+        let height: Double?
+        if let sourceID {
+            if sourceID == "automatic" {
+                source = try? MediaSelector.select(sourceCandidates, policy: .allowVideo, preferQuality: preferQuality)
+                height = source.flatMap { Self.candidatesHeight(for: $0, in: sourceCandidates) }
+            } else if let index = sourceCandidates.indices.first(where: { sourceOptionID($0) == sourceID }) {
+                source = sourceCandidates[index].source
+                height = sourceCandidates[index].height
+            } else { return nil }
+        } else {
+            source = selectedSource
+            height = source.flatMap { Self.candidatesHeight(for: $0, in: sourceCandidates) }
+        }
+        return height ?? (inspectedSourceHeight?.url == source?.url ? inspectedSourceHeight?.height : nil)
+    }
+    func canUpscale(output4K: Bool, sourceID: String? = nil) -> Bool {
+        guard let height = sourceHeight(for: sourceID) else { return true }
+        return height < (output4K ? 2160 : 1080)
+    }
     var requires4KOutput: Bool {
-        guard let selectedSource else { return false }
-        return (sourceCandidates.first {
-            $0.source.url == selectedSource.url && $0.source.audio?.url == selectedSource.audio?.url
-        }?.height ?? 0) > 1080
+        (sourceHeight() ?? 0) > 1080
     }
     func requires4KOutput(for sourceID: String?) -> Bool {
-        guard let sourceID else { return requires4KOutput }
-        guard let index = sourceCandidates.indices.first(where: { sourceOptionID($0) == sourceID }) else { return false }
-        return (sourceCandidates[index].height ?? 0) > 1080
+        (sourceHeight(for: sourceID) ?? 0) > 1080
     }
     private var originalSourceURL: URL?
     private var sourceCandidates: [MediaCandidate] = []
@@ -585,7 +602,9 @@ final class PlaybackController: ObservableObject {
                                                             ? subtitlePreference : nil)
         let retryRoute = hasOpenedPicker || player.isExternalPlaybackActive
         let retainedCandidates = fallback == nil ? [] : sourceCandidates
+        let retainedInspection = changingSource || retry || fallback != nil ? inspectedSourceHeight : nil
         resetItem(keepPlayerItem: true, preserveQueue: preservingQueue)
+        inspectedSourceHeight = retainedInspection
         loadPreferences = preferences
         subtitlePreference = preferences.subtitle
         videoEnhancement = preferences.enhancement
@@ -1284,6 +1303,7 @@ final class PlaybackController: ObservableObject {
         }
         loading = false; resolving = false; preparing = false; websiteURL = nil; retriedResolution = false
         selectedSource = nil
+        inspectedSourceHeight = nil
         selectedQuality = nil
         videoEnhancement = .original
         enhancementOutput4K = false
@@ -1486,6 +1506,17 @@ final class PlaybackController: ObservableObject {
             hasPlayed = true
             player.isMuted = false
             notice = nil
+        }
+        // Inspect the original presentation only: an enhanced item's 2160p
+        // output must not become the source resolution for future choices.
+        if preparedMedia == nil, videoEnhancement == .original,
+           let source = selectedSource, let height = item.map({ Double($0.presentationSize.height) }),
+           height.isFinite, height > 0 {
+            inspectedSourceHeight = (source.url, height)
+            if Self.candidatesHeight(for: source, in: sourceCandidates) == nil {
+                selectedQuality = Self.qualityLabel(height: Int(min(height.rounded(), 100_000)), frameRate: nil)
+            }
+            if height > 1080 && !enhancementOutput4K { enhancementOutput4K = true }
         }
         var next = PlaybackSnapshot()
         next.title = title

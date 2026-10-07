@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 #if SWIFT_PACKAGE
 import AirThrowCore
 #endif
@@ -66,6 +67,15 @@ struct VideoMenuView: View {
     private var requires4K: Bool {
         controller.requires4KOutput(for: draftVideo == videoSelection ? nil : draftVideo)
     }
+    private func canUpscale(output4K: Bool) -> Bool {
+        controller.canUpscale(output4K: output4K, sourceID: draftVideo == videoSelection ? nil : draftVideo)
+    }
+    private func normalizeUpscaleOutput() {
+        if requires4K || (draftAction == .upscale && !canUpscale(output4K: false)) {
+            draftOutput4K = true
+        }
+        if draftAction == .upscale && !canUpscale(output4K: true) { draftAction = .original }
+    }
     private var hasChanges: Bool {
         draftVideo != videoSelection || draftAction != enhancementAction
             || (draftAction != .original && draftOutput4K != controller.enhancementOutput4K)
@@ -80,6 +90,10 @@ struct VideoMenuView: View {
     private var outputExplanation: String {
         if isLive { return "Enhancement is available only for on-demand video." }
         if !mediaReady { return "Video options become available when the source is ready." }
+        if !canUpscale(output4K: true) { return "The source is already 4K or higher. Upscaling is unavailable." }
+        if draftAction == .upscale && !canUpscale(output4K: false) {
+            return "The source is already 1080p. Upscale uses 4K."
+        }
         if draftAction == .original { return "Choose an enhancement to enable output resolution." }
         if requires4K { return "This source requires 4K output and a compatible receiver." }
         return "4K needs a compatible receiver."
@@ -183,10 +197,18 @@ struct VideoMenuView: View {
                     }
                     Divider()
                 }
-                Text("Enhancement").font(.subheadline.weight(.medium))
+                HStack {
+                    Text("Enhancement").font(.subheadline.weight(.medium))
+                    Spacer(minLength: 4)
+                    if let height = controller.sourceHeight(for: draftVideo == videoSelection ? nil : draftVideo) {
+                        Text("Source " + String(Int(min(height.rounded(), 100_000))) + "p")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
                 Picker("Enhancement", selection: $draftAction) {
                     ForEach(EnhancementAction.allCases, id: \.self) { option in
                         Text(option.label).tag(option)
+                            .disabled(option == .upscale && !canUpscale(output4K: true))
                     }
                 }
                 .pickerStyle(.radioGroup)
@@ -195,14 +217,12 @@ struct VideoMenuView: View {
                 Text("Upscale output")
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(canChooseOutput ? Color.primary : Color.secondary)
-                Picker("Upscale output", selection: $draftOutput4K) {
-                    Text("1080p").tag(false).disabled(requires4K)
-                    Text("4K").tag(true)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
+                UpscaleOutputPicker(output4K: $draftOutput4K,
+                    allow1080: canChooseOutput && !requires4K
+                        && (draftAction != .upscale || canUpscale(output4K: false)),
+                    allow4K: canChooseOutput
+                        && (draftAction != .upscale || canUpscale(output4K: true)))
                 .frame(maxWidth: .infinity)
-                .disabled(!canChooseOutput)
                 .help(outputHelp)
                 Text(outputExplanation)
                     .font(.caption).foregroundStyle(.secondary)
@@ -223,7 +243,11 @@ struct VideoMenuView: View {
             if showingOptions { resetDraft() }
         }
         .onChange(of: draftVideo) { _, _ in
-            if requires4K { draftOutput4K = true }
+            normalizeUpscaleOutput()
+        }
+        .onChange(of: draftAction) { _, _ in normalizeUpscaleOutput() }
+        .onChange(of: controller.sourceHeight(for: draftVideo == videoSelection ? nil : draftVideo)) { _, _ in
+            if showingOptions { normalizeUpscaleOutput() }
         }
     }
 
@@ -302,6 +326,42 @@ private enum EnhancementAction: CaseIterable, Hashable {
         case .original: .original
         case .upscale: output4K ? .upscale4K : .upscale1080
         case .cleanUpUpscale: output4K ? .cleanup4K : .cleanup1080
+        }
+    }
+}
+
+/// SwiftUI's segmented Picker does not honor per-option disabled state on macOS.
+/// Keep selection in SwiftUI and let the native control enforce availability.
+private struct UpscaleOutputPicker: NSViewRepresentable {
+    @Binding var output4K: Bool
+    var allow1080: Bool
+    var allow4K: Bool
+
+    func makeCoordinator() -> Coordinator { Coordinator(output4K: $output4K) }
+
+    func makeNSView(context: Context) -> NSSegmentedControl {
+        let control = NSSegmentedControl(labels: ["1080p", "4K"], trackingMode: .selectOne,
+            target: context.coordinator, action: #selector(Coordinator.choose(_:)))
+        control.segmentDistribution = .fill
+        control.setAccessibilityLabel("Upscale output")
+        return control
+    }
+
+    func updateNSView(_ control: NSSegmentedControl, context: Context) {
+        context.coordinator.output4K = $output4K
+        control.selectedSegment = output4K ? 1 : 0
+        control.isEnabled = allow1080 || allow4K
+        control.setEnabled(allow1080, forSegment: 0)
+        control.setEnabled(allow4K, forSegment: 1)
+    }
+
+    @MainActor final class Coordinator: NSObject {
+        var output4K: Binding<Bool>
+        init(output4K: Binding<Bool>) { self.output4K = output4K }
+        @objc func choose(_ sender: NSSegmentedControl) {
+            guard sender.selectedSegment >= 0,
+                  sender.isEnabled(forSegment: sender.selectedSegment) else { return }
+            output4K.wrappedValue = sender.selectedSegment == 1
         }
     }
 }

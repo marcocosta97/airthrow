@@ -83,7 +83,6 @@ struct ControllerView: View {
     }
     private var playbackDetail: String {
         var parts: [String] = []
-        if status.preparationInProgress == true { parts.append("Preparing ahead") }
         if let activeEnhancement { parts.append(activeEnhancement.label) }
         if let path = status.playbackPath { parts.append(path.label) }
         if let quality = status.quality {
@@ -93,7 +92,7 @@ struct ControllerView: View {
     }
     private var playbackDetailHelp: String {
         if status.preparationInProgress == true {
-            return "Ready to play while this Mac prepares the remaining video. Seeking is limited to the prepared portion."
+            return "This Mac is preparing more video. Playback can continue."
         }
         if let activeEnhancement {
             return "\(activeEnhancement.label): prepared on this Mac. Changing it reloads from the start, paused. 4K needs a compatible receiver."
@@ -159,6 +158,12 @@ struct ControllerView: View {
                                 .textSelection(.enabled)
                             if showsVideoMenu {
                                 HStack(spacing: 8) {
+                                    if status.preparationInProgress == true {
+                                        ProgressView()
+                                            .controlSize(.mini)
+                                            .help("Preparing video on this Mac")
+                                            .accessibilityLabel("Preparing video on this Mac")
+                                    }
                                     if !playbackDetail.isEmpty {
                                         Text(playbackDetail)
                                             .font(.caption).foregroundStyle(.secondary)
@@ -246,7 +251,7 @@ struct ControllerView: View {
                             Image(systemName: "gobackward.10")
                         }
                         .disabled(!PlaybackPolicy.canSeek(status))
-                        .help("Back 10 seconds").accessibilityLabel("Back 10 seconds")
+                        .help("Back 10 seconds (←)").accessibilityLabel("Back 10 seconds")
 
                         Button {
                             if isPlaying { controller.pause() } else { perform { try controller.play() } }
@@ -256,7 +261,7 @@ struct ControllerView: View {
                         }
                         .buttonStyle(.bordered)
                         .disabled(!canControl)
-                        .keyboardShortcut(.space, modifiers: [])
+                        .help(isPlaying ? "Pause (Space)" : "Play (Space)")
 
                         Button { controller.stop() } label: { Image(systemName: "stop.fill") }
                             .disabled(status.state == .idle && status.receiverWaiting != true)
@@ -266,7 +271,7 @@ struct ControllerView: View {
                             Image(systemName: "goforward.10")
                         }
                         .disabled(!PlaybackPolicy.canSeek(status))
-                        .help("Forward 10 seconds").accessibilityLabel("Forward 10 seconds")
+                        .help("Forward 10 seconds (→)").accessibilityLabel("Forward 10 seconds")
 
                         if let queue = status.queue {
                             Button { perform { try controller.next() } } label: { Image(systemName: "forward.end.fill") }

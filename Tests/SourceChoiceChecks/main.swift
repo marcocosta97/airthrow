@@ -178,6 +178,7 @@ struct SourceChoiceChecks {
         try await downscaleTargetGated(website: website, high: candidate(audioURL, title: "4K source",
                                                                    id: "native-2160", height: 2160),
                                        low: candidate(videoURL, title: "1080p source", id: "gated-1080", height: 1080))
+        try await nativeSourceHeight(base: base)
         try await sourceChoiceDuringPreparation(website: website, high: remux1080,
                                                 low: candidate(videoURL, title: "Remux 720",
                                                                id: "remux-720", height: 720,
@@ -275,6 +276,8 @@ struct SourceChoiceChecks {
         let status = try await settle(controller)
         try check(status.quality == "2160p" && controller.requires4KOutput && controller.enhancementOutput4K,
                   "Source above 1080p did not select the 4K enhancement target")
+        try check(!controller.canUpscale(output4K: false) && !controller.canUpscale(output4K: true),
+                  "A 4K source offered a redundant upscale")
         try failure(.unsupportedOperation) { try controller.setEnhancementOutput4K(false) }
         try failure(.unsupportedOperation) { try controller.selectEnhancement(.cleanup1080) }
         let item = controller.player.currentItem
@@ -286,6 +289,8 @@ struct SourceChoiceChecks {
         let lowID = status.sources!.first(where: { $0.quality == "1080p" })!.id
         try controller.applyVideoOptions(sourceID: lowID, enhancement: .original, output4K: false)
         let lower = try await settle(controller)
+        try check(!controller.canUpscale(output4K: false) && controller.canUpscale(output4K: true),
+                  "A 1080p source did not reserve pure upscale for 4K")
         try check(!controller.enhancementOutput4K, "Original kept the previous source's 4K requirement")
         let highID = lower.sources!.first(where: { $0.quality == "2160p" })!.id
         try controller.applyVideoOptions(sourceID: highID, enhancement: .original, output4K: false)
@@ -295,6 +300,28 @@ struct SourceChoiceChecks {
         try check(controller.enhancementOutput4K, "High-resolution Original lost its 4K requirement after loading")
         print("PASS source above 1080p requires 4K output and rejects 1080p enhancement")
         await controller.shutdownAndWait()
+    }
+
+    static func nativeSourceHeight(base: URL) async throws {
+        let url = base.appendingPathComponent("fullhd.mp4")
+        let controller = PlaybackController(resolveCandidates: { _ in
+            [MediaCandidate(source: ResolvedSource(url: url), id: "native-unknown")]
+        }, prepareSource: nil)
+        try controller.load(url.absoluteString)
+        _ = try await settle(controller)
+        let deadline = Date().addingTimeInterval(5)
+        while controller.sourceHeight() == nil, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+            controller.refresh()
+        }
+        try check(controller.sourceHeight() == 1080 && controller.snapshot.quality == "1080p",
+                  "Native inspection did not discover the original source height")
+        try check(!controller.canUpscale(output4K: false) && controller.canUpscale(output4K: true),
+                  "A direct 1080p source offered redundant 1080p upscale")
+        controller.stop()
+        try check(controller.sourceHeight() == nil, "Stop retained source inspection")
+        await controller.shutdownAndWait()
+        print("PASS native source resolution disables redundant upscale and clears on Stop")
     }
 
     static func videoChoiceKeepsAudioLanguage(website: URL, videoURL: URL, audioURL: URL,

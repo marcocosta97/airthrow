@@ -57,6 +57,11 @@ FILES = {
     '/slow.mp4': (out / 'video.mp4').read_bytes(),
 }
 CONTENT_TYPES = {}
+run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-n', '-f', 'lavfi',
+     '-i', 'testsrc2=size=1920x1080:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
+     '-t', '1', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+     '-c:a', 'aac', '-ac', '2', '-movflags', '+faststart', out / 'fullhd.mp4'])
+FILES['/fullhd.mp4'] = (out / 'fullhd.mp4').read_bytes()
 if args.yt_dlp:
     print(f'Generic extractor: yt-dlp {run([args.yt_dlp, "--version"]).stdout.strip()}', flush=True)
     run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-n', '-i', out / 'audio.mp4',

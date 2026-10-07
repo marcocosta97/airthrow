@@ -117,6 +117,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if window == nil {
             let window = ControllerWindow(contentRect: NSRect(x: 0, y: 0, width: ControllerMetrics.width, height: Self.controllerHeight), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
             window.presentation = presentation
+            window.playbackKeyAction = { [weak self] key in
+                guard let self, !self.presentation.settingsVisible else { return false }
+                let status = self.controller.snapshot
+                do {
+                    switch key {
+                    case .toggle:
+                        guard PlaybackPolicy.canControl(status) else { return false }
+                        if PlaybackPolicy.isPlaying(status) { self.controller.pause() }
+                        else { try self.controller.play() }
+                    case .backward, .forward:
+                        guard PlaybackPolicy.canSeek(status) else { return false }
+                        try self.controller.skip(by: key == .backward ? -10 : 10)
+                    }
+                } catch { self.controller.displayError(error) }
+                return true
+            }
             window.title = "AirThrow"
             window.backgroundColor = SurfaceColor.window
             window.titlebarAppearsTransparent = true
@@ -507,7 +523,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 /// Escape dismisses the Settings page through the native responder chain,
 /// including when focus is on the window rather than a form control.
 @MainActor
-private final class ControllerWindow: NSWindow {
+private final class ControllerWindow: PlaybackKeyboardWindow {
     weak var presentation: ControllerPresentation?
 
     override func cancelOperation(_ sender: Any?) {

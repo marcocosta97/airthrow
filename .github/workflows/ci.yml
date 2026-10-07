@@ -33,6 +33,9 @@ jobs:
       - name: Core checks
         run: .build/debug/CoreChecks
 
+      - name: Window keyboard checks (headless)
+        run: bash scripts/keyboard-checks.sh
+
       - name: Source registry checks
         run: |
           .build/debug/SourceRegistryChecks
