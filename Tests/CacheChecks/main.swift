@@ -23,14 +23,66 @@ private final class LateResourceProvider {
 @main
 @MainActor
 struct CacheChecks {
+    private static let started = ContinuousClock().now
+    @MainActor private final class SeekOutcome { var finished: Bool? }
+
+    static func report(_ message: String) {
+        print("[\(started.duration(to: ContinuousClock().now))] \(message)")
+        fflush(nil)
+    }
+
+    /// Poll the callback rather than awaiting AVPlayer's async seek indefinitely.
+    /// A late callback only updates this seek's state and cannot resume twice.
+    static func seek(_ player: AVPlayer, to seconds: Double, label: String,
+                     timeout: Duration = .seconds(30),
+                     issueSeek: ((CMTime, @escaping @Sendable (Bool) -> Void) -> Void)? = nil) async throws {
+        report("CHECK seek: \(label), target \(seconds)s")
+        player.pause()
+        let outcome = SeekOutcome()
+        let completion: @Sendable (Bool) -> Void = { finished in
+            Task { @MainActor in outcome.finished = finished }
+        }
+        let target = CMTime(seconds: seconds, preferredTimescale: 600)
+        if let issueSeek { issueSeek(target, completion) }
+        else { player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero, completionHandler: completion) }
+        defer { if outcome.finished == nil { player.currentItem?.cancelPendingSeeks() } }
+        let deadline = ContinuousClock().now.advanced(by: timeout)
+        while outcome.finished == nil, ContinuousClock().now < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        let error = player.currentItem?.error as NSError?
+        let diagnostic = "item status \(player.currentItem?.status.rawValue ?? -1), position \(player.currentTime().seconds), error \(error?.domain ?? "none")/\(error?.code ?? 0)"
+        try check(outcome.finished != nil, "\(label) did not complete within \(timeout): \(diagnostic)")
+        try check(outcome.finished == true, "\(label) was interrupted: \(diagnostic)")
+        try check(abs(player.currentTime().seconds - seconds) < 0.2, "\(label) ended at the wrong position: \(diagnostic)")
+    }
+
+    static func seekTimeoutCheck() async throws {
+        var lateCompletion: (@Sendable (Bool) -> Void)?
+        let start = ContinuousClock().now
+        do {
+            try await seek(AVPlayer(), to: 108, label: "Unanswered seek fixture", timeout: .milliseconds(100),
+                           issueSeek: { _, completion in lateCompletion = completion })
+            try check(false, "An unanswered seek escaped its deadline")
+        } catch let error as NSError {
+            try check(error.domain == "CacheChecks" && error.localizedDescription.contains("did not complete within"),
+                      "An unanswered seek lost its timeout diagnostic: \(error)")
+        }
+        lateCompletion?(true)
+        await Task.yield()
+        try check(start.duration(to: ContinuousClock().now) < .seconds(2), "Seek timeout waited for its callback")
+        report("PASS unanswered seek times out and tolerates a late completion")
+    }
+
     static func check(_ condition: Bool, _ message: String) throws {
         if !condition { throw NSError(domain: "CacheChecks", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
     }
     static func main() async {
         do { try await run() }
-        catch { print("FAIL cache checks: \(error)"); exit(1) }
+        catch { report("FAIL cache checks: \(error)"); exit(1) }
     }
     static func run() async throws {
+        try await seekTimeoutCheck()
         let base = CommandLine.arguments[1]
         let directory = URL(fileURLWithPath: CommandLine.arguments[2])
         try? FileManager.default.removeItem(at: directory.appendingPathComponent("cache-jobs.txt"))
@@ -48,6 +100,7 @@ struct CacheChecks {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("athrow-prepared-v1")
         MediaPreparer.cleanAbandonedFiles()
         let before = Set((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [])
+        report("CHECK Initial cache preparation")
         let prepared = try await preparer.prepare(source)
         defer { prepared.stop() }
         try check(prepared.usesBoundedCache && prepared.sourceDuration! > 119 && !prepared.isProducing,
@@ -62,6 +115,7 @@ struct CacheChecks {
             let (data, response) = try await session.data(for: request)
             return (data, response as! HTTPURLResponse)
         }
+        report("CHECK Cached manifest, HEAD and byte ranges")
         let (manifest, response) = try await fetch()
         let text = String(decoding: manifest, as: UTF8.self)
         try check(response.statusCode == 200 && text.contains("#EXT-X-PLAYLIST-TYPE:VOD")
@@ -76,10 +130,12 @@ struct CacheChecks {
         let workspace = root.appendingPathComponent(workspaces.first!)
         func chunks() throws -> [String] { try FileManager.default.contentsOfDirectory(atPath: workspace.path).filter { $0.hasPrefix("chunk") }.sorted() }
         try check(try chunks() == ["chunk0"], "Paused preparation converted the whole input")
+        report("CHECK Demand generation for a distant chunk")
         prepared.updatePlaybackPosition(60)
         let far = try await fetch("segment000010.ts")
         try check(far.1.statusCode == 200 && far.0.count > 1000
                   && (try chunks()) == ["chunk0", "chunk10"], "Distant seek: HTTP \(far.1.statusCode), chunks \(try chunks())")
+        report("CHECK Concurrent requests for one chunk")
         let repeated = try await withThrowingTaskGroup(of: Int.self) { group in
             let url = prepared.url.deletingLastPathComponent().appendingPathComponent("segment000015.ts")
             for _ in 0..<6 { group.addTask {
@@ -94,6 +150,7 @@ struct CacheChecks {
         let log = directory.appendingPathComponent("cache-jobs.txt")
         let attempts = try String(contentsOf: log, encoding: .utf8).split(separator: "\n")
         try check(attempts.count == 3, "Concurrent requests did not coalesce: \(attempts)")
+        report("CHECK Cache eviction and regeneration")
         prepared.updatePlaybackPosition(90)
         try await Task.sleep(for: .seconds(16))
         prepared.updatePlaybackPosition(90)
@@ -107,9 +164,10 @@ struct CacheChecks {
             let (_, denied) = try await fetch(name)
             try check(denied.statusCode == 404, "Private/invalid cached route was served: \(name)")
         }
-        print("PASS large input beyond budget, finite VOD, demand-only generation, concurrent requests, eviction and regeneration")
+        report("PASS large input beyond budget, finite VOD, demand-only generation, concurrent requests, eviction and regeneration")
 
         // AVPlayer must keep the full finite timeline and seek beyond the cache.
+        report("CHECK Native VOD readiness")
         let player = AVPlayer()
         let item = AVPlayerItem(url: prepared.url)
         player.replaceCurrentItem(with: item)
@@ -117,10 +175,10 @@ struct CacheChecks {
         while item.status == .unknown, Date() < deadline { try await Task.sleep(for: .milliseconds(50)) }
         try check(item.status == .readyToPlay && abs(item.duration.seconds - prepared.sourceDuration!) < 0.2,
                   "Native player did not expose the finite VOD duration: \(String(describing: item.error))")
-        let moved = await player.seek(to: CMTime(seconds: 108, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
-        try check(moved && abs(player.currentTime().seconds - 108) < 0.2, "Native distant seek failed")
+        try await seek(player, to: 108, label: "Native distant seek")
         // Exercise discontinuity playback with a real local player; no mock route.
-        _ = await player.seek(to: CMTime(seconds: 4, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        try await seek(player, to: 4, label: "Native chunk-boundary rewind")
+        report("CHECK Native playback across chunk boundaries")
         player.play()
         deadline = Date().addingTimeInterval(20)
         while player.currentTime().seconds < 13, item.status != .failed, Date() < deadline {
@@ -128,7 +186,8 @@ struct CacheChecks {
         }
         try check(item.status == .readyToPlay && player.currentTime().seconds >= 13,
                   "Native playback stalled at an independently encoded chunk boundary: \(String(describing: item.error))")
-        _ = await player.seek(to: CMTime(seconds: 118, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        try await seek(player, to: 118, label: "Native final-chunk seek")
+        report("CHECK Native playback through the final chunk")
         player.play()
         deadline = Date().addingTimeInterval(15)
         while player.currentTime().seconds < 119.8, item.status != .failed, Date() < deadline {
@@ -138,18 +197,21 @@ struct CacheChecks {
                   "The final fractional-duration chunk did not play")
         player.pause(); player.replaceCurrentItem(with: nil)
         prepared.cancelProduction()
+        report("CHECK Prepared delivery after handoff cancellation")
         let retainedResponse = try await fetch("segment000019.ts")
         try check(retainedResponse.1.statusCode == 200, "Handoff cancellation disabled already-prepared delivery")
         prepared.stop(); await prepared.waitForProducer()
         try await Task.sleep(for: .milliseconds(100))
         try check(!FileManager.default.fileExists(atPath: workspace.path), "Stop retained the cache workspace")
-        print("PASS local AVPlayer finite duration, distant seek and playback across chunk boundaries")
+        report("PASS local AVPlayer finite duration, distant seek and playback across chunk boundaries")
 
         for enhancement in [VideoEnhancement.upscale1080, .cleanup1080, .upscale4K, .cleanup4K] {
+            report("CHECK Cached enhancement preparation: \(enhancement.rawValue)")
             let short = ResolvedSource(url: URL(string: base + "/combined.mp4")!, needsPreparation: true).withEnhancement(enhancement)
             let enhanced = try await MediaPreparer(environment: environment).prepare(short)
             try check(enhanced.usesBoundedCache && enhanced.videoHeight == enhancement.targetHeight,
                       "Cached \(enhancement.rawValue) output quality is incorrect")
+            report("CHECK Cached enhancement native readiness: \(enhancement.rawValue)")
             let native = AVPlayerItem(url: enhanced.url)
             player.replaceCurrentItem(with: native)
             deadline = Date().addingTimeInterval(30)
@@ -157,28 +219,34 @@ struct CacheChecks {
             try check(native.status == .readyToPlay && abs(native.duration.seconds - 2) < 0.2,
                       "Cached \(enhancement.rawValue) is not natively playable: \(String(describing: native.error))")
             player.replaceCurrentItem(with: nil)
+            report("CHECK Cached enhancement shutdown: \(enhancement.rawValue)")
             enhanced.stop(); await enhanced.waitForProducer()
         }
-        print("PASS all four cached enhancement presets and native H.264/HEVC readiness")
+        report("PASS all four cached enhancement presets and native H.264/HEVC readiness")
 
+        report("CHECK Sequential fallback without byte ranges")
         let noRange = ResolvedSource(url: URL(string: base + "/no-range-vp9.mkv")!, needsPreparation: true, conversionPolicy: .allowVideo)
         let sequential = try await MediaPreparer(environment: environment).prepare(noRange)
         try check(!sequential.usesBoundedCache, "A server without byte ranges entered restartable preparation")
         sequential.stop(); await sequential.waitForProducer()
+        report("CHECK Sequential fallback for HLS input")
         let hlsSource = ResolvedSource(url: URL(string: base + "/native-stream")!, needsPreparation: true).withEnhancement(.upscale1080)
         let hls = try await MediaPreparer(environment: environment).prepare(hlsSource)
         try check(!hls.usesBoundedCache, "An HLS input entered file-based restartable preparation")
         hls.stop(); await hls.waitForProducer()
-        print("PASS sequential fallback for sources without random access and HLS inputs")
+        report("PASS sequential fallback for sources without random access and HLS inputs")
 
+        report("CHECK Multi-chunk HEVC preparation")
         let longHEVC = ResolvedSource(url: URL(string: base + "/long.mp4")!, needsPreparation: true).withEnhancement(.upscale4K)
         let hevc = try await MediaPreparer(environment: environment).prepare(longHEVC)
+        report("CHECK Multi-chunk HEVC native readiness")
         let hevcItem = AVPlayerItem(url: hevc.url)
         player.replaceCurrentItem(with: hevcItem)
         deadline = Date().addingTimeInterval(30)
         while hevcItem.status == .unknown, Date() < deadline { try await Task.sleep(for: .milliseconds(50)) }
         try check(hevcItem.status == .readyToPlay, "Multi-chunk HEVC did not open")
-        _ = await player.seek(to: CMTime(seconds: 4, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        try await seek(player, to: 4, label: "HEVC chunk-boundary rewind")
+        report("CHECK HEVC playback across fragment boundaries")
         player.play()
         deadline = Date().addingTimeInterval(20)
         while player.currentTime().seconds < 9, hevcItem.status != .failed, Date() < deadline {
@@ -186,25 +254,28 @@ struct CacheChecks {
         }
         try check(hevcItem.status == .readyToPlay && player.currentTime().seconds >= 9,
                   "HEVC stalled at a fragment initialization/discontinuity boundary: \(String(describing: hevcItem.error))")
-        let hevcMoved = await player.seek(to: CMTime(seconds: 18, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
-        try check(hevcMoved && abs(player.currentTime().seconds - 18) < 0.2, "HEVC distant seek failed")
+        try await seek(player, to: 18, label: "HEVC distant seek")
         player.pause(); player.replaceCurrentItem(with: nil)
+        report("CHECK HEVC shutdown")
         hevc.stop(); await hevc.waitForProducer()
-        print("PASS local HEVC playback across initialization/discontinuity boundaries and distant seek")
+        report("PASS local HEVC playback across initialization/discontinuity boundaries and distant seek")
 
         var pacedEnvironment = environment
         pacedEnvironment["AIRTHROW_FFMPEG"] = directory.appendingPathComponent("paced-ffmpeg").path
+        report("CHECK Requested-chunk cancellation preparation")
         let cancellable = try await MediaPreparer(environment: pacedEnvironment).prepare(source)
         let cancelledURL = cancellable.url.deletingLastPathComponent().appendingPathComponent("segment000010.ts")
         let waiting = Task { try await session.data(from: cancelledURL) }
         try await Task.sleep(for: .milliseconds(300))
         let stoppedAt = Date()
+        report("CHECK Stop during requested-chunk encoding")
         cancellable.stop(); await cancellable.waitForProducer()
         try check(Date().timeIntervalSince(stoppedAt) < 2, "Stop waited for a requested chunk to finish encoding")
         _ = try? await waiting.value
         try check(cancellable.productionFailure == nil, "Requested-chunk cancellation became a playback error")
-        print("PASS Stop cancels an in-flight requested chunk without a terminal failure")
+        report("PASS Stop cancels an in-flight requested chunk without a terminal failure")
 
+        report("CHECK Shared controller paused readiness")
         let controller = PlaybackController(resolveSource: { _ in source }, allowVideoConversion: true,
                                             prepareSource: { try await preparer.prepare($0) })
         try controller.load("https://example.com/cache-fixture")
@@ -214,9 +285,11 @@ struct CacheChecks {
                   && controller.snapshot.duration! > 119 && controller.player.rate == 0
                   && controller.player.isMuted && (controller.snapshot.seekableRanges.last?.end ?? 0) > 119,
                   "Shared controller cached state: \(String(decoding: try JSONEncoder().encode(controller.snapshot), as: UTF8.self))")
+        report("CHECK Shared controller shutdown")
         await controller.shutdownAndWait()
-        print("PASS shared controller keeps cached media paused with a full finite seek range")
+        report("PASS shared controller keeps cached media paused with a full finite seek range")
 
+        report("CHECK Cache-budget rejection")
         do {
             _ = try await MediaPreparer(environment: environment,
                 preferences: PreparationPreferences(maximumBytes: 1000)).prepare(source)
@@ -234,7 +307,7 @@ struct CacheChecks {
         for key in [PreparationPreferences.maximumGiBKey, PreparationPreferences.windowSecondsKey, PreparationPreferences.retainAllKey] {
             defaults.removeObject(forKey: key)
         }
-        print("PASS configurable preparation preferences and distinct storage-limit failure")
+        report("PASS configurable preparation preferences and distinct storage-limit failure")
         try await Task.sleep(for: .milliseconds(100))
         try check(Set(try FileManager.default.contentsOfDirectory(atPath: root.path)) == before,
                   "Cached shutdown or startup failure retained a workspace")
@@ -244,6 +317,7 @@ struct CacheChecks {
         let manifest = directory.appendingPathComponent("late-release.m3u8")
         try Data("#EXTM3U\n#EXT-X-ENDLIST\n".utf8).write(to: manifest)
         defer { try? FileManager.default.removeItem(at: manifest) }
+        report("CHECK Release a resource completed after server Stop")
         let provider = LateResourceProvider()
         let server = try await MediaHTTPServer.start(file: manifest, host: "127.0.0.1", hls: true,
                                                     loadResource: { _ in await provider.load() },
@@ -264,6 +338,6 @@ struct CacheChecks {
                   "Stop did not release a late HTTP resource exactly once")
         server.stop()
         try check(provider.releases == 1, "Repeated Stop released the resource twice")
-        print("PASS Stop releases a resource completed after cancellation exactly once")
+        report("PASS Stop releases a resource completed after cancellation exactly once")
     }
 }

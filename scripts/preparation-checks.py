@@ -10,6 +10,8 @@ import tempfile
 import threading
 import urllib.parse
 
+sys.stdout.reconfigure(line_buffering=True)
+
 ROOT = Path(__file__).resolve().parent.parent
 (ROOT / 'build').mkdir(exist_ok=True)
 reuse = next((arg.split('=', 1)[1] for arg in sys.argv if arg.startswith('--reuse-fixtures=')), None)
@@ -18,8 +20,17 @@ FFMPEG = shutil.which('ffmpeg') or '/opt/homebrew/bin/ffmpeg'
 FFPROBE = shutil.which('ffprobe') or '/opt/homebrew/bin/ffprobe'
 
 
-def run(arguments, **options):
-    return subprocess.run([str(arg) for arg in arguments], check=True, capture_output=True, text=True, **options)
+def run(arguments, live=False, **options):
+    try:
+        return subprocess.run([str(arg) for arg in arguments], check=True,
+                              capture_output=not live, text=True, **options)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        for name, stream in [('stdout', sys.stdout), ('stderr', sys.stderr)]:
+            output = getattr(error, name, None)
+            if output:
+                stream.write(output.decode(errors='replace') if isinstance(output, bytes) else output)
+                stream.flush()
+        raise
 
 
 def ffmpeg(*arguments):
@@ -165,8 +176,7 @@ try:
              ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
              ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
              ROOT / 'Tests/PreparationChecks/main.swift', '-o', binary], timeout=90)
-        checks = run([binary, f'http://127.0.0.1:{server.server_port}', OUT], timeout=180)
-        print(checks.stdout, end='')
+        run([binary, f'http://127.0.0.1:{server.server_port}', OUT], live=True, timeout=180)
         # Compare each compressed packet: this establishes stream copying rather than merely matching codec names.
         def packets(path):
             result = json.loads(run([FFPROBE, '-v', 'error', '-show_packets', '-show_data_hash', 'sha256',
@@ -235,7 +245,7 @@ try:
          ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
          ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
          ROOT / 'Tests/CacheChecks/main.swift', '-o', cached], timeout=90)
-    print(run([cached, f'http://127.0.0.1:{server.server_port}', OUT], timeout=240).stdout, end='')
+    run([cached, f'http://127.0.0.1:{server.server_port}', OUT], live=True, timeout=240)
     if '--cache-only' in sys.argv:
         print(f'Cache fixtures and results: {OUT}')
         raise SystemExit(0)
@@ -244,7 +254,8 @@ try:
          ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
          ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
          ROOT / 'Tests/ProgressiveChecks/main.swift', '-o', progressive], timeout=90)
-    print(run([progressive, f'http://127.0.0.1:{server.server_port}', OUT], timeout=240).stdout, end='')
+    (OUT / 'encoder-attempts.txt').unlink(missing_ok=True)
+    run([progressive, f'http://127.0.0.1:{server.server_port}', OUT], live=True, timeout=240)
     def video_frames(path):
         return [line.split(',')[-1].strip() for line in run([FFMPEG, '-v', 'error', '-i', path,
                 '-map', '0:v:0', '-f', 'framemd5', '-']).stdout.splitlines() if not line.startswith('#')]
@@ -275,9 +286,6 @@ try:
         conversion='not run' if '--progressive-only' in sys.argv else 'passed',
         progressiveHLS='passed', receiver='untested'), indent=2) + '\n')
     print(f'Report: {OUT / "results.json"}')
-except subprocess.CalledProcessError as error:
-    print(error.stdout, error.stderr)
-    raise
 finally:
     server.shutdown()
     server.server_close()
