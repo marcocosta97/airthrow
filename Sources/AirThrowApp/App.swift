@@ -88,24 +88,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 self?.windowControls?.setSelected(visible, at: 1)
             }
         didFinishLaunching = true
-        openPendingFiles()
+        openPendingURLs()
     }
 
-    /// Files opened from Finder, the Dock, or `open -a` load into the shared
-    /// session. A cold launch buffers them until the controller is ready.
+    /// Finder files and shared-link handoffs share the persistent playback session.
+    /// A cold launch buffers delivery until the controller is ready.
     func application(_ application: NSApplication, open urls: [URL]) {
-        pendingOpenURLs.append(contentsOf: urls.filter(\.isFileURL))
-        if didFinishLaunching { openPendingFiles() }
+        guard !terminating else { return }
+        pendingOpenURLs.append(contentsOf: urls.filter {
+            $0.isFileURL || $0.scheme?.lowercased() == "airthrow"
+        })
+        if didFinishLaunching { openPendingURLs() }
     }
 
-    private func openPendingFiles() {
+    private func openPendingURLs() {
         guard !pendingOpenURLs.isEmpty else { return }
-        let files = pendingOpenURLs
+        let urls = pendingOpenURLs
         pendingOpenURLs.removeAll()
-        guard let file = files.first else { return }
-        do { try controller.load(file.path) }
-        catch { controller.displayError(error) }
-        showWindow()
+        // Shared links replace each other; Finder keeps its existing first-file
+        // behavior when no shared-link handoff was delivered during startup.
+        if let url = urls.last(where: { !$0.isFileURL }) {
+            do {
+                let handoff = try MediaHandoff(url: url)
+                try controller.load(handoff.sourceURL, autoplay: handoff.autoplay)
+                if !controller.snapshot.externalPlaybackActive { showWindow() }
+            } catch {
+                controller.displayError(error)
+                showWindow()
+            }
+        } else if let file = urls.first {
+            do { try controller.load(file.path) }
+            catch { controller.displayError(error) }
+            showWindow()
+        }
     }
 
     @objc func showWindow() {
@@ -297,10 +312,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             switch request.command {
             case .open:
                 guard let url = request.url else { throw AppFailure(.invalidRequest, "The open command requires a video URL or local file path.") }
-                try controller.load(url)
+                let playOnReceiver = request.autoplay == true && controller.snapshot.externalPlaybackActive
+                try controller.load(url, autoplay: request.autoplay == true)
                 if !controller.snapshot.externalPlaybackActive { showWindow() }
-                return Response(message: controller.snapshot.loadingPhase == "resolving"
-                    ? "Finding video. Choose a receiver, then play." : "Loading video. Choose a receiver, then play.",
+                return Response(message: playOnReceiver ? "Loading video on the current receiver."
+                    : (controller.snapshot.loadingPhase == "resolving"
+                        ? "Finding video. Choose a receiver, then play." : "Loading video. Choose a receiver, then play."),
                     pending: true, status: controller.snapshot)
             case .play:
                 try controller.play()

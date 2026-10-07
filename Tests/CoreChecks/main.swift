@@ -222,6 +222,66 @@ let tests: [(String, () throws -> Void)] = [
         try check(elements[4] == .command(.showController) && elements[5] == .command(.quit),
                   "Menu footer was wrong")
     }),
+    ("shared-link handoff validates entry and preserves URL data", {
+        let target = "https://example.com/watch?v=a%2Fb&token=secret+value#t=12"
+        var components = URLComponents()
+        components.scheme = "airthrow"
+        components.host = "play"
+        components.queryItems = [URLQueryItem(name: "url", value: target)]
+        let handoff = try MediaHandoff(url: components.url!)
+        try check(handoff.sourceURL == target && handoff.autoplay, "Shared URL was decoded twice or play intent was lost")
+        try check(MediaHandoff(url: MediaHandoff.url(for: target)).sourceURL == target,
+                  "Share encoding changed a signed source URL")
+        try check(!MediaHandoff(url: MediaHandoff.url(for: target, autoplay: false)).autoplay,
+                  "Paused share encoding requested playback")
+        components.host = "open"
+        try check(!MediaHandoff(url: components.url!).autoplay, "Shared open unexpectedly requested playback")
+        let invalid = [
+            "https://play?url=https%3A%2F%2Fexample.com",
+            "airthrow://play/path?url=https%3A%2F%2Fexample.com",
+            "airthrow://user@play?url=https%3A%2F%2Fexample.com",
+            "airthrow://play:80?url=https%3A%2F%2Fexample.com",
+            "airthrow://play?url=https%3A%2F%2Fexample.com#extra",
+            "airthrow://stop?url=https%3A%2F%2Fexample.com",
+            "airthrow://play?url=https%3A%2F%2Fexample.com&url=https%3A%2F%2Fexample.org",
+            "airthrow://play?url=https%3A%2F%2Fexample.com&header=secret",
+            "airthrow://play?url=file%3A%2F%2F%2Ftmp%2Fvideo.mp4",
+            "airthrow://play?url=https%3A%2F%2Fuser%3Asecret%40example.com",
+            "airthrow://play?url=https%3A%2F%2Fexample.com%2F%25oops",
+            "airthrow://play?url=https%3A%2F%2Fexample.com%2F%0Asecret",
+            "airthrow://play?url=%20https%3A%2F%2Fexample.com",
+            "airthrow://play?url=https%3A%2F%2Fexample.com%2Fa%20b",
+            "airthrow://play?url=https%3A%2F%2Fexample.com%5Cpath",
+            "airthrow://play?url=https%253A%252F%252Fexample.com",
+            "airthrow://play?url="
+        ]
+        for input in invalid {
+            do {
+                _ = try MediaHandoff(url: URL(string: input)!)
+                throw CheckFailure(message: "Malformed shared-link handoff accepted")
+            } catch let failure as AppFailure {
+                try check(failure.code == .invalidRequest && !failure.message.contains("secret"), "Shared-link failure leaked request data")
+            }
+        }
+        components.queryItems = [URLQueryItem(name: "url", value: "https://example.com/" + String(repeating: "x", count: 16_384))]
+        try rejects { _ = try MediaHandoff(url: components.url!) }
+    }),
+    ("explicit CLI open-and-play is additive and scoped", {
+        let target = "https://example.com/movie.mp4"
+        for args in [["open", "--play", target], ["open", target, "--play", "--json"]] {
+            guard case .run(let parsed) = try CLIArguments.parse(args) else {
+                throw CheckFailure(message: "Explicit open-and-play did not parse")
+            }
+            try check(parsed.request.autoplay == true && parsed.request.url == target, "Open-and-play intent was lost")
+            let decoded = try JSONDecoder().decode(Request.self, from: JSONEncoder().encode(parsed.request))
+            try check(decoded.autoplay == true && decoded.version == 1, "Open-and-play protocol did not round-trip")
+        }
+        let legacy = try JSONDecoder().decode(Request.self, from: Data(#"{"version":1,"command":"open","url":"https://example.com/movie.mp4"}"#.utf8))
+        try check(legacy.autoplay == nil, "Legacy open armed playback")
+        for args in [["open", "--play"], ["open", "--play", "--play", target], ["play", "--play"], ["status", "--play"]] {
+            try rejects { _ = try CLIArguments.parse(args) }
+        }
+    }),
     ("wire protocol and URL privacy", {
         let request = Request(.open, url: "https://example.com/video.mp4?token=private")
         let decoded = try JSONDecoder().decode(Request.self, from: JSONEncoder().encode(request))

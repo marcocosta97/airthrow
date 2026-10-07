@@ -76,6 +76,9 @@ jobs:
       - name: Core checks
         run: .build/debug/CoreChecks
 
+      - name: Share extension checks (headless)
+        run: bash scripts/share-checks.sh
+
       - name: Source registry checks
         run: .build/debug/SourceRegistryChecks
 

@@ -11,10 +11,13 @@ public struct Request: Codable, Sendable {
     public var seconds: Double?
     public var sourceID: String?
     public var allowVideoConversion: Bool?
-    public init(_ command: Command, url: String? = nil, seconds: Double? = nil) {
+    /// An explicit open-and-play request; absent preserves paused loading.
+    public var autoplay: Bool?
+    public init(_ command: Command, url: String? = nil, seconds: Double? = nil, autoplay: Bool? = nil) {
         self.command = command
         self.url = url
         self.seconds = seconds
+        self.autoplay = autoplay
     }
 }
 

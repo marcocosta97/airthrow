@@ -38,11 +38,15 @@ public enum CLIArguments {
         var request = Request(command)
         switch command {
         case .open:
-            guard arguments.count == 2 else { throw AppFailure(.invalidRequest, "Usage: athrow open URL_OR_PATH") }
+            let playFlags = arguments.filter { $0 == "--play" }.count
+            guard playFlags <= 1 else { throw AppFailure(.invalidRequest, "Usage: athrow open [--play] URL_OR_PATH") }
+            arguments.removeAll { $0 == "--play" }
+            guard arguments.count == 2 else { throw AppFailure(.invalidRequest, "Usage: athrow open [--play] URL_OR_PATH") }
             let source = try MediaInput.source(arguments[1])
             // The app has a different working directory. Resolve relative paths
             // in the invoking shell before sending the request.
             request.url = source.isFileURL ? source.path : arguments[1]
+            request.autoplay = playFlags == 1 ? true : nil
         case .seek:
             guard arguments.count == 2, let seconds = Double(arguments[1]), seconds.isFinite, seconds >= 0 else {
                 throw AppFailure(.invalidRequest, "Usage: athrow seek SECONDS (finite and nonnegative)")

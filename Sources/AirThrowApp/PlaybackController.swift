@@ -141,6 +141,9 @@ final class PlaybackController: ObservableObject {
     private var queueDirection = 1
     private var queueAttemptsRemaining = 0
     private var playWhenReady = false
+    private var pendingAutoplaySeek = false
+    private var autoplayRouteTask: Task<Void, Never>?
+    private var autoplayRouteDeadline: ContinuousClock.Instant?
     private var pendingInitialSeek = false
     // A receiver chosen in the system picker sets the active route before the
     // picker reports that it finished presenting. Allow a bounded window for
@@ -196,12 +199,18 @@ final class PlaybackController: ObservableObject {
         updateNowPlaying()
     }
 
-    func load(_ input: String) throws {
+    func load(_ input: String, autoplay: Bool = false) throws {
         let url = try MediaInput.source(input)
+        // Picker intent is not an active route. Never arm an incoming request
+        // to start later merely because a receiver may subsequently connect.
+        let shouldPlay = autoplay && player.isExternalPlaybackActive
         if SourceResolver.playlistPage(url) != nil {
-            startPlaylistLoad(url)
+            startPlaylistLoad(url, autoplay: shouldPlay)
         } else {
-            startLoad(url)
+            startLoad(url, autoplay: shouldPlay)
+        }
+        if autoplay && !shouldPlay {
+            notice = "Video will load paused. Choose a receiver using AirPlay, then press Play."
         }
     }
 
@@ -556,13 +565,15 @@ final class PlaybackController: ObservableObject {
         }
     }
 
-    private func startPlaylistLoad(_ url: URL) {
+    private func startPlaylistLoad(_ url: URL, autoplay: Bool = false) {
         let retryRoute = hasOpenedPicker || player.isExternalPlaybackActive
         resetItem(keepPlayerItem: true)
         probeWhenReady = retryRoute
         let id = generation
         loading = true
         resolving = true
+        playWhenReady = autoplay
+        playbackRequested = autoplay
         title = "YouTube playlist"
         notice = nil
         refresh()
@@ -575,10 +586,10 @@ final class PlaybackController: ObservableObject {
                 self.loadTask = nil
                 self.queue = QueueState(title: playlist.title, entries: playlist.entries,
                                         truncated: playlist.truncated, currentIndex: 0)
-                self.notice = playlist.truncated
+                self.notice = self.notice ?? (playlist.truncated
                     ? "This playlist was limited to the first \(SourceResolver.maximumPlaylistEntries) items."
-                    : nil
-                self.loadQueueItem(at: 0, direction: 1, autoplay: false)
+                    : nil)
+                self.loadQueueItem(at: 0, direction: 1, autoplay: self.playWhenReady)
             } catch {
                 guard let self, !Task.isCancelled, self.generation == id else { return }
                 self.fail((error as? ResolutionFailure)?.reason ?? .resolutionFailed)
@@ -603,8 +614,11 @@ final class PlaybackController: ObservableObject {
         let retryRoute = hasOpenedPicker || player.isExternalPlaybackActive
         let retainedCandidates = fallback == nil ? [] : sourceCandidates
         let retainedInspection = changingSource || retry || fallback != nil ? inspectedSourceHeight : nil
+        let retainedAutoplayDeadline = autoplay && (preservingQueue || retry || fallback != nil)
+            ? autoplayRouteDeadline : nil
         resetItem(keepPlayerItem: true, preserveQueue: preservingQueue)
         inspectedSourceHeight = retainedInspection
+        autoplayRouteDeadline = retainedAutoplayDeadline
         loadPreferences = preferences
         subtitlePreference = preferences.subtitle
         videoEnhancement = preferences.enhancement
@@ -621,6 +635,7 @@ final class PlaybackController: ObservableObject {
         retriedResolution = retry
         title = titleOverride ?? (url.isFileURL ? url.lastPathComponent : (url.host ?? "Video"))
         playWhenReady = autoplay
+        pendingAutoplaySeek = autoplay
         playbackRequested = autoplay
         if !preservingQueue { notice = nil }
         refresh()
@@ -965,6 +980,9 @@ final class PlaybackController: ObservableObject {
     func pause() {
         if waitingScreen.isActive { stop(); return }
         playWhenReady = false
+        pendingAutoplaySeek = false
+        autoplayRouteTask?.cancel(); autoplayRouteTask = nil
+        autoplayRouteDeadline = nil
         playbackRequested = false
         probeWhenReady = false
         cancelProbe(restorePosition: true)
@@ -1100,7 +1118,9 @@ final class PlaybackController: ObservableObject {
         // Opening the picker on an active route must not pause or rewind playback.
         guard !player.isExternalPlaybackActive else { return }
         if !probeRestoreFailed {
-            probePosition = finite(player.currentTime().seconds) ?? 0
+            let finiteAutoplay = pendingAutoplaySeek && selectedSource?.isLive != true
+                && (preparedMedia?.sourceDuration != nil || finite(mediaItem?.duration.seconds ?? .nan) != nil)
+            probePosition = finiteAutoplay ? 0 : (finite(player.currentTime().seconds) ?? 0)
         }
         probing = true
         probeID = UUID()
@@ -1221,6 +1241,7 @@ final class PlaybackController: ObservableObject {
                        abs(actual - position.seconds) < 0.1,
                        self.player.rate == 0, self.player.timeControlStatus == .paused {
                         self.probeRestoring = false
+                        if abs(position.seconds) < 0.1 { self.pendingAutoplaySeek = false }
                         self.probeRestoreSeekID = nil
                         self.probeRestoreTask = nil
                         if self.player.isExternalPlaybackActive {
@@ -1319,6 +1340,9 @@ final class PlaybackController: ObservableObject {
         actualPlaybackPath = nil
         ended = false; hasPlayed = false; failure = nil; failureReason = nil
         playWhenReady = false
+        pendingAutoplaySeek = false
+        autoplayRouteTask?.cancel(); autoplayRouteTask = nil
+        autoplayRouteDeadline = nil
         playbackRequested = false
         pendingInitialSeek = false
         probeRestoreFailed = false
@@ -1381,6 +1405,9 @@ final class PlaybackController: ObservableObject {
         playWhenReady = false
         playbackRequested = false
         player.isMuted = true
+        autoplayRouteTask?.cancel(); autoplayRouteTask = nil
+        autoplayRouteDeadline = nil
+        pendingAutoplaySeek = false
         player.pause()
         timeoutTask?.cancel()
         player.replaceCurrentItem(with: nil)
@@ -1428,11 +1455,30 @@ final class PlaybackController: ObservableObject {
             if player.rate != 0 || player.timeControlStatus != .paused { player.pause() }
         }
         let external = player.isExternalPlaybackActive
+        if external {
+            autoplayRouteTask?.cancel(); autoplayRouteTask = nil
+            autoplayRouteDeadline = nil
+        } else if playWhenReady, autoplayRouteTask == nil {
+            // AVPlayer can briefly drop its external flag while replacing an
+            // item. Preserve the explicit request for a bounded handoff grace,
+            // then require another user action if the receiver does not return.
+            let id = generation
+            let deadline = autoplayRouteDeadline ?? ContinuousClock.now.advanced(by: .seconds(30))
+            autoplayRouteDeadline = deadline
+            autoplayRouteTask = Task { [weak self] in
+                do { try await ContinuousClock().sleep(until: deadline) } catch { return }
+                guard let self, self.generation == id, self.playWhenReady,
+                      !self.player.isExternalPlaybackActive else { return }
+                self.pause()
+                self.notice = "The receiver did not reconnect. Choose a receiver using AirPlay, then press Play."
+                self.refresh()
+            }
+        }
         if wasExternal && !external {
             playbackRequested = false
             player.isMuted = true
             player.pause()
-            if !loading { playWhenReady = false }
+            if !loading && !playWhenReady { pendingAutoplaySeek = false }
             pendingSeek = nil
             seekID = nil
             if mediaItem != nil && failure == nil && !loading && !probeWhenReady {
@@ -1483,9 +1529,20 @@ final class PlaybackController: ObservableObject {
         // item to the beginning before any negotiation or playback.
         if pendingInitialSeek, let item, item.status == .readyToPlay, !loading {
             pendingInitialSeek = false
-            if (finite(player.currentTime().seconds) ?? 0) > 0.5 { player.seek(to: .zero) }
+            if !pendingAutoplaySeek, (finite(player.currentTime().seconds) ?? 0) > 0.5 { player.seek(to: .zero) }
         }
         beginProbeIfReady()
+        // A replacement on an already active route still needs a confirmed
+        // finite starting position before an explicit send-and-play can run.
+        if playWhenReady, pendingAutoplaySeek, !loading, item?.status == .readyToPlay,
+           !probing, !probeRestoring, !probeRestoreFailed {
+            pendingAutoplaySeek = false
+            if selectedSource?.isLive != true,
+               preparedMedia?.sourceDuration != nil || finite(item?.duration.seconds ?? .nan) != nil {
+                probePosition = 0
+                restoreProbePosition()
+            }
+        }
         if retiredPreparedMedia != nil, !loading, item?.status == .readyToPlay,
            !probing && !probeRestoring && !probeWhenReady {
             stopRetiredPreparedMedia()
@@ -1499,7 +1556,7 @@ final class PlaybackController: ObservableObject {
                 player.isMuted = false
                 player.play()
             } else if !probing {
-                notice = "Next playlist item is ready. Waiting for the receiver…"
+                notice = "Video is ready. Waiting for the receiver…"
             }
         }
         if external && !probing && !probeRestoring && !probeRestoreFailed && player.rate > 0 {

@@ -31,6 +31,16 @@ for bin in AirThrowApp athrow; do
     [[ "$(lipo -archs "$bundle/Contents/MacOS/$bin")" == *arm64* ]] \
         || fail "$bin is not an arm64 Mach-O"
 done
+share="$bundle/Contents/PlugIns/AirThrowShare.appex"
+[[ -x "$share/Contents/MacOS/AirThrowShare" ]] || fail "missing Share extension"
+[[ "$(lipo -archs "$share/Contents/MacOS/AirThrowShare")" == *arm64* ]] \
+    || fail "Share extension is not an arm64 Mach-O"
+for key in CFBundleShortVersionString CFBundleVersion; do
+    [[ "$(/usr/libexec/PlistBuddy -c "Print :$key" "$share/Contents/Info.plist")" == \
+       "$(/usr/libexec/PlistBuddy -c "Print :$key" "$bundle/Contents/Info.plist")" ]] \
+        || fail "Share extension $key does not match the app"
+done
+codesign --verify --strict "$share"
 codesign --verify --strict "$bundle"
 "$bundle/Contents/MacOS/athrow" --help >/dev/null
 

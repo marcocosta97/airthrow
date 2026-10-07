@@ -11,6 +11,8 @@ struct AirThrowCLI {
 
     Usage:
       athrow open SOURCE     Load a URL, YouTube playlist, or local file, paused
+      athrow open --play SOURCE
+                             Load and play on an already connected receiver
       athrow play            Start/resume on the selected video receiver
       athrow pause           Pause the current session
       athrow seek SECONDS    Seek to an absolute position

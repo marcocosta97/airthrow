@@ -201,6 +201,127 @@ struct ControllerChecks {
                   "Stale playlist extraction replaced the newer source")
         print("PASS URL replacement cancels playlist extraction and rejects stale queue results")
 
+        let sendPlayer = HandoffPlayer()
+        let sendController = PlaybackController(player: sendPlayer, resolveSource: { url in
+            let marker = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+                .first(where: { $0.name == "v" })?.value ?? "video"
+            if marker == "delayed" { try await Task.sleep(for: .milliseconds(600)) }
+            if marker == "stale" {
+                await Task.detached { try? await Task.sleep(for: .milliseconds(600)) }.value
+            }
+            if marker == "boundary" { try await Task.sleep(for: .seconds(13)) }
+            return ResolvedSource(url: mediaURL, title: marker)
+        }, resolvePlaylist: { url in
+            if url.query?.contains("PLtimeout") == true {
+                try await Task.sleep(for: .seconds(20))
+                return ResolvedPlaylist(title: "Slow queue", entries: [
+                    PlaylistEntry(url: URL(string: "https://www.youtube.com/watch?v=boundary"), title: "Boundary")
+                ], truncated: false)
+            }
+            try await Task.sleep(for: .milliseconds(600))
+            return ResolvedPlaylist(title: "Sent queue", entries: [
+                PlaylistEntry(url: nil, title: "Unavailable", unavailableReason: "Unavailable"),
+                PlaylistEntry(url: URL(string: "https://www.youtube.com/watch?v=first"), title: "First")
+            ], truncated: false)
+        }, prepareSource: nil)
+        defer { sendController.shutdown() }
+        func waitForSend(_ state: PlaybackState, seconds: Double = 10) async throws {
+            let deadline = Date().addingTimeInterval(seconds)
+            while Date() < deadline {
+                sendController.refresh()
+                if sendController.snapshot.state == state { return }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            try check(false, "Shared-link handoff did not reach \(state): \(sendController.snapshot)")
+        }
+        func sendURL(_ marker: String) -> String { "https://www.youtube.com/watch?v=\(marker)" }
+        sendPlayer.handoff(at: 4, replies: [.interrupted, .restored])
+        try sendController.load(sendURL("first"), autoplay: true)
+        try check(sendPlayer.rate == 0 && sendPlayer.isMuted, "Send resumed the old item while loading")
+        try await waitForSend(.playing)
+        try check(sendController.player === sendPlayer && sendPlayer.currentTime().seconds == 0
+                  && sendPlayer.seekCount == 2 && !sendPlayer.isMuted,
+                  "Send did not verify zero before playback on the shared route")
+        print("PASS explicit send-and-play restores zero before playing on the existing player")
+
+        try sendController.load(sendURL("normal"))
+        try await waitForSend(.ready)
+        try check(sendPlayer.rate == 0 && sendPlayer.isMuted, "Ordinary load unexpectedly autoplayed")
+        sendPlayer.disconnect()
+        sendController.refresh()
+        try sendController.load(sendURL("no-route"), autoplay: true)
+        try await waitForSend(.awaitingReceiver)
+        try check(sendController.notice?.contains("press Play") == true, "Send without receiver gave no guide")
+        sendController.pickerWillOpen()
+        sendPlayer.handoff(at: 0, replies: [.restored])
+        sendController.pickerDidClose()
+        sendController.refresh()
+        try await waitForSend(.ready)
+        try check(sendPlayer.rate == 0 && sendPlayer.isMuted, "Receiver chosen after receipt triggered armed autoplay")
+        print("PASS ordinary loads and sends without an active receiver remain paused")
+
+        try sendController.load(sendURL("delayed"), autoplay: true)
+        sendController.pause()
+        try await waitForSend(.ready)
+        try check(sendPlayer.rate == 0, "Pause during resolution did not cancel send-and-play")
+        try sendController.load(sendURL("stale"), autoplay: true)
+        // Let a resolver that ignores caller cancellation start before replacing it.
+        try await Task.sleep(for: .milliseconds(100))
+        try sendController.load(sendURL("latest"))
+        try await waitForSend(.ready)
+        try await Task.sleep(for: .milliseconds(700))
+        sendController.refresh()
+        try check(sendController.snapshot.title == "latest" && sendPlayer.rate == 0,
+                  "Stale send resolution replaced or played the newer request")
+        print("PASS Pause and a newer paused load cancel pending send-and-play")
+
+        try sendController.load("https://www.youtube.com/playlist?list=PL12345678", autoplay: true)
+        sendController.pause()
+        try await waitForSend(.ready)
+        try check(sendController.snapshot.queue?.currentIndex == 1 && sendPlayer.rate == 0,
+                  "Pause during playlist extraction did not cancel first-item autoplay")
+        print("PASS Pause during playlist extraction cancels the first item's play intent")
+
+        try sendController.load(sendURL("delayed"), autoplay: true)
+        sendPlayer.disconnect()
+        sendController.refresh()
+        try await Task.sleep(for: .milliseconds(200))
+        sendPlayer.handoff(at: 3, replies: [.restored])
+        sendController.refresh()
+        try await waitForSend(.playing)
+        try check(sendPlayer.currentTime().seconds == 0, "Transient route transition lost the requested starting position")
+        print("PASS replacement tolerates a brief external route transition")
+
+        try sendController.load("https://www.youtube.com/playlist?list=PLtimeout123456", autoplay: true)
+        sendPlayer.disconnect()
+        sendController.refresh()
+        let timeoutDeadline = ContinuousClock.now.advanced(by: .seconds(32))
+        while ContinuousClock.now < timeoutDeadline,
+              sendController.notice?.contains("did not reconnect") != true {
+            sendController.refresh()
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try check(sendController.notice?.contains("did not reconnect") == true,
+                  "Pending send had no bounded receiver timeout: \(sendController.notice ?? "nil"), \(sendController.snapshot.state)")
+        sendPlayer.handoff(at: 0, replies: [.restored])
+        sendPlayer.pause() // Route restoration alone, without a simulated remote Play.
+        sendController.refresh()
+        try await waitForSend(.ready)
+        try check(sendPlayer.rate == 0 && sendPlayer.isMuted, "Late reconnect revived expired send-and-play")
+        print("PASS lost-route grace spans playlist resolution and item loading; late reconnect stays paused")
+
+        try sendController.load("https://www.youtube.com/playlist?list=PL12345678", autoplay: true)
+        try await waitForSend(.playing)
+        try check(sendController.snapshot.queue?.currentIndex == 1 && sendController.snapshot.title == "first",
+                  "Playlist send lost intent while skipping its unavailable leading item")
+        try sendController.load(sendURL("delayed"), autoplay: true)
+        sendController.stop()
+        try await Task.sleep(for: .milliseconds(700))
+        sendController.refresh()
+        try check(sendController.snapshot.state == .idle && sendPlayer.currentItem == nil && sendPlayer.rate == 0,
+                  "Stop allowed a pending send to complete")
+        print("PASS playlist send propagates play intent and Stop cancels pending replacement")
+
         let handoffPlayer = HandoffPlayer()
         let handoffController = PlaybackController(player: handoffPlayer, prepareSource: nil)
         defer { handoffController.shutdown() }
@@ -282,6 +403,6 @@ struct ControllerChecks {
         try check(handoffController.snapshot.state == .idle && handoffPlayer.currentItem == nil && handoffPlayer.rate == 0,
                   "Stopped handoff completed into the unloaded session")
         print("PASS Stop cancels a pending handoff rewind")
-        print("10/10 controller checks passed (simulated handoff; no physical receiver)")
+        print("17/17 controller checks passed (simulated handoff; no physical receiver)")
     }
 }

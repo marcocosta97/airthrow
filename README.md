@@ -61,6 +61,8 @@ This produces a locally signed app, a ZIP archive, and the `build/athrow` CLI.
 3. Click the AirPlay button and choose a video-capable receiver, then press
    **Play** when the video and route are ready.
 
+You can also send video links with **Share → AirThrow** from apps that use the macOS Share menu.
+
 In **Settings → Playback**, enable **Show a waiting screen on the TV** to display
 AirThrow on a black background when choosing a receiver before loading a video.
 

@@ -33,6 +33,21 @@ cp "$bin_dir/AirThrowApp" "$app/Contents/MacOS/AirThrowApp"
 cp "$bin_dir/athrow" "$app/Contents/MacOS/athrow"
 cp "$bin_dir/athrow" "$build_dir/athrow"
 cp Resources/Info.plist "$app/Contents/Info.plist"
+share="$app/Contents/PlugIns/AirThrowShare.appex"
+mkdir -p "$share/Contents/MacOS" "$share/Contents/Resources"
+cp Resources/ShareExtension-Info.plist "$share/Contents/Info.plist"
+# App extensions enter through Foundation's standard extension entry point.
+# Compile only the Foundation handoff types, not the media/server subsystem.
+share_flags=(-Onone)
+if [[ "$configuration" == "release" ]]; then share_flags=(-O); fi
+swiftc -swift-version 6 -parse-as-library -application-extension \
+    -target "$(uname -m)-apple-macosx$deployment_target" \
+    -module-name AirThrowShare "${share_flags[@]}" \
+    Sources/AirThrowCore/Protocol.swift Sources/AirThrowCore/MediaHandoff.swift \
+    Sources/AirThrowShareExtension/*.swift \
+    -Xlinker -e -Xlinker _NSExtensionMain \
+    -Xlinker -platform_version -Xlinker macos -Xlinker "$deployment_target" -Xlinker "$sdk_version" \
+    -o "$share/Contents/MacOS/AirThrowShare"
 cp -R Resources/WaitingScreen "$app/Contents/Resources/WaitingScreen"
 if [[ -n "$version" ]]; then
     /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
@@ -40,6 +55,10 @@ fi
 if [[ -n "$build_number" ]]; then
     /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build_number" "$app/Contents/Info.plist"
 fi
+for key in CFBundleShortVersionString CFBundleVersion; do
+    value="$(/usr/libexec/PlistBuddy -c "Print :$key" "$app/Contents/Info.plist")"
+    /usr/libexec/PlistBuddy -c "Set :$key $value" "$share/Contents/Info.plist"
+done
 bash scripts/write-build-commit.sh "$app/Contents/Resources/BuildCommit.txt"
 # Compile the Icon Composer document so macOS renders the Liquid Glass icon,
 # including its light, dark, and tinted appearances (Assets.car), with a loose
@@ -52,17 +71,22 @@ xcrun actool Resources/AppIcon.icon \
     --standalone-icon-behavior all \
     --output-partial-info-plist "$build_dir/AppIcon-partial.plist" \
     --output-format human-readable-text
+cp "$app/Contents/Resources/AppIcon.icns" "$share/Contents/Resources/AppIcon.icns"
+/usr/libexec/PlistBuddy -c 'Add :CFBundleIconFile string AppIcon' "$share/Contents/Info.plist"
 # Finder/iCloud can attach metadata to a generated .app inside Documents.
 xattr -dr com.apple.FinderInfo "$app" 2>/dev/null || true
 xattr -dr com.apple.ResourceFork "$app" 2>/dev/null || true
 identity="${CODE_SIGN_IDENTITY:--}"
 if [[ "$identity" == "-" ]]; then
     codesign --force --sign - "$app/Contents/MacOS/athrow"
+    codesign --force --sign - --entitlements Resources/ShareExtension.entitlements "$share"
     codesign --force --sign - "$app"
 else
     codesign --force --options runtime --timestamp --sign "$identity" "$app/Contents/MacOS/athrow"
+    codesign --force --options runtime --timestamp --sign "$identity" --entitlements Resources/ShareExtension.entitlements "$share"
     codesign --force --options runtime --timestamp --sign "$identity" "$app"
 fi
+codesign --verify --strict "$share"
 codesign --verify --strict "$app"
 # Keep an archive without Finder/iCloud metadata; synced folders can reattach
 # prohibited attributes to a loose .app even after successful signing.
