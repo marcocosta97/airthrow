@@ -15,7 +15,54 @@ struct PreparationChecks {
         do { try await run() }
         catch { print("FAIL preparation checks: \(error)"); exit(1) }
     }
+    static func oddDimensions(_ url: URL) async throws {
+        var environment = ProcessInfo.processInfo.environment
+        environment["AIRTHROW_MEDIA_HOST"] = "127.0.0.1"
+        let preparer = MediaPreparer(environment: environment)
+        let source = ResolvedSource(url: url, needsPreparation: true)
+        let player = AVPlayer()
+        player.isMuted = true
+        defer { player.replaceCurrentItem(with: nil) }
+        for mode in [PreparationMode.completeFile, .progressiveHLS] {
+            for enhancement in [VideoEnhancement.upscale1080, .cleanup1080, .upscale4K, .cleanup4K] {
+                print("CHECK odd-width \(enhancement.rawValue), \(mode)")
+                fflush(nil)
+                let prepared = try await preparer.prepare(source.withEnhancement(enhancement), mode: mode)
+                do {
+                    try check(prepared.videoHeight == enhancement.targetHeight,
+                              "Odd-width enhancement lost its output resolution")
+                    try check(prepared.usesBoundedCache == (mode == .progressiveHLS),
+                              "Odd-width enhancement did not use the requested preparation path")
+                    let item = AVPlayerItem(url: prepared.url)
+                    player.replaceCurrentItem(with: item)
+                    let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+                    while item.status != .failed, ContinuousClock.now < deadline,
+                          item.status == .unknown || item.presentationSize.width == 0 {
+                        try await Task.sleep(for: .milliseconds(50))
+                    }
+                    try check(item.status == .readyToPlay, "Odd-width enhancement is not playable: \(String(describing: item.error))")
+                    let size = item.presentationSize
+                    try check(size.width >= 853 && size.height >= 480,
+                              "Odd-width enhancement downscaled its source")
+                    let types = item.tracks.compactMap { $0.assetTrack?.mediaType }
+                    try check(types.contains(.video) && types.contains(.audio), "Odd-width enhancement lost video/audio")
+                } catch {
+                    player.replaceCurrentItem(with: nil)
+                    prepared.stop(); await prepared.waitForProducer()
+                    throw error
+                }
+                player.replaceCurrentItem(with: nil)
+                prepared.stop(); await prepared.waitForProducer()
+            }
+        }
+        print("PASS odd-width 853x480 upscale and cleanup at 1080p/4K, complete-file and bounded cache")
+        fflush(nil)
+    }
     static func run() async throws {
+        if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--odd-source" {
+            try await oddDimensions(URL(string: CommandLine.arguments[2])!)
+            return
+        }
         if (3...4).contains(CommandLine.arguments.count), CommandLine.arguments[1] == "--remote" {
             let input = try MediaInput.url(CommandLine.arguments[2])
             let policy: ConversionPolicy = CommandLine.arguments.count == 4 && CommandLine.arguments[3] == "allow-video"
@@ -88,6 +135,7 @@ struct PreparationChecks {
             enhanced.stop()
         }
         print("PASS native-first extensionless HLS upscale and cleanup output with playable video and audio")
+        try await oddDimensions(URL(string: base + "/odd-width.mkv")!)
         let source = ResolvedSource(url: URL(string: base + "/combined.mkv")!)
         var prepared: PreparedMedia? = try await preparer.prepare(source, mode: .completeFile)
         let endpoint = prepared!.url

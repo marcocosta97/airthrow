@@ -122,7 +122,14 @@ if not reuse:
     cache_encoder = OUT / 'cache-ffmpeg'
     cache_encoder.write_text('#!/usr/bin/python3\nimport os, pathlib, sys\na = sys.argv[1:]\nif a[-1].endswith("part.m3u8"):\n with pathlib.Path(' + repr(str(OUT / 'cache-jobs.txt')) + ').open("a") as log: log.write(a[-1] + "\\n")\nos.execv(' + repr(FFMPEG) + ', [' + repr(FFMPEG) + '] + a)\n')
     cache_encoder.chmod(0o700)
-FILES = {f'/{name}': (OUT / name).read_bytes() for name in ['combined.mp4', 'combined.mkv', 'subtitles.mkv', 'video.mp4', 'audio.m4a',
+# Keep this fixture available when reusing an older fixture directory too.
+if not (OUT / 'odd-width.mkv').exists():
+    ffmpeg('-f', 'lavfi', '-i', 'testsrc2=size=854x480:rate=24',
+           '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
+           '-vf', 'crop=853:480:exact=1', '-t', '1', '-c:v', 'libvpx-vp9',
+           '-deadline', 'realtime', '-cpu-used', '8', '-b:v', '0', '-crf', '35',
+           '-c:a', 'libopus', OUT / 'odd-width.mkv')
+FILES = {f'/{name}': (OUT / name).read_bytes() for name in ['odd-width.mkv', 'combined.mp4', 'combined.mkv', 'subtitles.mkv', 'video.mp4', 'audio.m4a',
                                                             'flac.mkv', 'multitrack.mkv', 'long.mp4', 'vp9-opus.mkv',
                                                             'hdr.mkv', 'uhd.mkv', 'hevc-sdr.mkv', 'highfps.mkv', 'tenbit.mkv',
                                                             'long-vp9.mkv', 'long-flac.mkv']}

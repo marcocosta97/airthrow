@@ -867,10 +867,10 @@ public struct MediaPreparer: Sendable {
             let maxHeight = enhancement.targetHeight == 2160 ? 2160 : 1080
             // The scale filter preserves aspect ratio inside this output box.
             // If either source dimension exceeds the box, it would shrink the
-            // picture. Odd dimensions can also lose a pixel when made even.
+            // picture. Odd input dimensions are valid when enlarged; verify
+            // the actual even-sized output below to catch rounding that shrinks.
             guard let width = video.width, let height = video.height,
-                  width <= maxWidth, height <= maxHeight,
-                  width.isMultiple(of: 2), height.isMultiple(of: 2) else {
+                  width <= maxWidth, height <= maxHeight else {
                 throw PreparationFailure.conversionWouldDownscale
             }
         }
