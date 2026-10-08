@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.parse
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -137,6 +138,30 @@ FILES['/no-range-vp9.mkv'] = (OUT / 'long-vp9.mkv').read_bytes()
 FILES['/native-stream'] = (OUT / 'source-hls.m3u8').read_bytes()
 FILES.update({f'/{path.name}': path.read_bytes() for path in OUT.glob('source-hls*.ts')})
 
+# Keep a large remote input sparse: its trailing movie index must be fetched
+# with byte ranges rather than downloading the padding. Actual frames span 120s.
+network_source = OUT / 'cache-network.mp4'
+network_stats = {'requests': 0, 'bytes': 0}
+network_stats_lock = threading.Lock()
+if '--network-continuity-only' in sys.argv:
+    if not network_source.exists():
+        compact = OUT / 'cache-network-compact.mp4'
+        if not compact.exists():
+            ffmpeg('-i', OUT / 'cache-source.mpg', '-c:v', 'libx264', '-preset', 'ultrafast',
+                   '-pix_fmt', 'yuv420p', '-c:a', 'aac', compact)
+        raw = compact.read_bytes()
+        offset = 0
+        while raw[offset + 4:offset + 8] != b'mdat':
+            offset += int.from_bytes(raw[offset:offset + 4], 'big')
+        size = int.from_bytes(raw[offset:offset + 4], 'big')
+        padding = 600 * 1024 * 1024
+        with network_source.open('wb') as output:
+            output.write(raw[:offset])
+            output.write((size + padding).to_bytes(4, 'big'))
+            output.write(raw[offset + 4:offset + size])
+            output.seek(offset + size + padding)
+            output.write(raw[offset + size:])
+
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
@@ -149,6 +174,52 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.respond(True)
 
     def respond(self, body):
+        path = urllib.parse.urlsplit(self.path).path
+        if path == '/cache-network-metrics':
+            with network_stats_lock:
+                data = json.dumps(network_stats).encode()
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers()
+            if body:
+                self.wfile.write(data)
+            return
+        if path == '/cache-network.mp4':
+            size = network_source.stat().st_size
+            start, end = 0, size - 1
+            requested = self.headers.get('Range')
+            if requested:
+                first, last = requested.removeprefix('bytes=').split('-')
+                start = int(first or 0)
+                end = min(int(last) if last else end, end)
+            # Delay each connection and pace reads to expose repeated remote
+            # opens/seeks without retaining the sparse body in RAM.
+            time.sleep(0.075)
+            self.send_response(206 if requested else 200)
+            self.send_header('Content-Length', str(end - start + 1))
+            self.send_header('Accept-Ranges', 'bytes')
+            if requested:
+                self.send_header('Content-Range', f'bytes {start}-{end}/{size}')
+            self.end_headers()
+            with network_stats_lock:
+                network_stats['requests'] += 1
+            if body:
+                with network_source.open('rb') as source:
+                    source.seek(start)
+                    remaining = end - start + 1
+                    while remaining:
+                        data = source.read(min(64 * 1024, remaining))
+                        if not data:
+                            break
+                        try:
+                            self.wfile.write(data)
+                        except (BrokenPipeError, ConnectionResetError):
+                            break
+                        remaining -= len(data)
+                        with network_stats_lock:
+                            network_stats['bytes'] += len(data)
+                        time.sleep(0.01)
+            return
         data = FILES.get(urllib.parse.urlsplit(self.path).path)
         if data is None:
             self.send_error(404)
@@ -177,7 +248,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 try:
-    if "--progressive-only" not in sys.argv and "--cache-only" not in sys.argv:
+    if "--progressive-only" not in sys.argv and "--cache-only" not in sys.argv and "--network-continuity-only" not in sys.argv:
         binary = OUT / 'PreparationChecks'
         run(['swiftc', '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
              ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
@@ -252,8 +323,9 @@ try:
          ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
          ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
          ROOT / 'Tests/CacheChecks/main.swift', '-o', cached], timeout=90)
-    run([cached, f'http://127.0.0.1:{server.server_port}', OUT], live=True, timeout=240)
-    if '--cache-only' in sys.argv:
+    run([cached, f'http://127.0.0.1:{server.server_port}', OUT,
+         *(['--network-continuity-only'] if '--network-continuity-only' in sys.argv else [])], live=True, timeout=240)
+    if '--cache-only' in sys.argv or '--network-continuity-only' in sys.argv:
         print(f'Cache fixtures and results: {OUT}')
         raise SystemExit(0)
     progressive = OUT / 'ProgressiveChecks'

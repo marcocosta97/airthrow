@@ -197,6 +197,11 @@ struct CacheChecks {
     static func run() async throws {
         try await schedulingChecks()
         if CommandLine.arguments.contains("--scheduling-only") { return }
+        if CommandLine.arguments.contains("--network-continuity-only") {
+            try await networkContinuity(base: CommandLine.arguments[1],
+                                        directory: URL(fileURLWithPath: CommandLine.arguments[2]))
+            return
+        }
         try await seekTimeoutCheck()
         let base = CommandLine.arguments[1]
         let directory = URL(fileURLWithPath: CommandLine.arguments[2])
@@ -456,5 +461,54 @@ struct CacheChecks {
         server.stop()
         try check(provider.releases == 1, "Repeated Stop released the resource twice")
         report("PASS Stop releases a resource completed after cancellation exactly once")
+    }
+
+    static func networkContinuity(base: String, directory: URL) async throws {
+        let input = directory.appendingPathComponent("cache-network.mp4")
+        let size = (try FileManager.default.attributesOfItem(atPath: input.path)[.size] as! NSNumber).int64Value
+        try check(size > 500 * 1024 * 1024, "Network fixture is smaller than 500 MiB")
+        var environment = ProcessInfo.processInfo.environment
+        environment["AIRTHROW_MEDIA_HOST"] = "127.0.0.1"
+        environment.removeValue(forKey: "AIRTHROW_PREPARATION_MODE")
+        let source = ResolvedSource(url: URL(string: base + "/cache-network.mp4")!, needsPreparation: true)
+            .withEnhancement(.cleanup1080)
+        report("CHECK Clean up and upscale delayed 600 MiB remote input")
+        let prepared = try await MediaPreparer(environment: environment).prepare(source)
+        defer { prepared.stop() }
+        try check(prepared.usesBoundedCache, "Delayed remote enhancement did not use bounded preparation")
+        let player = AVPlayer()
+        let item = AVPlayerItem(url: prepared.url)
+        player.isMuted = true
+        player.replaceCurrentItem(with: item)
+        defer { player.pause(); player.replaceCurrentItem(with: nil) }
+        try await waitUntil("Remote cached item did not become ready", { item.status != .unknown })
+        try check(item.status == .readyToPlay, "Remote cached item failed: \(String(describing: item.error))")
+        prepared.updatePlaybackPosition(0, playing: true)
+        player.play()
+        let clock = ContinuousClock()
+        let playbackStart = clock.now
+        let deadline = playbackStart.advanced(by: .seconds(55))
+        var began: ContinuousClock.Instant?
+        var lostTime = 0.0
+        while player.currentTime().seconds < 40, item.status != .failed, clock.now < deadline {
+            let position = player.currentTime().seconds
+            prepared.updatePlaybackPosition(position, playing: true)
+            if position > 0.1, began == nil { began = clock.now }
+            if let began {
+                let elapsed = began.duration(to: clock.now).components
+                lostTime = max(lostTime, Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18 - position)
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        let position = player.currentTime().seconds
+        player.pause(); player.replaceCurrentItem(with: nil)
+        prepared.stop(); await prepared.waitForProducer()
+        try check(item.status != .failed && position >= 40 && prepared.productionFailure == nil,
+                  "Remote enhancement stalled before 40s: position \(position), error \(String(describing: item.error))")
+        try check(lostTime < 2, "Remote enhancement lost \(lostTime)s to buffering after playback began")
+        let (metrics, _) = try await URLSession.shared.data(from: URL(string: base + "/cache-network-metrics")!)
+        let stats = try JSONDecoder().decode([String: Int].self, from: metrics)
+        try check(stats["bytes", default: 0] < 200 * 1024 * 1024, "Preparation downloaded the sparse source instead of seeking")
+        report("PASS delayed remote cleanup playback beyond 30s: position \(position)s, maximum lost time \(lostTime)s, HTTP \(stats)")
     }
 }
