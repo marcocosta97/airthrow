@@ -43,6 +43,10 @@ public final class PreparedMedia {
     public var onReadyRangesChanged: (@MainActor () -> Void)?
     private var progressNotification: Task<Void, Never>?
     private var producer: Task<Void, Never>?
+    /// Memoized ready range for the non-cached progressive playlist. The
+    /// playlist is re-parsed only when the file changes, so the periodic status
+    /// refresh does not stat every segment for the lifetime of the item.
+    private var cachedPlaylistRanges: (size: Int, modified: Date, ranges: [SeekRange])?
     private let server: MediaHTTPServer
     private var workspace: PreparationWorkspace?
     private var cache: CachedHLS?
@@ -129,8 +133,18 @@ public final class PreparedMedia {
         if let cache { return cache.readyRanges }
         guard let duration = sourceDuration, duration.isFinite, duration > 0 else { return nil }
         if url.pathExtension == "m3u8" {
-            guard let workspace, let playlist = try? HLSPlaylist(directory: workspace.directory) else { return [] }
-            return [SeekRange(start: 0, end: min(duration, playlist.duration))]
+            guard let workspace else { return [] }
+            let playlistURL = workspace.directory.appendingPathComponent("media.m3u8")
+            let attributes = try? FileManager.default.attributesOfItem(atPath: playlistURL.path)
+            let size = (attributes?[.size] as? NSNumber)?.intValue ?? -1
+            let modified = attributes?[.modificationDate] as? Date ?? .distantPast
+            if let cached = cachedPlaylistRanges, cached.size == size, cached.modified == modified {
+                return cached.ranges
+            }
+            guard let playlist = try? HLSPlaylist(directory: workspace.directory) else { return [] }
+            let ranges = [SeekRange(start: 0, end: min(duration, playlist.duration))]
+            cachedPlaylistRanges = (size, modified, ranges)
+            return ranges
         }
         return [SeekRange(start: 0, end: duration)]
     }

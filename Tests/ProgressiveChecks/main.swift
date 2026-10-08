@@ -103,6 +103,19 @@ struct ProgressiveChecks {
             try check(body.count == response.expectedContentLength, "Playlist changed between stat and read")
             try await Task.sleep(for: .milliseconds(40))
         }
+        // Ready ranges must keep advancing while the growing playlist gains
+        // segments. A range memoized on the wrong signal would freeze at the
+        // startup buffer even though more media became seekable.
+        var observedEnd = prepared.readyRanges?.last?.end ?? 0
+        var advanced = false
+        while prepared.isProducing, Date() < Date().addingTimeInterval(8) {
+            try await Task.sleep(for: .milliseconds(100))
+            let end = prepared.readyRanges?.last?.end ?? 0
+            try check(end >= observedEnd, "Ready range moved backwards")
+            if end > observedEnd { advanced = true }
+            observedEnd = end
+        }
+        try check(advanced, "Ready ranges did not advance while the playlist was growing")
         await prepared.waitForProducer()
         try check(prepared.productionFailure == nil, "Producer failed after readiness")
         let (final, _) = try await fetch(prepared.url)
