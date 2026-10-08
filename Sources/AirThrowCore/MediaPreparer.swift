@@ -175,7 +175,7 @@ final class PreparationWorkspace: @unchecked Sendable {
         try? FileManager.default.removeItem(at: directory)
         close(lease)
     }
-    func checkSize(_ maximumBytes: Int64) throws {
+    static func size(of directory: URL) throws -> Int64 {
         let files = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey])
         var bytes: Int64 = 0
         while let file = files?.nextObject() as? URL {
@@ -183,6 +183,10 @@ final class PreparationWorkspace: @unchecked Sendable {
             if let values = try? file.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
                values.isRegularFile == true, let size = values.fileSize { bytes += Int64(size) }
         }
+        return bytes
+    }
+    func checkSize(_ maximumBytes: Int64) throws {
+        let bytes = try Self.size(of: directory)
         guard bytes < maximumBytes else { throw PreparationFailure.storageLimit }
         let space = try FileManager.default.attributesOfFileSystem(forPath: directory.path)
         guard let free = (space[.systemFreeSize] as? NSNumber)?.int64Value,

@@ -25,6 +25,119 @@ private final class LateResourceProvider {
 struct CacheChecks {
     private static let started = ContinuousClock().now
     @MainActor private final class SeekOutcome { var finished: Bool? }
+    @MainActor private final class CacheProducer {
+        var started: [Int] = []
+        var finished: [Int] = []
+        var active = 0
+        var maximumActive = 0
+        let bytes: Int
+        init(bytes: Int = 1024) { self.bytes = bytes }
+        func produce(_ index: Int, directory: URL) async throws -> (height: Int?, frameRate: Double?) {
+            started.append(index); active += 1; maximumActive = max(maximumActive, active)
+            defer { active -= 1 }
+            try await Task.sleep(for: .milliseconds(50))
+            try Data(repeating: 0, count: bytes).write(to: directory.appendingPathComponent(String(format: "segment%06d.ts", index)))
+            finished.append(index)
+            return (180, 24)
+        }
+    }
+
+    static func waitUntil(_ message: String, _ condition: () -> Bool) async throws {
+        let deadline = ContinuousClock().now.advanced(by: .seconds(3))
+        while !condition(), ContinuousClock().now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        try check(condition(), message)
+    }
+
+    static func schedulingChecks() async throws {
+        var measured = PreparationPacing()
+        measured.record(mediaSeconds: 6, elapsedSeconds: 3, bytes: 8000)
+        try check(measured.canBuildSurplus && measured.secondsPerMediaSecond == 0.5,
+                  "Faster-than-playback production could not build surplus")
+        for _ in 0..<8 { measured.record(mediaSeconds: 6, elapsedSeconds: 9, bytes: 16000) }
+        try check(!measured.canBuildSurplus && measured.largestChunkBytes == 16000,
+                  "Pacing did not adapt to sustained slower production or larger chunks")
+        for _ in 0..<8 { measured.record(mediaSeconds: 6, elapsedSeconds: 1, bytes: 4000) }
+        try check(measured.canBuildSurplus, "Pacing did not recover when production sped up")
+        report("PASS measured production ratio adapts to slowdown and recovery")
+        let workspace = try PreparationWorkspace()
+        let producer = CacheProducer()
+        let cache = try CachedHLS(workspace: workspace, duration: 600, fragmented: false,
+                                 preferences: PreparationPreferences()) { index, _, _, directory in
+            try await producer.produce(index, directory: directory)
+        }
+        defer { cache.stop() }
+        try await cache.warmUp()
+        cache.updatePosition(0, playing: true)
+        // No further time observer callbacks: buffering can stop the playback clock.
+        try await waitUntil("Playing cache did not start preparation", { producer.started.contains(1) })
+        let requested = try await cache.resource("segment000070.ts")
+        cache.release(requested)
+        try check(producer.started.firstIndex(of: 70)! <= 3,
+                  "HTTP demand waited behind an entire speculative window")
+        try await waitUntil("Fast preparation stopped at the fixed 45-second window", { producer.finished.contains(10) })
+        try check(cache.pacing.canBuildSurplus, "Fetch and processing timing was not measured")
+        try check(producer.maximumActive == 1, "Look-ahead ran multiple encoders concurrently")
+        cache.updatePosition(0)
+        await cache.waitForJobs()
+        let pausedAttempts = producer.started.count
+        try await Task.sleep(for: .milliseconds(150))
+        try check(producer.started.count == pausedAttempts && producer.active == 0,
+                  "Paused cache continued speculative production")
+        cache.updatePosition(300, playing: true)
+        try await waitUntil("Resume did not refill at the new position", { producer.started.contains(50) })
+        cache.updatePosition(300)
+        await cache.waitForJobs()
+        try check(producer.active == 0, "Pause left an unrequested encoder running")
+        let attempts = producer.started.count
+        try await Task.sleep(for: .milliseconds(150))
+        try check(producer.started.count == attempts, "Cancellation restarted speculative production")
+        cache.stop(); await cache.waitForJobs()
+        report("PASS adaptive look-ahead beyond 45s without clock updates, demand priority, serialized production and pause cancellation")
+
+        let limitedWorkspace = try PreparationWorkspace()
+        let limitedProducer = CacheProducer(bytes: 8000)
+        let limited = try CachedHLS(workspace: limitedWorkspace, duration: 120, fragmented: false,
+                                   preferences: PreparationPreferences(maximumBytes: 48 * 1024)) { index, _, _, directory in
+            try await limitedProducer.produce(index, directory: directory)
+        }
+        defer { limited.stop() }
+        try await limited.warmUp()
+        limited.updatePosition(0, playing: true)
+        try await waitUntil("Budget fixture did not fill", { limitedProducer.finished.count >= 2 })
+        try await Task.sleep(for: .milliseconds(250))
+        let limitedAttempts = limitedProducer.started.count
+        try await Task.sleep(for: .milliseconds(250))
+        try check(limitedProducer.started.count == limitedAttempts && limitedAttempts < 8,
+                  "Space pressure caused continuous eviction and re-encoding of the look-ahead")
+        try check(limitedProducer.active == 0, "Budget-limited speculation did not stop")
+        let next = limitedWorkspace.directory.appendingPathComponent("chunk1/segment000001.ts")
+        let demandedResource = try await limited.resource("segment000010.ts")
+        limited.release(demandedResource)
+        try check(limitedProducer.finished.contains(10), "Prefetch space reserve blocked HTTP demand")
+        try check(FileManager.default.fileExists(atPath: next.path), "Distant demand evicted the next playback chunk")
+        limited.stop(); await limited.waitForJobs()
+        report("PASS space pressure stops speculation while HTTP demand can still generate chunks")
+
+        let failingWorkspace = try PreparationWorkspace()
+        let failingProducer = CacheProducer()
+        let failing = try CachedHLS(workspace: failingWorkspace, duration: 120, fragmented: false,
+                                   preferences: PreparationPreferences()) { index, _, _, directory in
+            if index == 2 { throw PreparationFailure.failed }
+            return try await failingProducer.produce(index, directory: directory)
+        }
+        defer { failing.stop() }
+        var failures = 0
+        failing.onFailure = { _ in failures += 1 }
+        try await failing.warmUp()
+        failing.updatePosition(0, playing: true)
+        try await waitUntil("Speculative failure was not reported", { failures > 0 })
+        try await Task.sleep(for: .milliseconds(150))
+        try check(failures == 1 && failingProducer.started == [0, 1], "Failure restarted speculative production")
+        let retained = try await failing.resource("segment000000.ts")
+        failing.release(retained)
+        failing.stop(); await failing.waitForJobs()
+        report("PASS producer failure is reported once and stops look-ahead without removing retained delivery")
+    }
 
     static func report(_ message: String) {
         print("[\(started.duration(to: ContinuousClock().now))] \(message)")
@@ -82,6 +195,8 @@ struct CacheChecks {
         catch { report("FAIL cache checks: \(error)"); exit(1) }
     }
     static func run() async throws {
+        try await schedulingChecks()
+        if CommandLine.arguments.contains("--scheduling-only") { return }
         try await seekTimeoutCheck()
         let base = CommandLine.arguments[1]
         let directory = URL(fileURLWithPath: CommandLine.arguments[2])
@@ -151,14 +266,16 @@ struct CacheChecks {
         let attempts = try String(contentsOf: log, encoding: .utf8).split(separator: "\n")
         try check(attempts.count == 3, "Concurrent requests did not coalesce: \(attempts)")
         report("CHECK Cache eviction and regeneration")
+        let future = try await fetch("segment000019.ts")
+        try check(future.1.statusCode == 200, "Future surplus fixture did not prepare")
         prepared.updatePlaybackPosition(90)
         try await Task.sleep(for: .seconds(16))
         prepared.updatePlaybackPosition(90)
-        try check(try chunks() == ["chunk15"], "Old chunks did not leave the playback window")
+        try check(try chunks() == ["chunk15", "chunk19"], "Played chunks were not evicted or future surplus was discarded")
         let regenerated = try await fetch("segment000000.ts")
         try check(regenerated.1.statusCode == 200 && regenerated.0.count > 1000,
                   "Evicted chunk could not be regenerated")
-        try check(try String(contentsOf: log, encoding: .utf8).split(separator: "\n").count == 4,
+        try check(try String(contentsOf: log, encoding: .utf8).split(separator: "\n").count == 5,
                   "Backward seek did not regenerate exactly one chunk")
         for name in ["segment999999.ts", "segment000000.m4s", "init000000.mp4", "segment000000.ts.tmp", "chunk0/part.m3u8", "lease"] {
             let (_, denied) = try await fetch(name)

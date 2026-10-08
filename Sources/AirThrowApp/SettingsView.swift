@@ -159,6 +159,9 @@ struct SettingsView: View {
                         Text("5 minutes").tag(300)
                         Text("10 minutes").tag(600)
                     }
+                    Text("Faster preparation can buffer beyond this window, up to the preparation space limit. Changes apply to the next load.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Toggle("Keep all prepared video", isOn: $retainAll)
                 Toggle("Remux on demand (experimental)", isOn: $remuxCache)
