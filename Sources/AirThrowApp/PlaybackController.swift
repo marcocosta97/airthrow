@@ -67,7 +67,8 @@ final class PlaybackController: ObservableObject {
         let height: Double?
         if let sourceID {
             if sourceID == "automatic" {
-                source = try? MediaSelector.select(sourceCandidates, policy: .allowVideo, preferQuality: preferQuality)
+                source = try? MediaSelector.select(sourceCandidates, policy: effectiveConversionPolicy,
+                                                    preferQuality: preferQuality)
                 height = source.flatMap { Self.candidatesHeight(for: $0, in: sourceCandidates) }
             } else if let index = sourceCandidates.indices.first(where: { sourceOptionID($0) == sourceID }) {
                 source = sourceCandidates[index].source

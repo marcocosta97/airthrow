@@ -178,6 +178,10 @@ struct SourceChoiceChecks {
         try await downscaleTargetGated(website: website, high: candidate(audioURL, title: "4K source",
                                                                    id: "native-2160", height: 2160),
                                        low: candidate(videoURL, title: "1080p source", id: "gated-1080", height: 1080))
+        try await automaticHeightHonorsConversionPolicy(website: website,
+            conversion: candidate(audioURL, title: "Conversion 2160", id: "convert-2160", height: 2160,
+                                  plannedPath: .videoConversion),
+            native: native720)
         try await nativeSourceHeight(base: base)
         try await sourceChoiceDuringPreparation(website: website, high: remux1080,
                                                 low: candidate(videoURL, title: "Remux 720",
@@ -299,6 +303,26 @@ struct SourceChoiceChecks {
         _ = try await settle(controller)
         try check(controller.enhancementOutput4K, "High-resolution Original lost its 4K requirement after loading")
         print("PASS source above 1080p requires 4K output and rejects 1080p enhancement")
+        await controller.shutdownAndWait()
+    }
+
+    // The Automatic entry re-runs source selection for the preview, so it must
+    // honor the same conversion policy as the load. A disallowed video-conversion
+    // presentation must not raise the reported height and demand 4K output.
+    static func automaticHeightHonorsConversionPolicy(website: URL,
+            conversion: MediaCandidate, native: MediaCandidate) async throws {
+        let resolver = ScriptedResolver([website.absoluteString: [.init(candidates: [conversion, native])]])
+        let controller = PlaybackController(resolveCandidates: { try await resolver.candidates(for: $0) },
+                                            allowVideoConversion: false, preferQuality: true, prepareSource: nil)
+        try controller.load(website.absoluteString)
+        let status = try await settle(controller)
+        try check(status.title == native.source.title && status.playbackPath == .direct,
+                  "Automatic selection did not avoid the disallowed conversion presentation")
+        try check(controller.sourceHeight(for: "automatic") == native.height,
+                  "Automatic preview used a disallowed conversion presentation")
+        try check(!controller.requires4KOutput(for: "automatic"),
+                  "Automatic preview demanded 4K for a disallowed conversion presentation")
+        print("PASS automatic source preview honors the conversion policy")
         await controller.shutdownAndWait()
     }
 
