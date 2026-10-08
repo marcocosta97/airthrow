@@ -40,6 +40,8 @@ public final class PreparedMedia {
     public private(set) var productionFailure: PreparationFailure?
     public private(set) var isProducing = false
     public var onFailure: (@MainActor (PreparationFailure) -> Void)?
+    public var onReadyRangesChanged: (@MainActor () -> Void)?
+    private var progressNotification: Task<Void, Never>?
     private var producer: Task<Void, Never>?
     private let server: MediaHTTPServer
     private var workspace: PreparationWorkspace?
@@ -57,6 +59,9 @@ public final class PreparedMedia {
     fileprivate func produce(executable: String, arguments: [String], workspace: PreparationWorkspace,
                              maximumBytes: Int64, timeout: Duration, duration: Double) {
         isProducing = true
+        let progress: @Sendable () -> Void = { [weak self] in
+            Task { @MainActor [weak self] in self?.notifyReadyRangesChanged() }
+        }
         producer = Task { [weak self] in
             let activity = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled],
                                                                  reason: "Preparing AirPlay video")
@@ -67,6 +72,7 @@ public final class PreparedMedia {
                 _ = try await HelperProcess.run(executable: executable, arguments: arguments,
                     timeout: timeout, outputLimit: 64 * 1024, monitor: {
                         try workspace.checkSize(maximumBytes)
+                        progress()
                     })
                 try workspace.checkSize(maximumBytes)
                 let playlist = try HLSPlaylist(directory: workspace.directory)
@@ -81,6 +87,7 @@ public final class PreparedMedia {
                 self?.onFailure?(failure)
             }
             self?.isProducing = false
+            self?.notifyReadyRangesChanged()
         }
     }
 
@@ -118,6 +125,23 @@ public final class PreparedMedia {
         } else { await cache?.waitForJobs() }
     }
     public var usesBoundedCache: Bool { cache != nil }
+    public var readyRanges: [SeekRange]? {
+        if let cache { return cache.readyRanges }
+        guard let duration = sourceDuration, duration.isFinite, duration > 0 else { return nil }
+        if url.pathExtension == "m3u8" {
+            guard let workspace, let playlist = try? HLSPlaylist(directory: workspace.directory) else { return [] }
+            return [SeekRange(start: 0, end: min(duration, playlist.duration))]
+        }
+        return [SeekRange(start: 0, end: duration)]
+    }
+    private func notifyReadyRangesChanged() {
+        guard onReadyRangesChanged != nil, progressNotification == nil else { return }
+        progressNotification = Task { [weak self] in
+            guard let self else { return }
+            self.progressNotification = nil
+            self.onReadyRangesChanged?()
+        }
+    }
     public func updatePlaybackPosition(_ seconds: Double, playing: Bool = false) { cache?.updatePosition(seconds, playing: playing) }
     fileprivate func installCache(_ cache: CachedHLS) {
         self.cache = cache
@@ -126,6 +150,7 @@ public final class PreparedMedia {
             self?.productionFailure = failure
             self?.onFailure?(failure)
         }
+        cache.onReadyRangesChanged = { [weak self] in self?.notifyReadyRangesChanged() }
     }
     deinit { producer?.cancel() }
     /// Replaces the planned height and rate with the observed output once a
@@ -140,6 +165,8 @@ public final class PreparedMedia {
     public func cancelProduction() { producer?.cancel(); cache?.cancelProduction() }
     public func stop() {
         onFailure = nil
+        onReadyRangesChanged = nil
+        progressNotification?.cancel(); progressNotification = nil
         server.stop()
         cancelProduction()
         cache?.stop()

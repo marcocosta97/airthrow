@@ -714,6 +714,10 @@ final class PlaybackController: ObservableObject {
                         // producer failure ends it rather than advancing a queue.
                         self.fail(failure.reason, advancingQueue: false)
                     }
+                    prepared.onReadyRangesChanged = { [weak self, weak prepared] in
+                        guard let self, self.generation == id, self.preparedMedia === prepared else { return }
+                        self.refresh()
+                    }
                     playbackURL = prepared.url
                     self.preparing = false
                 }
@@ -1634,6 +1638,7 @@ final class PlaybackController: ObservableObject {
                 }, truncated: queue.truncated)
         }
         next.duration = preparedMedia?.sourceDuration ?? item.flatMap { finite($0.duration.seconds) }
+        next.preparedRanges = loading || failure != nil ? nil : preparedMedia?.readyRanges
         // While a new item loads, a retained previous item can still report its
         // old position; hide it so the timeline starts at the beginning. During
         // the muted route probe, report the pre-probe position so the timeline

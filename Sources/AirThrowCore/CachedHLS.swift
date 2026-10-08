@@ -49,6 +49,10 @@ final class CachedHLS {
     private var productionCancelled = false
     var onActivity: ((Bool) -> Void)?
     var onFailure: ((PreparationFailure) -> Void)?
+    var onReadyRangesChanged: (() -> Void)?
+    var readyRanges: [SeekRange] {
+        SeekRange.merged(retained.keys.map { SeekRange(start: starts[$0], end: starts[$0] + length($0)) })
+    }
     private(set) var videoHeight: Int?
     private(set) var videoFrameRate: Double?
     private let starts: [Double]
@@ -179,6 +183,7 @@ final class CachedHLS {
                                    bytes: try PreparationWorkspace.size(of: directory))
                 self.prune(toBudget: true, protecting: index)
                 try workspace.checkSize(self.maximumBytes)
+                self.onReadyRangesChanged?()
             } catch {
                 try? FileManager.default.removeItem(at: directory)
                 self.retained.removeValue(forKey: index)
@@ -269,6 +274,7 @@ final class CachedHLS {
     private func remove(_ index: Int) {
         try? FileManager.default.removeItem(at: directory(index))
         retained.removeValue(forKey: index)
+        onReadyRangesChanged?()
     }
 
     func cancelProduction() {
@@ -276,7 +282,7 @@ final class CachedHLS {
         prefetch?.cancel()
         for job in jobs.values { job.cancel() }
     }
-    func stop() { stopped = true; cancelProduction() }
+    func stop() { stopped = true; onReadyRangesChanged = nil; cancelProduction() }
     func waitForJobs() async {
         let pending = Array(jobs.values)
         for job in pending { _ = try? await job.value }

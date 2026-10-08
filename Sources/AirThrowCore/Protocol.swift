@@ -112,6 +112,21 @@ public struct SeekRange: Codable, Sendable, Equatable {
     public func contains(_ value: Double) -> Bool {
         value.isFinite && value >= start && value <= end
     }
+    public static func merged(_ ranges: [Self], within bounds: Self? = nil) -> [Self] {
+        let valid = ranges.compactMap { range -> Self? in
+            guard range.start.isFinite, range.end.isFinite, range.end > range.start else { return nil }
+            let start = max(range.start, bounds?.start ?? range.start)
+            let end = min(range.end, bounds?.end ?? range.end)
+            return end > start ? Self(start: start, end: end) : nil
+        }.sorted { $0.start < $1.start }
+        var result: [Self] = []
+        for range in valid {
+            if let last = result.last, range.start <= last.end + 0.001 {
+                result[result.count - 1] = Self(start: last.start, end: max(last.end, range.end))
+            } else { result.append(range) }
+        }
+        return result
+    }
 }
 
 public enum AfterPlaybackBehavior: String, Codable, Sendable, CaseIterable {
@@ -223,6 +238,9 @@ public struct PlaybackSnapshot: Codable, Sendable, Equatable {
     public var position: Double?
     public var duration: Double?
     public var seekableRanges: [SeekRange] = []
+    /// Verified video currently available on this Mac. nil uses native player
+    /// buffering; an empty array explicitly means no prepared chunks are ready.
+    public var preparedRanges: [SeekRange]?
     public var title = "No video loaded"
     public var isLive = false
     /// Seconds behind the current live edge. Present only for live media.
@@ -467,6 +485,12 @@ public enum PlaybackPolicy {
 
     public static func canSeek(_ snapshot: PlaybackSnapshot) -> Bool {
         canControl(snapshot) && !snapshot.seekableRanges.isEmpty && activeSeekRange(snapshot) != nil
+    }
+
+    public static func readyRanges(_ snapshot: PlaybackSnapshot) -> [SeekRange] {
+        guard ![.idle, .loading, .failed].contains(snapshot.state),
+              let bounds = activeSeekRange(snapshot) else { return [] }
+        return SeekRange.merged(snapshot.preparedRanges ?? snapshot.diagnostics?.bufferedRanges ?? [], within: bounds)
     }
 
     public static func stateLabel(_ snapshot: PlaybackSnapshot) -> String {

@@ -69,6 +69,14 @@ struct ControllerView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var status: PlaybackSnapshot { controller.snapshot }
+    private var progressHelp: String {
+        let ranges = PlaybackPolicy.readyRanges(status)
+        let label = status.preparedRanges == nil ? "Buffered video" : "Video ready on this Mac"
+        guard !ranges.isEmpty else { return "Highlighted sections show \(label.lowercased())." }
+        let times = ranges.prefix(3).map { "\(PlaybackFormat.time($0.start))–\(PlaybackFormat.time($0.end))" }.joined(separator: ", ")
+        let more = ranges.count > 3 ? ", and \(ranges.count - 3) more ranges" : ""
+        return "\(label): \(times)\(more)."
+    }
     private var busy: Bool { PlaybackPolicy.isBusy(status) }
     private var range: SeekRange? { PlaybackPolicy.activeSeekRange(status) }
     private var canControl: Bool { PlaybackPolicy.canControl(status) }
@@ -195,17 +203,21 @@ struct ControllerView: View {
                     VStack(spacing: 4) {
                         GeometryReader { geometry in
                             ZStack(alignment: .topLeading) {
-                                Slider(value: Binding(get: {
+                                SeekProgressSlider(value: Binding(get: {
                                     let value = scrubbing ? scrub : (controller.pendingSeek ?? status.position ?? 0)
                                     return min(max(value, range?.start ?? 0), range?.end ?? 1)
-                                }, set: { scrub = $0 }), in: (range?.start ?? 0)...(range?.end ?? 1), onEditingChanged: { editing in
+                                }, set: { scrub = $0 }), bounds: (range?.start ?? 0)...(range?.end ?? 1),
+                                    readyRanges: PlaybackPolicy.readyRanges(status), onEditingChanged: { editing in
                                     scrubbing = editing
                                     if !editing { perform { try controller.seek(scrub) } }
                                 })
+                                .frame(height: 20)
                                 .padding(.top, 8)
                                 .disabled(!PlaybackPolicy.canSeek(status))
                                 .accessibilityLabel("Playback position")
                                 .accessibilityValue(PlaybackFormat.time(controller.pendingSeek ?? status.position))
+                                .accessibilityHint(progressHelp)
+                                .help(progressHelp)
                                 if let hoverTime {
                                     Text(PlaybackFormat.time(hoverTime))
                                         .font(.caption2.monospacedDigit())

@@ -97,6 +97,37 @@ let tests: [(String, () throws -> Void)] = [
         }
         try rejects { try MediaInput.validateSeek(5, ranges: []) }
     }),
+    ("ready timeline ranges and legacy protocol", {
+        var snapshot = PlaybackSnapshot()
+        snapshot.state = .paused
+        snapshot.duration = 120
+        snapshot.preparedRanges = [SeekRange(start: 60, end: 72), SeekRange(start: 0, end: 6),
+                                   SeekRange(start: 6, end: 12), SeekRange(start: 110, end: 130),
+                                   SeekRange(start: .nan, end: 20)]
+        try check(PlaybackPolicy.readyRanges(snapshot) == [SeekRange(start: 0, end: 12),
+                  SeekRange(start: 60, end: 72), SeekRange(start: 110, end: 120)], "Ready ranges lost gaps or timeline clipping")
+        snapshot.preparedRanges?.removeLast()
+        let data = try JSONEncoder().encode(snapshot)
+        let decoded = try JSONDecoder().decode(PlaybackSnapshot.self, from: data)
+        try check(decoded.preparedRanges?.count == 4, "Prepared ranges did not round-trip")
+        var legacy = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        legacy.removeValue(forKey: "preparedRanges")
+        let old = try JSONDecoder().decode(PlaybackSnapshot.self, from: JSONSerialization.data(withJSONObject: legacy))
+        try check(old.preparedRanges == nil, "Legacy status incorrectly claimed preparation")
+        var diagnostics = PlaybackDiagnostics()
+        diagnostics.bufferedRanges = [SeekRange(start: 30, end: 40)]
+        snapshot.diagnostics = diagnostics
+        snapshot.preparedRanges = []
+        try check(PlaybackPolicy.readyRanges(snapshot).isEmpty, "Empty preparation fell back to stale player buffering")
+        snapshot.preparedRanges = nil
+        try check(PlaybackPolicy.readyRanges(snapshot) == diagnostics.bufferedRanges, "Direct player buffering was not shown")
+        snapshot.state = .loading
+        try check(PlaybackPolicy.readyRanges(snapshot).isEmpty, "Replacement displayed stale progress")
+        snapshot.state = .playing
+        snapshot.isLive = true
+        snapshot.seekableRanges = [SeekRange(start: 35, end: 45)]
+        try check(PlaybackPolicy.readyRanges(snapshot) == [SeekRange(start: 35, end: 40)], "Live progress used the wrong timeline origin")
+    }),
     ("route loss overrides playing state", {
         try check(PlaybackPolicy.state(hasItem: true, failed: false, ready: true, connecting: false,
             external: false, ended: false, playing: true, waiting: false, hasPlayed: true) == .awaitingReceiver,

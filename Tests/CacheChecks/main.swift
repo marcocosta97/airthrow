@@ -25,6 +25,10 @@ private final class LateResourceProvider {
 struct CacheChecks {
     private static let started = ContinuousClock().now
     @MainActor private final class SeekOutcome { var finished: Bool? }
+    @MainActor private final class PreparedHolder {
+        var value: PreparedMedia?
+        func store(_ value: PreparedMedia) { self.value = value }
+    }
     @MainActor private final class CacheProducer {
         var started: [Int] = []
         var finished: [Int] = []
@@ -67,11 +71,13 @@ struct CacheChecks {
         }
         defer { cache.stop() }
         try await cache.warmUp()
+        try check(cache.readyRanges == [SeekRange(start: 0, end: 6)], "Warm-up advertised unprepared chunks")
         cache.updatePosition(0, playing: true)
         // No further time observer callbacks: buffering can stop the playback clock.
         try await waitUntil("Playing cache did not start preparation", { producer.started.contains(1) })
         let requested = try await cache.resource("segment000070.ts")
         cache.release(requested)
+        try check(cache.readyRanges.contains(SeekRange(start: 420, end: 426)), "Distant ready chunk was not reported separately")
         try check(producer.started.firstIndex(of: 70)! <= 3,
                   "HTTP demand waited behind an entire speculative window")
         try await waitUntil("Fast preparation stopped at the fixed 45-second window", { producer.finished.contains(10) })
@@ -225,6 +231,7 @@ struct CacheChecks {
         defer { prepared.stop() }
         try check(prepared.usesBoundedCache && prepared.sourceDuration! > 119 && !prepared.isProducing,
                   "Large input did not use idle finite cached preparation")
+        try check(prepared.readyRanges == [SeekRange(start: 0, end: 6)], "Prepared media advertised its whole VOD as ready")
         let session = URLSession(configuration: .ephemeral)
         defer { session.invalidateAndCancel() }
         try await lateResourceRelease(directory: directory, session: session)
@@ -398,8 +405,13 @@ struct CacheChecks {
         report("PASS Stop cancels an in-flight requested chunk without a terminal failure")
 
         report("CHECK Shared controller paused readiness")
+        let holder = PreparedHolder()
         let controller = PlaybackController(resolveSource: { _ in source }, allowVideoConversion: true,
-                                            prepareSource: { try await preparer.prepare($0) })
+                                            prepareSource: {
+                                                let media = try await preparer.prepare($0)
+                                                await holder.store(media)
+                                                return media
+                                            })
         try controller.load("https://example.com/cache-fixture")
         deadline = Date().addingTimeInterval(30)
         while controller.snapshot.state == .loading, Date() < deadline { try await Task.sleep(for: .milliseconds(50)) }
@@ -407,8 +419,16 @@ struct CacheChecks {
                   && controller.snapshot.duration! > 119 && controller.player.rate == 0
                   && controller.player.isMuted && (controller.snapshot.seekableRanges.last?.end ?? 0) > 119,
                   "Shared controller cached state: \(String(decoding: try JSONEncoder().encode(controller.snapshot), as: UTF8.self))")
+        guard let controllerMedia = holder.value else { throw PreparationFailure.failed }
+        let distantURL = controllerMedia.url.deletingLastPathComponent().appendingPathComponent("segment000019.ts")
+        _ = try await session.data(from: distantURL)
+        try await waitUntil("Paused controller did not publish ready progress", {
+            controller.snapshot.preparedRanges?.contains(where: { $0.start <= 114 && $0.end > 119 }) == true
+        })
+        try check(controller.player.rate == 0, "Progress updates started paused playback")
         report("CHECK Shared controller shutdown")
         await controller.shutdownAndWait()
+        try check(controller.snapshot.preparedRanges == nil, "Shutdown left stale ready ranges")
         report("PASS shared controller keeps cached media paused with a full finite seek range")
 
         report("CHECK Cache-budget rejection")
