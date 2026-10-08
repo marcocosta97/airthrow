@@ -44,7 +44,7 @@ struct ProgressiveChecks {
             try check(controller.snapshot.state == .awaitingReceiver, "Original progressive fixture did not load")
             try controller.selectEnhancement(choice)
             deadline = Date().addingTimeInterval(20)
-            while controller.snapshot.state == .loading, Date() < deadline {
+            while ![.awaitingReceiver, .failed].contains(controller.snapshot.state), Date() < deadline {
                 try await Task.sleep(for: .milliseconds(25))
             }
             try check(controller.snapshot.state == .awaitingReceiver && controller.snapshot.duration == 20
@@ -73,6 +73,8 @@ struct ProgressiveChecks {
         try check(prepared.isProducing && prepared.url.pathExtension == "m3u8", "Preparation waited for the entire source")
         try check(prepared.sourceDuration == 20, "Finite duration missing")
         let (initial, response) = try await fetch(prepared.url)
+        try check((prepared.preparationSpeed ?? 0) > 0 && prepared.preparationSpeed!.isFinite,
+                  "Sequential producer did not report measured preparation speed")
         let initialText = String(decoding: initial, as: UTF8.self)
         try check(response.value(forHTTPHeaderField: "Content-Type") == "application/vnd.apple.mpegurl"
                   && initialText.contains("#EXT-X-PLAYLIST-TYPE:EVENT") && !initialText.contains("#EXT-X-ENDLIST"),
@@ -118,6 +120,7 @@ struct ProgressiveChecks {
         try check(advanced, "Ready ranges did not advance while the playlist was growing")
         await prepared.waitForProducer()
         try check(prepared.productionFailure == nil, "Producer failed after readiness")
+        try check(prepared.preparationSpeed == nil, "Completed producer left a running speed indicator")
         let (final, _) = try await fetch(prepared.url)
         let finalText = String(decoding: final, as: UTF8.self)
         try check(finalText.contains("#EXT-X-ENDLIST") && final.count > initial.count, "Finite HLS did not complete")
@@ -144,7 +147,7 @@ struct ProgressiveChecks {
         // 4K uses HEVC/fMP4; no whole-file wait and no special environment opt-in.
         for choice in [VideoEnhancement.upscale1080, .cleanup1080, .upscale4K, .cleanup4K] {
             let started = Date()
-            let enhanced = try await preparer.prepare(source.withEnhancement(choice))
+            let enhanced = try await preparer.prepare(source.withConversionPolicy(.allowVideo).withEnhancement(choice))
             try check(enhanced.isProducing && enhanced.url.pathExtension == "m3u8"
                       && enhanced.videoHeight == choice.targetHeight,
                       "\(choice.rawValue) waited for a complete file or lost its output resolution")
@@ -206,7 +209,7 @@ struct ProgressiveChecks {
         // publish its startup buffer rather than convert the whole file first.
         var slowEnvironment = environment
         slowEnvironment["AIRTHROW_FFMPEG"] = directory.appendingPathComponent("below-realtime-ffmpeg").path
-        let slowPrepared = try await MediaPreparer(environment: slowEnvironment, preferences: PreparationPreferences(retainAll: true)).prepare(source.withEnhancement(.cleanup1080))
+        let slowPrepared = try await MediaPreparer(environment: slowEnvironment, preferences: PreparationPreferences(retainAll: true)).prepare(source.withConversionPolicy(.allowVideo).withEnhancement(.cleanup1080))
         try check(slowPrepared.isProducing && slowPrepared.url.pathExtension == "m3u8",
                   "Below-realtime finite conversion fell back to a whole-file wait")
         slowPrepared.stop()
@@ -230,7 +233,7 @@ struct ProgressiveChecks {
 
         try FileManager.default.removeItem(at: directory.appendingPathComponent("encoder-attempts.txt"))
         let recoveredHEVC = try await MediaPreparer(environment: hardwareFailureEnvironment, preferences: PreparationPreferences(retainAll: true)).prepare(
-            ResolvedSource(url: URL(string: base + "/combined.mp4")!).withEnhancement(.upscale4K))
+            ResolvedSource(url: URL(string: base + "/combined.mp4")!).withConversionPolicy(.allowVideo).withEnhancement(.upscale4K))
         try check(recoveredHEVC.url.pathExtension == "m3u8" && recoveredHEVC.videoHeight == 2160,
                   "HEVC hardware startup failure did not recover through software HLS")
         let hevcAttempts = try String(contentsOf: directory.appendingPathComponent("encoder-attempts.txt"), encoding: .utf8)

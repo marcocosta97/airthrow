@@ -6,6 +6,10 @@ private actor CancellationProbe {
     func markCancelled() { cancelled = true }
     func wasCancelled() -> Bool { cancelled }
 }
+private actor QualityLoads {
+    private var count = 0
+    func next() -> Int { count += 1; return count }
+}
 
 /// Exercise transport replies that occur during an AirPlay handoff, while a
 /// real AVPlayerItem still supplies readiness and video/seekable metadata.
@@ -17,6 +21,8 @@ private final class HandoffPlayer: AVPlayer, @unchecked Sendable {
         var rate: Float = 0
         var replies: [Reply] = []
         var seeks = 0
+        var ignoredPlays = 0
+        var plays = 0
     }
     private let lock = NSLock()
     nonisolated(unsafe) private var transport = Transport() // All access is protected by lock.
@@ -30,7 +36,13 @@ private final class HandoffPlayer: AVPlayer, @unchecked Sendable {
     override func currentTime() -> CMTime {
         CMTime(seconds: lock.withLock { transport.position }, preferredTimescale: 600)
     }
-    override func play() { rate = 1 }
+    override func play() {
+        lock.withLock {
+            transport.plays += 1
+            if transport.ignoredPlays > 0 { transport.ignoredPlays -= 1 }
+            else { transport.rate = 1 }
+        }
+    }
     override func pause() { rate = 0 }
     override func preroll(atRate rate: Float, completionHandler: (@Sendable (Bool) -> Void)? = nil) {
         completionHandler?(true)
@@ -61,6 +73,8 @@ private final class HandoffPlayer: AVPlayer, @unchecked Sendable {
         }
     }
     var seekCount: Int { lock.withLock { transport.seeks } }
+    var playCount: Int { lock.withLock { transport.plays } }
+    func ignoreNextPlays(_ count: Int) { lock.withLock { transport.ignoredPlays = count } }
     func disconnect() { lock.withLock { transport.external = false } }
     func setReplies(_ replies: [Reply]) { lock.withLock { transport.replies = replies } }
 }
@@ -403,6 +417,121 @@ struct ControllerChecks {
         try check(handoffController.snapshot.state == .idle && handoffPlayer.currentItem == nil && handoffPlayer.rate == 0,
                   "Stopped handoff completed into the unloaded session")
         print("PASS Stop cancels a pending handoff rewind")
-        print("17/17 controller checks passed (simulated handoff; no physical receiver)")
+        let qualityPlayer = HandoffPlayer()
+        let qualityLoads = QualityLoads()
+        let qualityURL = URL(string: base + "/long-video.mp4")!
+        let qualityController = PlaybackController(player: qualityPlayer, resolveCandidates: { _ in
+            if await qualityLoads.next() == 4 { try await Task.sleep(for: .seconds(35)) }
+            return [MediaCandidate(source: ResolvedSource(url: qualityURL), id: "low", height: 720),
+                    MediaCandidate(source: ResolvedSource(url: qualityURL), id: "high", height: 1080)]
+        }, allowVideoConversion: true, prepareSource: nil)
+        defer { qualityController.shutdown() }
+        func waitForQuality(_ state: PlaybackState) async throws {
+            let deadline = Date().addingTimeInterval(10)
+            while Date() < deadline {
+                qualityController.refresh()
+                if qualityController.snapshot.state == state { return }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            try check(false, "Quality replacement did not reach \(state): \(qualityController.snapshot)")
+        }
+        try qualityController.load(sendURL("quality"))
+        try await waitForQuality(.awaitingReceiver)
+        let qualityDuration = qualityController.snapshot.duration!
+        qualityPlayer.handoff(at: 4, replies: [.restored])
+        qualityController.refresh()
+        try qualityController.play()
+        let qualityItem = qualityPlayer.currentItem
+        let lowChoice = qualityController.snapshot.sources!.first(where: { $0.quality == "720p" })!.id
+        try qualityController.applyVideoOptions(sourceID: lowChoice, enhancement: .original, output4K: false)
+        try check(qualityController.snapshot.position == 4 && qualityPlayer.rate == 0,
+                  "Quality reload lost its target or kept the old video playing")
+        try check(PlaybackPolicy.activeSeekRange(qualityController.snapshot)?.end == qualityDuration,
+                  "Quality reload collapsed the timeline: \(qualityController.snapshot), original duration \(qualityDuration)")
+        try await waitForQuality(.playing)
+        try check(qualityController.player === qualityPlayer && qualityPlayer.currentItem !== qualityItem
+                  && qualityPlayer.currentTime().seconds == 4 && qualityPlayer.rate == 1,
+                  "Quality replacement failed to preserve position and play intent")
+        // Move farther along after the first replacement: the second must use
+        // the current clock, rather than the previous reload's saved target.
+        qualityPlayer.handoff(at: 6, replies: [.interrupted, .restored])
+        qualityController.pause()
+        let highChoice = qualityController.snapshot.sources!.first(where: { $0.quality == "1080p" })!.id
+        try qualityController.applyVideoOptions(sourceID: highChoice, enhancement: .original, output4K: false)
+        try await waitForQuality(.paused)
+        try check(qualityPlayer.currentTime().seconds == 6 && qualityPlayer.rate == 0,
+                  "Paused quality replacement reused an old target or autoplayed")
+        print("PASS quality replacements preserve current position and play/pause on the persistent player")
+        qualityPlayer.handoff(at: 40, replies: [.restored])
+        try qualityController.play()
+        let playsBeforeReplacement = qualityPlayer.playCount
+        qualityPlayer.ignoreNextPlays(2)
+        let delayedChoice = qualityController.snapshot.sources!.first(where: { $0.quality == "720p" })!.id
+        try qualityController.applyVideoOptions(sourceID: delayedChoice, enhancement: .original, output4K: false)
+        qualityPlayer.disconnect()
+        try await Task.sleep(for: .seconds(32))
+        qualityController.refresh()
+        try check(qualityController.snapshot.position == 40 && qualityController.snapshot.duration == qualityDuration
+                  && qualityController.notice?.contains("did not reconnect") != true,
+                  "Slow replacement moved the timeline or expired playback intent during preparation")
+        qualityPlayer.handoff(at: 40, replies: [.restored])
+        try await waitForQuality(.playing)
+        try check(qualityPlayer.currentTime().seconds == 40 && qualityPlayer.rate == 1,
+                  "Slow quality switch required a manual Play or restarted the video")
+        try check(qualityPlayer.playCount >= playsBeforeReplacement + 3,
+                  "Replacement lost resume intent after the receiver ignored Play")
+        print("PASS replacement beyond 30 seconds keeps the 40-second timeline and resumes automatically")
+        print("PASS replacement retries ignored Play commands until playback is observed")
+        qualityPlayer.ignoreNextPlays(99)
+        let playsBeforePause = qualityPlayer.playCount
+        let pauseChoice = qualityController.snapshot.sources!.first(where: { $0.quality == "1080p" })!.id
+        try qualityController.applyVideoOptions(sourceID: pauseChoice, enhancement: .original, output4K: false)
+        let pauseDeadline = Date().addingTimeInterval(10)
+        while qualityPlayer.playCount == playsBeforePause, Date() < pauseDeadline {
+            qualityController.refresh()
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try check(qualityPlayer.playCount > playsBeforePause, "Pause fixture did not enter resume confirmation")
+        qualityController.pause()
+        let pausedPlays = qualityPlayer.playCount
+        try await Task.sleep(for: .seconds(2))
+        try check(qualityPlayer.playCount == pausedPlays && qualityPlayer.rate == 0,
+                  "Pause failed to cancel automatic resume retries")
+        print("PASS Pause cancels replacement Play retries")
+        qualityPlayer.ignoreNextPlays(0)
+        try qualityController.play()
+        qualityPlayer.setReplies([.restored])
+        try qualityController.seek(30)
+        try check(qualityController.snapshot.state == .playing && qualityController.snapshot.seekInProgress == true
+                  && qualityController.snapshot.position == 30,
+                  "Playing seek hid its progress or moved the requested timeline")
+        let seekDeadline = Date().addingTimeInterval(10)
+        while qualityController.pendingSeek != nil, Date() < seekDeadline {
+            qualityController.refresh()
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try check(qualityController.snapshot.seekInProgress == nil && qualityPlayer.currentTime().seconds == 30
+                  && qualityPlayer.rate == 1, "Seek did not clear its spinner and resume playback")
+        qualityPlayer.setReplies([.unanswered, .restored])
+        try qualityController.seek(32)
+        try qualityController.seek(33)
+        let supersededDeadline = Date().addingTimeInterval(10)
+        while qualityController.pendingSeek != nil, Date() < supersededDeadline {
+            qualityController.refresh()
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try check(qualityPlayer.currentTime().seconds == 33 && qualityController.snapshot.seekInProgress == nil,
+                  "A superseded seek published a stale position or spinner")
+        qualityPlayer.setReplies([.unanswered])
+        try qualityController.seek(35)
+        qualityController.pause()
+        try check(qualityController.snapshot.seekInProgress == true && qualityPlayer.rate == 0,
+                  "Pause hid unfinished seek work or resumed the old position")
+        qualityController.stop()
+        try await Task.sleep(for: .milliseconds(300))
+        try check(qualityController.snapshot.seekInProgress == nil && qualityController.snapshot.state == .idle,
+                  "Stop retained seek work")
+        print("PASS seek progress stays visible on AirPlay, resumes play and handles supersession/Pause/Stop")
+        print("22/22 controller checks passed (simulated handoff; no physical receiver)")
     }
 }

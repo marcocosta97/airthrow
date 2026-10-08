@@ -246,6 +246,7 @@ struct SourceChoiceChecks {
         let resolver = ScriptedResolver([website.absoluteString: [.init(candidates: [high, low])]])
         let highURL = high.source.url
         let controller = PlaybackController(resolveCandidates: { try await resolver.candidates(for: $0) },
+                                            allowVideoConversion: true,
                                             prepareSource: { source in
             if source.url == highURL { try await Task.sleep(for: .seconds(2)) }
             return try await prepareSource(source)
@@ -275,7 +276,7 @@ struct SourceChoiceChecks {
     static func downscaleTargetGated(website: URL, high: MediaCandidate, low: MediaCandidate) async throws {
         let resolver = ScriptedResolver([website.absoluteString: [.init(candidates: [high, low])]])
         let controller = PlaybackController(resolveCandidates: { try await resolver.candidates(for: $0) },
-                                            prepareSource: nil)
+                                            allowVideoConversion: true, prepareSource: nil)
         try controller.load(website.absoluteString)
         let status = try await settle(controller)
         try check(status.quality == "2160p" && controller.requires4KOutput && controller.enhancementOutput4K,
@@ -362,7 +363,7 @@ struct SourceChoiceChecks {
                           option(audioURL, italian, "low-it", 720, "it")]
         let resolver = ScriptedResolver([website.absoluteString: [.init(candidates: candidates)]])
         let controller = PlaybackController(resolveCandidates: { try await resolver.candidates(for: $0) },
-                                            prepareSource: prepareSource)
+                                            allowVideoConversion: true, prepareSource: prepareSource)
         try controller.load(website.absoluteString)
         let automatic = try await settle(controller)
         guard let highItalian = automatic.sources?.first(where: { $0.quality == "1080p" && $0.audio == "it · AAC" }) else {
@@ -375,16 +376,28 @@ struct SourceChoiceChecks {
         }
         try check(chosen.audioOptions?.count == 2 && chosen.audioOptions?.contains(where: { $0.label == "it · AAC" }) == true,
                   "Audio selector did not expose both tracks for the chosen video")
+        let positioned = await withCheckedContinuation { continuation in
+            controller.player.seek(to: CMTime(seconds: 0.6, preferredTimescale: 600),
+                                   toleranceBefore: .zero, toleranceAfter: .zero) {
+                continuation.resume(returning: $0)
+            }
+        }
+        try check(positioned, "Fixture did not seek before the quality replacement")
+        controller.refresh()
         try controller.selectVideo(lowVideo.id)
         let switched = try await settle(controller)
         let lowItalianID = switched.sources?.first(where: { $0.quality == "720p" && $0.audio == "it · AAC" })?.id
         try check(switched.selectedSourceID == lowItalianID
                   && switched.selectedAudioID == switched.audioOptions?.first(where: { $0.label == "it · AAC" })?.id,
                   "Changing video discarded the available Italian audio track")
+        try check(abs((switched.position ?? 0) - 0.6) < 0.1 && controller.player.rate == 0,
+                  "Prepared quality replacement discarded the paused position")
         let highEnglishID = switched.sources!.first(where: { $0.quality == "1080p" && $0.audio == "en · AAC" })!.id
         let beforeApply = await resolver.count()
         try controller.applyVideoOptions(sourceID: highEnglishID, enhancement: .cleanup4K, output4K: true)
         let applied = try await settle(controller)
+        try check(abs((applied.position ?? 0) - 0.6) < 0.1 && controller.player.rate == 0,
+                  "Prepared enhancement replacement discarded the paused position")
         try check(await resolver.count() == beforeApply + 1
                   && applied.videoEnhancement == .cleanup4K
                   && applied.selectedAudioID == applied.audioOptions?.first(where: { $0.label == "it · AAC" })?.id,
@@ -398,6 +411,7 @@ struct SourceChoiceChecks {
         let resolver = ScriptedResolver([website.absoluteString: [.init(candidates: [high, low])]])
         let requests = EnhancementRequests()
         let controller = PlaybackController(resolveCandidates: { try await resolver.candidates(for: $0) },
+                                            allowVideoConversion: true,
                                             prepareSource: { source in
             await requests.record(source)
             return try await prepareSource(source)
@@ -442,40 +456,46 @@ struct SourceChoiceChecks {
                                                         prepareSource: @escaping @Sendable (ResolvedSource) async throws -> PreparedMedia) async throws {
         let resolver = ScriptedResolver([website.absoluteString: [.init(candidates: [native, conversion])]])
         let controller = PlaybackController(resolveCandidates: { try await resolver.candidates(for: $0) },
-                                            prepareSource: prepareSource)
-        controller.setVideoConversionAllowed(false)
+                                            allowVideoConversion: true, prepareSource: prepareSource)
         try controller.load(website.absoluteString)
         _ = try await settle(controller)
         try controller.applyVideoOptions(sourceID: nil, enhancement: .cleanup4K, output4K: true)
-        let enhanced = try await settle(controller)
-        let conversionID = enhanced.sources!.first(where: { $0.playbackPath == .videoConversion })!.id
+        _ = try await settle(controller)
         let player = controller.player
+        let enhancedItem = player.currentItem
+        controller.setVideoConversionAllowed(false)
+        let original = try await settle(controller)
+        try check(original.videoEnhancement == .original && original.playbackPath == .direct
+                  && !controller.allowVideoConversion && controller.player === player
+                  && player.currentItem !== enhancedItem && player.rate == 0,
+                  "Avoid video re-encoding did not restore Original paused on the shared player")
         let item = player.currentItem
         let loads = await resolver.count()
+        for enhancement in [VideoEnhancement.upscale1080, .cleanup1080, .upscale4K, .cleanup4K] {
+            try failure(.unsupportedOperation) { try controller.selectEnhancement(enhancement) }
+            try failure(.unsupportedOperation) {
+                try controller.applyVideoOptions(sourceID: "automatic", enhancement: enhancement, output4K: true)
+            }
+        }
+        let conversionID = original.sources!.first(where: { $0.playbackPath == .videoConversion })!.id
         try failure(.unsupportedOperation) {
             try controller.applyVideoOptions(sourceID: conversionID, enhancement: .original, output4K: false)
         }
-        let loadsAfterRejection = await resolver.count()
-        try check(controller.player === player && player.currentItem === item
-                  && controller.snapshot.videoEnhancement == .cleanup4K
-                  && controller.snapshot.state != .loading && controller.snapshot.error == nil
-                  && loadsAfterRejection == loads,
-                  "An unavailable Original/source choice tore down or reloaded the enhanced item")
+        let rejectedLoads = await resolver.count()
+        try check(rejectedLoads == loads && player.currentItem === item && controller.snapshot.error == nil,
+                  "Rejected enhancement/source requests replaced or reloaded Original")
         controller.setVideoConversionAllowed(true)
         try controller.applyVideoOptions(sourceID: conversionID, enhancement: .original, output4K: false)
-        let original = try await settle(controller)
-        try check(original.videoEnhancement == .original
-                  && original.selectedSourceID == original.sources?.first(where: { $0.playbackPath == .videoConversion })?.id
-                  && original.error == nil && controller.player === player,
-                  "An allowed video-conversion source could not return to Original")
-        controller.setVideoConversionAllowed(false)
+        let converted = try await settle(controller)
+        try check(converted.videoEnhancement == .original && converted.error == nil,
+                  "Allowed video-conversion presentation could not load")
         await controller.shutdownAndWait()
-        print("PASS returning to Original validates the requested conversion policy before replacing the item")
+        print("PASS Avoid video re-encoding restores Original and rejects every enhancement without replacing it")
     }
 
     static func failedEnhancementRestoresOriginal(url: URL) async throws {
         let controller = PlaybackController(resolveSource: { _ in ResolvedSource(url: url) },
-                                            prepareSource: { _ in throw PreparationFailure.failed })
+                                            allowVideoConversion: true, prepareSource: { _ in throw PreparationFailure.failed })
         try controller.load(url.absoluteString)
         _ = try await settle(controller)
         let player = controller.player
@@ -502,7 +522,7 @@ struct SourceChoiceChecks {
         ]])
         let requests = EnhancementRequests()
         let controller = PlaybackController(resolveCandidates: { try await resolver.candidates(for: $0) },
-                                            allowVideoConversion: false, prepareSource: { source in
+                                            allowVideoConversion: true, prepareSource: { source in
             await requests.record(source)
             return try await preparer.prepare(source)
         })
@@ -531,7 +551,7 @@ struct SourceChoiceChecks {
         let resolver = ScriptedResolver([website.absoluteString: [.init(candidates: [source, alternate])]])
         let requests = EnhancementRequests()
         let controller = PlaybackController(resolveCandidates: { try await resolver.candidates(for: $0) },
-                                            allowVideoConversion: false,
+                                            allowVideoConversion: true,
                                             preferQuality: false,
                                             prepareSource: { selected in
             await requests.record(selected)
@@ -550,8 +570,8 @@ struct SourceChoiceChecks {
                   "Enhancement replaced or started the persistent player")
         try check(enhanced.videoEnhancement == .cleanup1080 && enhanced.playbackPath == .videoConversion,
                   "Enhanced path or status was not reported")
-        try check(!controller.allowVideoConversion,
-                  "Per-item enhancement changed the global conversion preference")
+        try check(controller.allowVideoConversion,
+                  "Enhancement changed the allowed conversion preference")
         let recordedChoices = await requests.choices
         let recordedPolicies = await requests.policies
         let recordedURLs = await requests.urls

@@ -135,7 +135,7 @@ struct SettingsView: View {
                 Toggle("Avoid video re-encoding", isOn: Binding(
                     get: { !controller.allowVideoConversion },
                     set: { controller.setVideoConversionAllowed(!$0) }))
-                Text("Automatic selection copies compatible video and re-encodes audio when needed. Enhancements in Video options can still re-encode video.")
+                Text("When enabled, keep original video or remux it; audio may still be re-encoded. Upscale and Clean up & upscale are unavailable. Enabling this reloads any video being re-encoded as Original at the current position.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Toggle("Prefer higher quality", isOn: Binding(

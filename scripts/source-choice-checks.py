@@ -56,6 +56,11 @@ FILES = {
     '/audio.mp4': (out / 'audio.mp4').read_bytes(),
     '/slow.mp4': (out / 'video.mp4').read_bytes(),
 }
+if args.controller:
+    run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-n',
+         '-stream_loop', '5', '-i', out / 'audio.mp4', '-t', '60', '-c', 'copy',
+         '-movflags', '+faststart', out / 'long-video.mp4'])
+    FILES['/long-video.mp4'] = (out / 'long-video.mp4').read_bytes()
 CONTENT_TYPES = {}
 run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-n', '-f', 'lavfi',
      '-i', 'testsrc2=size=1920x1080:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',

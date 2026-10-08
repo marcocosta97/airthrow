@@ -21,9 +21,9 @@ struct AirThrowCLI {
       athrow stop            Stop and unload the video
       athrow status [--json] Show observed playback state
       athrow sources         List available quality/source choices and their IDs
-      athrow source ID       Reload a listed source, paused (or use automatic)
+      athrow source ID       Change source, preserving position and play/pause
       athrow conversion allow-video|avoid-video
-                                Set video re-encoding preference for future loads
+                                Allow or block video re-encoding and enhancements
       athrow show            Open the controller and choose a receiver
 
     --json is available on every command. Receiver selection uses the app's

@@ -253,6 +253,10 @@ public struct PlaybackSnapshot: Codable, Sendable, Equatable {
     public var loadingPhase: String?
     /// Finite prepared media is playable while the producer continues ahead.
     public var preparationInProgress: Bool?
+    /// Media seconds prepared per wall-clock second, including fetch and validation.
+    public var preparationSpeed: Double?
+    /// Explicit seek work can be pending while AirPlay still reports playing.
+    public var seekInProgress: Bool?
     /// Selected processing path, not evidence that playback has started.
     public var playbackPath: PlaybackPath?
     /// Quality label of the selected presentation (for example "720p60"),

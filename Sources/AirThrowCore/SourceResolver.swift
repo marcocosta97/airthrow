@@ -60,6 +60,9 @@ public struct ResolvedSource: Sendable {
     /// The conversion preference in force when this plan was chosen.
     public let conversionPolicy: ConversionPolicy
     public let enhancement: VideoEnhancement
+    /// Per-load preparation hint, independent of presentation identity. Cached
+    /// preparation warms this position without encoding all preceding chunks.
+    public var preparationPosition: Double? = nil
     /// A concrete processing tier chosen by the selector. Nil means the tier is
     /// derived from `needsPreparation`; set it to request audio/video conversion.
     public let plannedPath: PlaybackPath?
@@ -87,22 +90,26 @@ public struct ResolvedSource: Sendable {
     /// Copy the same presentation with a different conversion preference. The
     /// planned path and every delivery flag are preserved.
     public func withConversionPolicy(_ policy: ConversionPolicy) -> ResolvedSource {
-        ResolvedSource(url: url, title: title, headers: headers, audio: audio,
+        var result = ResolvedSource(url: url, title: title, headers: headers, audio: audio,
                        hlsAudioOptions: hlsAudioOptions,
                        needsPreparation: needsPreparation, needsDelivery: needsDelivery,
                        delivery: delivery, videoKnownPresent: videoKnownPresent, isLive: isLive,
                        conversionPolicy: policy, plannedPath: plannedPath, enhancement: enhancement)
+        result.preparationPosition = preparationPosition
+        return result
     }
 
     public func withEnhancement(_ choice: VideoEnhancement) -> ResolvedSource {
-        ResolvedSource(url: url, title: title, headers: headers, audio: audio,
+        var result = ResolvedSource(url: url, title: title, headers: headers, audio: audio,
                        hlsAudioOptions: hlsAudioOptions,
                        needsPreparation: needsPreparation || choice != .original,
                        needsDelivery: needsDelivery, delivery: delivery,
                        videoKnownPresent: videoKnownPresent, isLive: isLive,
-                       conversionPolicy: choice == .original ? conversionPolicy : .allowVideo,
+                       conversionPolicy: conversionPolicy,
                        plannedPath: choice == .original ? plannedPath : .videoConversion,
                        enhancement: choice)
+        result.preparationPosition = preparationPosition
+        return result
     }
 }
 

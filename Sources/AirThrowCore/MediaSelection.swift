@@ -8,6 +8,12 @@ public enum MediaDelivery: Sendable {
 /// A processing-cost preference, not a quality score or receiver guarantee.
 public enum ConversionPolicy: String, Codable, Sendable {
     case avoidVideo = "avoid_video", allowVideo = "allow_video"
+
+    public static let preferenceKey = "allowVideoConversion"
+    public static func current(defaults: UserDefaults = .standard) -> Self {
+        guard defaults.object(forKey: preferenceKey) != nil else { return .allowVideo }
+        return defaults.bool(forKey: preferenceKey) ? .allowVideo : .avoidVideo
+    }
 }
 
 /// One complete presentation, including a paired audio track when preparation

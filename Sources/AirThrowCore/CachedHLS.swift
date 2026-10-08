@@ -7,6 +7,11 @@ struct PreparationPacing {
     private(set) var secondsPerMediaSecond: Double?
     private(set) var largestChunkBytes: Int64 = 0
     var canBuildSurplus: Bool { (secondsPerMediaSecond ?? 1) < 1 }
+    var speed: Double? {
+        guard let cost = secondsPerMediaSecond, cost > 0 else { return nil }
+        let value = 1 / cost
+        return value.isFinite ? value : nil
+    }
 
     mutating func record(mediaSeconds: Double, elapsedSeconds: Double, bytes: Int64) {
         guard mediaSeconds > 0, elapsedSeconds.isFinite, elapsedSeconds >= 0 else { return }
@@ -33,6 +38,7 @@ final class CachedHLS {
     private var prefetch: Task<Void, Never>?
     private var retained: [Int: Date] = [:]
     private var pins: [Int: Int] = [:]
+    private var seekReservations: [UUID: [Int]] = [:]
     private var position = 0.0
     private var playing = false
     private(set) var pacing = PreparationPacing()
@@ -142,7 +148,55 @@ final class CachedHLS {
         if count > 0 { pins[index] = count } else { pins.removeValue(forKey: index) }
     }
 
-    func warmUp() async throws { try await ensure(0) }
+    func warmUp(at seconds: Double = 0) async throws {
+        // Native VOD inspection needs the opening chunk; a replacement also
+        // needs its seek target before handoff. Skip the intervening chunks.
+        try await ensure(0)
+        if seconds.isFinite, seconds > 0 {
+            let target = min(seconds, max(0, duration - 0.1))
+            position = target
+            var index = chunkIndex(at: target)
+            try await ensure(index)
+            // A seek near the end of a chunk must not hand off a fraction of
+            // the initial six-second buffer. Warm adjacent chunks as needed.
+            while starts[index] + length(index) < min(duration, target + Self.chunkSeconds),
+                  index + 1 < count {
+                index += 1
+                try await ensure(index)
+            }
+        }
+    }
+
+    func prepareSeek(at seconds: Double) async throws {
+        guard seconds.isFinite, seconds >= 0 else { return }
+        let target = min(seconds, max(0, duration - 0.1))
+        let first = chunkIndex(at: target)
+        var last = first
+        while starts[last] + length(last) < min(duration, target + Self.chunkSeconds), last + 1 < count { last += 1 }
+        let indices = Array(first...last)
+        // Protect target jobs before cancelling unrelated speculation, even
+        // when the target was already being prefetched.
+        indices.forEach { pins[$0, default: 0] += 1 }
+        let reservation = UUID()
+        seekReservations[reservation] = indices
+        defer {
+            seekReservations.removeValue(forKey: reservation)
+            indices.forEach { unpin($0) }
+        }
+        updatePosition(seconds, playing: false)
+        try await withTaskCancellationHandler {
+            for index in indices {
+                try Task.checkCancellation()
+                try await ensure(index)
+                try Task.checkCancellation()
+            }
+        } onCancel: {
+            Task { @MainActor in
+                guard self.seekReservations[reservation] != nil else { return }
+                for index in indices where self.pins[index] == 1 { self.jobs[index]?.cancel() }
+            }
+        }
+    }
 
     private func ensure(_ index: Int) async throws {
         try Task.checkCancellation()

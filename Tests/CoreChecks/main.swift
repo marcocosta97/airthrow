@@ -417,6 +417,38 @@ let tests: [(String, () throws -> Void)] = [
             try check(!encoded.contains(leaked), "Source status leaked \(leaked)")
         }
     }),
+    ("conversion preference default and preparation speed protocol", {
+        let suite = "airthrow-conversion-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        try check(ConversionPolicy.current(defaults: defaults) == .allowVideo, "Fresh installs avoided video conversion")
+        defaults.set(false, forKey: ConversionPolicy.preferenceKey)
+        try check(ConversionPolicy.current(defaults: defaults) == .avoidVideo, "Explicit avoidance preference was overwritten")
+        let source = ResolvedSource(url: URL(string: "https://example.com/video.mp4")!)
+        for choice in [VideoEnhancement.upscale1080, .cleanup1080, .upscale4K, .cleanup4K] {
+            try check(source.withEnhancement(choice).conversionPolicy == .avoidVideo,
+                      "Enhancement silently authorized video re-encoding")
+        }
+        defaults.set(true, forKey: ConversionPolicy.preferenceKey)
+        try check(ConversionPolicy.current(defaults: defaults) == .allowVideo, "Explicit permission was lost")
+        var snapshot = PlaybackSnapshot()
+        snapshot.preparationSpeed = 3.2
+        snapshot.seekInProgress = true
+        let data = try JSONEncoder().encode(snapshot)
+        try check(try JSONDecoder().decode(PlaybackSnapshot.self, from: data).preparationSpeed == 3.2,
+                  "Preparation speed did not round-trip")
+        var old = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        old.removeValue(forKey: "preparationSpeed")
+        try check(try JSONDecoder().decode(PlaybackSnapshot.self, from: data).seekInProgress == true,
+                  "Explicit seek progress did not round-trip")
+        old.removeValue(forKey: "seekInProgress")
+        try check(try JSONDecoder().decode(PlaybackSnapshot.self,
+                  from: JSONSerialization.data(withJSONObject: old)).seekInProgress == nil,
+                  "Legacy status invented seek progress")
+        try check(try JSONDecoder().decode(PlaybackSnapshot.self,
+                  from: JSONSerialization.data(withJSONObject: old)).preparationSpeed == nil,
+                  "Legacy status invented preparation speed")
+    }),
     ("candidate identity is URL-free", {
         // Identity is an opaque hash of presentation metadata. It must never leak a
         // URL, query, header or title, and it must stay stable when only the

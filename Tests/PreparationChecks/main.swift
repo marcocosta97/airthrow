@@ -27,7 +27,7 @@ struct PreparationChecks {
             for enhancement in [VideoEnhancement.upscale1080, .cleanup1080, .upscale4K, .cleanup4K] {
                 print("CHECK odd-width \(enhancement.rawValue), \(mode)")
                 fflush(nil)
-                let prepared = try await preparer.prepare(source.withEnhancement(enhancement), mode: mode)
+                let prepared = try await preparer.prepare(source.withConversionPolicy(.allowVideo).withEnhancement(enhancement), mode: mode)
                 do {
                     try check(prepared.videoHeight == enhancement.targetHeight,
                               "Odd-width enhancement lost its output resolution")
@@ -121,7 +121,7 @@ struct PreparationChecks {
         try check(nativeStream.url == nativeStreamURL && nativeStream.videoKnownPresent && !nativeStream.needsPreparation,
                   "Extensionless HLS did not enter the native-first path")
         for choice in [VideoEnhancement.upscale1080, .cleanup1080] {
-            let enhanced = try await preparer.prepare(nativeStream.withEnhancement(choice), mode: .completeFile)
+            let enhanced = try await preparer.prepare(nativeStream.withConversionPolicy(.allowVideo).withEnhancement(choice), mode: .completeFile)
             try check(enhanced.playbackPath == .videoConversion && enhanced.videoHeight == 1080,
                       "Native-first extensionless HLS enhancement did not produce 1080p video")
             let asset = AVURLAsset(url: enhanced.url)
@@ -329,12 +329,12 @@ struct PreparationChecks {
         try hevcData.write(to: directory.appendingPathComponent("hevc-remuxed.mp4"))
         hevcCopy.stop()
         do {
-            _ = try await preparer.prepare(uhdSource.withEnhancement(.upscale1080))
+            _ = try await preparer.prepare(uhdSource.withConversionPolicy(.allowVideo).withEnhancement(.upscale1080))
             try check(false, "Explicit 1080p preparation downscaled a 4K source")
         } catch PreparationFailure.conversionWouldDownscale {}
         for choice in [VideoEnhancement.upscale1080, .cleanup1080, .upscale4K, .cleanup4K] {
             print("Checking enhancement \(choice.rawValue)")
-            let enhanced = try await preparer.prepare(source.withEnhancement(choice), mode: .completeFile)
+            let enhanced = try await preparer.prepare(source.withConversionPolicy(.allowVideo).withEnhancement(choice), mode: .completeFile)
             try check(enhanced.playbackPath == .videoConversion
                       && enhanced.videoHeight == choice.targetHeight,
                       "Enhancement did not produce its selected output height")
@@ -357,7 +357,7 @@ struct PreparationChecks {
         }
         try await expect(.preparationRequired) {
             _ = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/hdr.mkv")!)
-                .withEnhancement(.upscale4K))
+                .withConversionPolicy(.allowVideo).withEnhancement(.upscale4K))
         }
 
         // A helper that refuses the hardware preflight still converts in software;
@@ -373,7 +373,7 @@ struct PreparationChecks {
         try softwareData.write(to: directory.appendingPathComponent("software-converted.mp4"))
         softwareConverted.stop()
         let software4K = try await MediaPreparer(environment: softwareEnvironment, preferences: PreparationPreferences(retainAll: true))
-            .prepare(source.withEnhancement(.upscale4K), mode: .completeFile)
+            .prepare(source.withConversionPolicy(.allowVideo).withEnhancement(.upscale4K), mode: .completeFile)
         try check(software4K.videoHeight == 2160, "4K software fallback did not upscale")
         let (software4KData, _) = try await fetch(software4K.url)
         try software4KData.write(to: directory.appendingPathComponent("software-4k.mp4"))

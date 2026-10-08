@@ -42,6 +42,8 @@ public final class PreparedMedia {
     public var onFailure: (@MainActor (PreparationFailure) -> Void)?
     public var onReadyRangesChanged: (@MainActor () -> Void)?
     private var progressNotification: Task<Void, Never>?
+    private var sequentialPacing = PreparationPacing()
+    private var sequentialSample: (seconds: Double, time: ContinuousClock.Instant)?
     private var producer: Task<Void, Never>?
     /// Memoized ready range for the non-cached progressive playlist. The
     /// playlist is re-parsed only when the file changes, so the periodic status
@@ -63,6 +65,7 @@ public final class PreparedMedia {
     fileprivate func produce(executable: String, arguments: [String], workspace: PreparationWorkspace,
                              maximumBytes: Int64, timeout: Duration, duration: Double) {
         isProducing = true
+        sequentialSample = (0, .now)
         let progress: @Sendable () -> Void = { [weak self] in
             Task { @MainActor [weak self] in self?.notifyReadyRangesChanged() }
         }
@@ -129,6 +132,11 @@ public final class PreparedMedia {
         } else { await cache?.waitForJobs() }
     }
     public var usesBoundedCache: Bool { cache != nil }
+    public func prepareSeek(at seconds: Double) async throws { try await cache?.prepareSeek(at: seconds) }
+    public var preparationSpeed: Double? {
+        guard isProducing else { return nil }
+        return cache?.pacing.speed ?? sequentialPacing.speed
+    }
     public var readyRanges: [SeekRange]? {
         if let cache { return cache.readyRanges }
         guard let duration = sourceDuration, duration.isFinite, duration > 0 else { return nil }
@@ -149,6 +157,14 @@ public final class PreparedMedia {
         return [SeekRange(start: 0, end: duration)]
     }
     private func notifyReadyRangesChanged() {
+        if let sample = sequentialSample, let end = readyRanges?.last?.end, end > sample.seconds {
+            let now = ContinuousClock.now
+            let elapsed = sample.time.duration(to: now).components
+            sequentialPacing.record(mediaSeconds: end - sample.seconds,
+                                    elapsedSeconds: Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18,
+                                    bytes: 0)
+            sequentialSample = (end, now)
+        }
         guard onReadyRangesChanged != nil, progressNotification == nil else { return }
         progressNotification = Task { [weak self] in
             guard let self else { return }
@@ -533,7 +549,8 @@ public struct MediaPreparer: Sendable {
                         return try await cached(workspace: workspace,
                                                 arguments: conversionArguments(encoder: encoder, precise: plan.videoAction == .convert, alignRemux: true),
                                                 executable: ffmpeg, host: host, duration: videoDuration!,
-                                                plan: plan, ffprobe: ffprobe, remuxTimeline: remuxTimeline,
+                                                plan: plan, ffprobe: ffprobe, startPosition: source.preparationPosition,
+                                                remuxTimeline: remuxTimeline,
                                                 remuxProbe: remuxTimeline?.inspectBoundaries == true
                                                     ? (["-v", "error"] + (try Self.inputArguments(url: source.url, headers: source.headers))
                                                         + ["-select_streams", String(plan.video.index), "-show_packets", "-show_entries",
@@ -652,6 +669,7 @@ public struct MediaPreparer: Sendable {
 
     private func cached(workspace: PreparationWorkspace, arguments: [String], executable: String,
                         host: String, duration: Double, plan: PreparationPlan, ffprobe: String,
+                        startPosition: Double? = nil,
                         remuxTimeline: RemuxTimeline? = nil, remuxProbe: [String]? = nil) async throws -> PreparedMedia {
         let fragmented = remuxTimeline != nil || plan.fragmentedHLS
         let cache = try await CachedHLS(workspace: workspace, duration: duration, fragmented: fragmented,
@@ -705,7 +723,7 @@ public struct MediaPreparer: Sendable {
         }
         do {
             try await withTaskCancellationHandler {
-                try await cache.warmUp()
+                try await cache.warmUp(at: startPosition ?? 0)
                 try Task.checkCancellation()
             } onCancel: { Task { @MainActor in cache.stop() } }
             let server = try await MediaHTTPServer.start(file: workspace.directory.appendingPathComponent("media.m3u8"),

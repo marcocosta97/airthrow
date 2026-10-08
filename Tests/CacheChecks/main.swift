@@ -55,7 +55,7 @@ struct CacheChecks {
     static func schedulingChecks() async throws {
         var measured = PreparationPacing()
         measured.record(mediaSeconds: 6, elapsedSeconds: 3, bytes: 8000)
-        try check(measured.canBuildSurplus && measured.secondsPerMediaSecond == 0.5,
+        try check(measured.canBuildSurplus && measured.secondsPerMediaSecond == 0.5 && measured.speed == 2,
                   "Faster-than-playback production could not build surplus")
         for _ in 0..<8 { measured.record(mediaSeconds: 6, elapsedSeconds: 9, bytes: 16000) }
         try check(!measured.canBuildSurplus && measured.largestChunkBytes == 16000,
@@ -63,6 +63,46 @@ struct CacheChecks {
         for _ in 0..<8 { measured.record(mediaSeconds: 6, elapsedSeconds: 1, bytes: 4000) }
         try check(measured.canBuildSurplus, "Pacing did not recover when production sped up")
         report("PASS measured production ratio adapts to slowdown and recovery")
+        do {
+            let workspace = try PreparationWorkspace()
+            let producer = CacheProducer()
+            let cache = try CachedHLS(workspace: workspace, duration: 600, fragmented: false,
+                                     preferences: PreparationPreferences()) { index, _, _, directory in
+                try await producer.produce(index, directory: directory)
+            }
+            defer { cache.stop() }
+            try await cache.warmUp()
+            cache.updatePosition(0, playing: true)
+            try await waitUntil("Seek fixture did not start speculation", { producer.started.contains(1) })
+            try await cache.prepareSeek(at: 300)
+            try check(producer.finished.contains(50) && !producer.started.contains(where: { (2..<50).contains($0) })
+                      && cache.readyRanges.contains(SeekRange(start: 300, end: 306)),
+                      "Five-minute seek prepared intervening chunks or failed to prioritize its target")
+            try await cache.prepareSeek(at: 305)
+            try check(cache.readyRanges.contains(SeekRange(start: 300, end: 312)) && producer.maximumActive == 1,
+                      "Seek near a chunk end lacked a continuous buffer or overlapped encoders")
+            let abandoned = Task { try await cache.prepareSeek(at: 540) }
+            try await waitUntil("Cancellation fixture did not start seek encoding", { producer.started.contains(90) })
+            abandoned.cancel()
+            do { try await abandoned.value; try check(false, "Cancelled seek preparation completed") }
+            catch is CancellationError {}
+            try check(producer.active == 0, "Cancelled seek left its encoder running")
+            report("PASS five-minute seek prioritizes target, skips earlier chunks and cancels obsolete work")
+        }
+        do {
+            let workspace = try PreparationWorkspace()
+            let producer = CacheProducer()
+            let cache = try CachedHLS(workspace: workspace, duration: 600, fragmented: false,
+                                     preferences: PreparationPreferences()) { index, _, _, directory in
+                try await producer.produce(index, directory: directory)
+            }
+            defer { cache.stop() }
+            try await cache.warmUp(at: 40)
+            try check(producer.started == [0, 6, 7]
+                      && cache.readyRanges == [SeekRange(start: 0, end: 6), SeekRange(start: 36, end: 48)],
+                      "Replacement warmed intervening chunks instead of the saved-position chunk")
+            report("PASS replacement warms bootstrap and at least six continuous seconds at 40 seconds")
+        }
         let workspace = try PreparationWorkspace()
         let producer = CacheProducer()
         let cache = try CachedHLS(workspace: workspace, duration: 600, fragmented: false,
@@ -203,6 +243,29 @@ struct CacheChecks {
     static func run() async throws {
         try await schedulingChecks()
         if CommandLine.arguments.contains("--scheduling-only") { return }
+        if CommandLine.arguments.contains("--resume-only") {
+            let directory = URL(fileURLWithPath: CommandLine.arguments[2])
+            var environment = ProcessInfo.processInfo.environment
+            environment["AIRTHROW_MEDIA_HOST"] = "127.0.0.1"
+            environment["AIRTHROW_FFMPEG"] = directory.appendingPathComponent("cache-ffmpeg").path
+            environment.removeValue(forKey: "AIRTHROW_PREPARATION_MODE")
+            var source = ResolvedSource(url: directory.appendingPathComponent("cache-source.mpg"),
+                                        needsPreparation: true, conversionPolicy: .allowVideo)
+            source.preparationPosition = 40
+            let prepared = try await MediaPreparer(environment: environment,
+                preferences: PreparationPreferences(maximumBytes: 16 * 1024 * 1024)).prepare(source)
+            defer { prepared.stop() }
+            try check(prepared.usesBoundedCache
+                      && prepared.readyRanges == [SeekRange(start: 0, end: 6), SeekRange(start: 36, end: 48)],
+                      "Real preparation failed to warm the replacement's target before handoff")
+            report("PASS real encoding warms bootstrap and six-second resume buffer before handoff")
+            try await prepared.prepareSeek(at: 108)
+            try check(prepared.readyRanges?.contains(SeekRange(start: 108, end: 114)) == true
+                      && prepared.readyRanges?.contains(where: { $0.start > 48 && $0.start < 108 }) == false,
+                      "Real seek preparation encoded intervening media instead of its target")
+            report("PASS real seek encoding prepares its target without processing intervening media")
+            return
+        }
         if CommandLine.arguments.contains("--network-continuity-only") {
             try await networkContinuity(base: CommandLine.arguments[1],
                                         directory: URL(fileURLWithPath: CommandLine.arguments[2]))
@@ -336,7 +399,7 @@ struct CacheChecks {
 
         for enhancement in [VideoEnhancement.upscale1080, .cleanup1080, .upscale4K, .cleanup4K] {
             report("CHECK Cached enhancement preparation: \(enhancement.rawValue)")
-            let short = ResolvedSource(url: URL(string: base + "/combined.mp4")!, needsPreparation: true).withEnhancement(enhancement)
+            let short = ResolvedSource(url: URL(string: base + "/combined.mp4")!, needsPreparation: true).withConversionPolicy(.allowVideo).withEnhancement(enhancement)
             let enhanced = try await MediaPreparer(environment: environment).prepare(short)
             try check(enhanced.usesBoundedCache && enhanced.videoHeight == enhancement.targetHeight,
                       "Cached \(enhancement.rawValue) output quality is incorrect")
@@ -359,14 +422,14 @@ struct CacheChecks {
         try check(!sequential.usesBoundedCache, "A server without byte ranges entered restartable preparation")
         sequential.stop(); await sequential.waitForProducer()
         report("CHECK Sequential fallback for HLS input")
-        let hlsSource = ResolvedSource(url: URL(string: base + "/native-stream")!, needsPreparation: true).withEnhancement(.upscale1080)
+        let hlsSource = ResolvedSource(url: URL(string: base + "/native-stream")!, needsPreparation: true).withConversionPolicy(.allowVideo).withEnhancement(.upscale1080)
         let hls = try await MediaPreparer(environment: environment).prepare(hlsSource)
         try check(!hls.usesBoundedCache, "An HLS input entered file-based restartable preparation")
         hls.stop(); await hls.waitForProducer()
         report("PASS sequential fallback for sources without random access and HLS inputs")
 
         report("CHECK Multi-chunk HEVC preparation")
-        let longHEVC = ResolvedSource(url: URL(string: base + "/long.mp4")!, needsPreparation: true).withEnhancement(.upscale4K)
+        let longHEVC = ResolvedSource(url: URL(string: base + "/long.mp4")!, needsPreparation: true).withConversionPolicy(.allowVideo).withEnhancement(.upscale4K)
         let hevc = try await MediaPreparer(environment: environment).prepare(longHEVC)
         report("CHECK Multi-chunk HEVC native readiness")
         let hevcItem = AVPlayerItem(url: hevc.url)
@@ -491,7 +554,7 @@ struct CacheChecks {
         environment["AIRTHROW_MEDIA_HOST"] = "127.0.0.1"
         environment.removeValue(forKey: "AIRTHROW_PREPARATION_MODE")
         let source = ResolvedSource(url: URL(string: base + "/cache-network.mp4")!, needsPreparation: true)
-            .withEnhancement(.cleanup1080)
+            .withConversionPolicy(.allowVideo).withEnhancement(.cleanup1080)
         report("CHECK Clean up and upscale delayed 600 MiB remote input")
         let prepared = try await MediaPreparer(environment: environment).prepare(source)
         defer { prepared.stop() }

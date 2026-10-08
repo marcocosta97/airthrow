@@ -91,7 +91,6 @@ struct ControllerView: View {
     }
     private var playbackDetail: String {
         var parts: [String] = []
-        if let activeEnhancement { parts.append(activeEnhancement.label) }
         if let path = status.playbackPath { parts.append(path.label) }
         if let quality = status.quality {
             parts.append(quality)
@@ -103,7 +102,7 @@ struct ControllerView: View {
             return "This Mac is preparing more video. Playback can continue."
         }
         if let activeEnhancement {
-            return "\(activeEnhancement.label): prepared on this Mac. Changing it reloads from the start, paused. 4K needs a compatible receiver."
+            return "\(activeEnhancement.label): prepared on this Mac. Changing it resumes at the current position. 4K needs a compatible receiver."
         }
         return status.playbackPath?.explanation ?? "Inspected source resolution"
     }
@@ -139,7 +138,7 @@ struct ControllerView: View {
                     VStack(alignment: .leading, spacing: 5) {
                     if status.state != .idle {
                         HStack(spacing: 8) {
-                            if busy || status.state == .buffering {
+                            if status.state == .buffering || status.seekInProgress == true {
                                 ProgressView()
                                     .controlSize(.small)
                                     .accessibilityHidden(true)
@@ -166,11 +165,14 @@ struct ControllerView: View {
                                 .textSelection(.enabled)
                             if showsVideoMenu {
                                 HStack(spacing: 8) {
-                                    if status.preparationInProgress == true {
-                                        ProgressView()
-                                            .controlSize(.mini)
-                                            .help("Preparing video on this Mac")
-                                            .accessibilityLabel("Preparing video on this Mac")
+                                    if status.preparationInProgress == true,
+                                       let speed = status.preparationSpeed, speed.isFinite, speed > 0 {
+                                        Text(speed < 0.1 ? "<0.1×" : String(format: "%.1f×", speed))
+                                            .font(.caption.monospacedDigit())
+                                            .foregroundStyle(.secondary)
+                                            .help("Video seconds prepared per second, including fetching, conversion and verification. Above 1× is faster than playback.")
+                                            .accessibilityLabel("Preparation speed")
+                                            .accessibilityValue(String(format: "%.1f times playback speed", speed))
                                     }
                                     if !playbackDetail.isEmpty {
                                         Text(playbackDetail)

@@ -339,13 +339,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             case .source:
                 guard let id = request.sourceID else { throw AppFailure(.invalidRequest, "Choose a source ID or automatic.") }
                 try controller.selectSource(id)
-                return Response(message: "Reloading the selected source, paused.", pending: true, status: controller.snapshot)
+                return Response(message: "Changing source at the current position, preserving play/pause.", pending: true, status: controller.snapshot)
             case .conversion:
                 guard let allowed = request.allowVideoConversion else {
                     throw AppFailure(.invalidRequest, "Choose allow-video or avoid-video.")
                 }
                 controller.setVideoConversionAllowed(allowed)
-                return Response(message: "Re-encoding preference saved. Applies to the next load or source choice.", status: controller.snapshot)
+                return Response(message: "Re-encoding preference saved.",
+                                pending: controller.snapshot.state == .loading || controller.snapshot.loadingPhase != nil,
+                                status: controller.snapshot)
             }
             return Response(message: request.command == .status ? controller.snapshot.state.rawValue : "Done.", status: controller.snapshot)
         } catch {

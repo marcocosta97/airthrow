@@ -6,7 +6,7 @@ import AirThrowCore
 
 /// The loaded item's video options: one compact, contextual popover for video
 /// source, audio track, and Mac-side enhancement. Source changes reload the
-/// item from the start, paused, on the shared player and keep the current
+/// item at its current position and play/pause state on the shared player, keeping the current
 /// receiver; neither asserts receiver playback. Source shows only the selectors
 /// for which the link offers alternatives.
 struct VideoMenuView: View {
@@ -63,7 +63,7 @@ struct VideoMenuView: View {
     private var mediaReady: Bool {
         status.playbackPath != nil || (status.state == .failed && status.videoEnhancement != nil && !sources.isEmpty)
     }
-    private var canChooseOutput: Bool { mediaReady && !isLive && draftAction != .original }
+    private var canChooseOutput: Bool { controller.allowVideoConversion && mediaReady && !isLive && draftAction != .original }
     private var requires4K: Bool {
         controller.requires4KOutput(for: draftVideo == videoSelection ? nil : draftVideo)
     }
@@ -71,6 +71,7 @@ struct VideoMenuView: View {
         controller.canUpscale(output4K: output4K, sourceID: draftVideo == videoSelection ? nil : draftVideo)
     }
     private func normalizeUpscaleOutput() {
+        if !controller.allowVideoConversion { draftAction = .original }
         if requires4K || (draftAction == .upscale && !canUpscale(output4K: false)) {
             draftOutput4K = true
         }
@@ -88,6 +89,7 @@ struct VideoMenuView: View {
     }
 
     private var outputExplanation: String {
+        if !controller.allowVideoConversion { return "Turn off Avoid video re-encoding in Settings to use enhancements." }
         if isLive { return "Enhancement is available only for on-demand video." }
         if !mediaReady { return "Video options become available when the source is ready." }
         if !canUpscale(output4K: true) { return "The source is already 4K or higher. Upscaling is unavailable." }
@@ -117,7 +119,7 @@ struct VideoMenuView: View {
         if isLive {
             return "Enhancement is only for on-demand video. This live stream can only change source quality."
         }
-        return "Choose this video's source, audio, subtitles, and enhancement. Video or enhancement changes reload paused; native track changes stay on the current item. 4K needs a compatible receiver."
+        return "Choose this video's source, audio, subtitles, and enhancement. Video or enhancement changes keep your position and play/pause state; native track changes stay on the current item. 4K needs a compatible receiver."
     }
 
     var body: some View {
@@ -208,7 +210,8 @@ struct VideoMenuView: View {
                 Picker("Enhancement", selection: $draftAction) {
                     ForEach(EnhancementAction.allCases, id: \.self) { option in
                         Text(option.label).tag(option)
-                            .disabled(option == .upscale && !canUpscale(output4K: true))
+                            .disabled((option != .original && !controller.allowVideoConversion)
+                                      || (option == .upscale && !canUpscale(output4K: true)))
                     }
                 }
                 .pickerStyle(.radioGroup)
@@ -228,8 +231,8 @@ struct VideoMenuView: View {
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Text(isLive
-                     ? "Closing this menu applies changes and reloads paused."
-                     : "Closing this menu applies changes and restarts the video, paused.")
+                     ? "Closing this menu reloads the stream and keeps play/pause."
+                     : "Closing this menu applies changes at the current position and keeps play/pause.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -246,6 +249,7 @@ struct VideoMenuView: View {
             normalizeUpscaleOutput()
         }
         .onChange(of: draftAction) { _, _ in normalizeUpscaleOutput() }
+        .onChange(of: controller.allowVideoConversion) { _, _ in normalizeUpscaleOutput() }
         .onChange(of: controller.sourceHeight(for: draftVideo == videoSelection ? nil : draftVideo)) { _, _ in
             if showingOptions { normalizeUpscaleOutput() }
         }
