@@ -60,6 +60,9 @@ jobs:
             -o .build/WebsiteSessionChecks
           .build/WebsiteSessionChecks
 
+      - name: History credential storage checks (headless)
+        run: python3 scripts/history-credential-checks.py
+
       - name: Settings checks
         run: |
           swiftc -swift-version 6 -parse-as-library \
@@ -67,6 +70,7 @@ jobs:
             Sources/AirThrowApp/MediaDiagnostics.swift \
             Sources/AirThrowApp/PlaybackController.swift \
             Sources/AirThrowApp/ReceiverWaitingScreen.swift \
+            Sources/AirThrowApp/XtreamLibrary.swift \
             Sources/AirThrowApp/SettingsView.swift \
             Tests/SettingsChecks/main.swift \
             -o .build/SettingsChecks
@@ -99,6 +103,15 @@ jobs:
 
       - name: Playback lifecycle checks
         run: python3 scripts/source-choice-checks.py --controller
+
+      - name: IPTV catalog and channel checks
+        run: python3 scripts/iptv-checks.py
+
+      - name: Xtream API client checks
+        run: python3 scripts/xtream-checks.py
+
+      - name: HTTP server authentication checks
+        run: python3 scripts/http-authentication-checks.py
 
       - name: Preparation and HTTP delivery checks
         run: python3 scripts/preparation-checks.py

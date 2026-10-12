@@ -11,5 +11,6 @@ subprocess.run(['swiftc', '-swift-version', '6', '-parse-as-library',
                 root / 'Sources/AirThrowApp/MediaDiagnostics.swift',
                 root / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
                 root / 'Sources/AirThrowApp/PlaybackController.swift',
+                root / 'Sources/AirThrowApp/XtreamLibrary.swift',
                 root / 'Tests/WaitingScreenChecks/main.swift', '-o', binary], check=True)
 subprocess.run([binary, root / 'Resources/WaitingScreen'], cwd=root, check=True, timeout=240)

@@ -15,6 +15,41 @@ struct PreparationChecks {
         do { try await run() }
         catch { print("FAIL preparation checks: \(error)"); exit(1) }
     }
+    static func liveHEVC(preparer: MediaPreparer, base: String, directory: URL) async throws {
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        for (name, pixelFormat) in [("hevc-sdr.mkv", "yuv420p"), ("hevc-main10-sdr.mkv", "yuv420p10le")] {
+            let source = ResolvedSource(url: URL(string: base + "/" + name)!).withTransportRemux(isLive: true)
+            let relay = try await HTTPMediaRelay.start(source: source.url, host: "127.0.0.1")
+            defer { relay.stop() }
+            try check(relay.url != nil, "Missing opaque preparation input")
+            let prepared = try await preparer.prepare(source.withPreparationInput(relay.url!))
+            defer { prepared.stop() }
+            let (manifest, _) = try await session.data(from: prepared.url)
+            let text = String(decoding: manifest, as: UTF8.self)
+            try check(text.contains("#EXT-X-MAP:URI=\"init.mp4\"") && prepared.playbackPath == .remux,
+                      "Live HEVC did not use stream-copy fragmented MP4")
+            let fragment = text.components(separatedBy: .newlines).first { !$0.isEmpty && !$0.hasPrefix("#") }!
+            let root = prepared.url.deletingLastPathComponent()
+            let (initialization, _) = try await session.data(from: root.appendingPathComponent("init.mp4"))
+            let (segment, _) = try await session.data(from: root.appendingPathComponent(fragment))
+            let local = directory.appendingPathComponent("live-" + name + ".mp4")
+            try (initialization + segment).write(to: local)
+            let finder = HelperExecutables(environment: ProcessInfo.processInfo.environment)
+            try check(finder.executable("ffprobe", override: "AIRTHROW_FFPROBE") != nil, "Missing fixture inspector")
+            let output = try await HelperProcess.run(executable: finder.executable("ffprobe", override: "AIRTHROW_FFPROBE")!,
+                arguments: ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,codec_tag_string,pix_fmt,width,height",
+                            "-of", "json", local.path], outputLimit: 16 * 1024)
+            let video = (try JSONSerialization.jsonObject(with: output) as! [String: Any])["streams"] as! [[String: Any]]
+            try check(video.first?["codec_name"] as? String == "hevc" && video.first?["codec_tag_string"] as? String == "hvc1"
+                      && video.first?["pix_fmt"] as? String == pixelFormat && video.first?["height"] as? Int == 180,
+                      "Remux changed HEVC codec, bit depth or dimensions")
+            try check(try await AVURLAsset(url: prepared.url).load(.isPlayable), "Live HEVC output is not playable")
+            await prepared.waitForProducer()
+            try check(prepared.productionFailure == nil, "Live HEVC producer failed")
+        }
+        print("PASS live HEVC Main and Main 10 SDR preserve codec, bit depth and dimensions in hvc1/fMP4 through opaque loopback input")
+    }
     static func oddDimensions(_ url: URL) async throws {
         var environment = ProcessInfo.processInfo.environment
         environment["AIRTHROW_MEDIA_HOST"] = "127.0.0.1"
@@ -106,6 +141,10 @@ struct PreparationChecks {
         var environment = ProcessInfo.processInfo.environment
         environment["AIRTHROW_MEDIA_HOST"] = "127.0.0.1"
         let preparer = MediaPreparer(environment: environment, preferences: PreparationPreferences(retainAll: true))
+        if CommandLine.arguments.contains("--live-hevc-only") {
+            try await liveHEVC(preparer: preparer, base: base, directory: directory)
+            return
+        }
         let session = URLSession(configuration: .ephemeral)
         defer { session.invalidateAndCancel() }
         func fetch(_ url: URL, method: String = "GET", range: String? = nil) async throws -> (Data, HTTPURLResponse) {
@@ -203,15 +242,7 @@ struct PreparationChecks {
         liveSubtitleMedia.stop()
         print("PASS live preparation retains video/audio with unsupported text subtitles")
 
-        let liveHEVC = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/hevc-sdr.mkv")!, isLive: true))
-        let (liveHEVCPlaylist, _) = try await fetch(liveHEVC.url)
-        try check(String(decoding: liveHEVCPlaylist, as: UTF8.self).contains("#EXT-X-MAP:URI=\"init.mp4\"")
-                  && liveHEVC.playbackPath == .remux, "Live HEVC did not use fragmented MP4")
-        try check(try await AVURLAsset(url: liveHEVC.url).load(.isPlayable), "Live HEVC HLS is not playable")
-        await liveHEVC.waitForProducer()
-        try check(liveHEVC.productionFailure == nil, "Live HEVC producer failed")
-        liveHEVC.stop()
-        print("PASS live HEVC retains copied tracks in playable fragmented MP4")
+        try await liveHEVC(preparer: preparer, base: base, directory: directory)
 
         let localFile = directory.appendingPathComponent("combined.mp4")
         let localSource = try await SourceResolver().resolve(MediaInput.localFile(localFile))

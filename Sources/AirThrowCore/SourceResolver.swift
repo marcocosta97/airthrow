@@ -111,6 +111,32 @@ public struct ResolvedSource: Sendable {
         result.preparationPosition = preparationPosition
         return result
     }
+
+    public func withTransportRemux(isLive: Bool) -> ResolvedSource {
+        ResolvedSource(url: url, title: title, headers: headers, audio: audio, hlsAudioOptions: hlsAudioOptions,
+            needsPreparation: true, delivery: delivery, videoKnownPresent: true, isLive: isLive,
+            conversionPolicy: conversionPolicy, plannedPath: .remux, enhancement: enhancement)
+    }
+
+    /// A catalog's Live section identifies an indefinite presentation even
+    /// before native inspection exposes the moving seek window.
+    public func withLivePresentation() -> ResolvedSource {
+        var result = ResolvedSource(url: url, title: title, headers: headers, audio: audio,
+            hlsAudioOptions: hlsAudioOptions, needsPreparation: needsPreparation,
+            needsDelivery: needsDelivery, delivery: delivery, videoKnownPresent: videoKnownPresent,
+            isLive: true, conversionPolicy: conversionPolicy, plannedPath: plannedPath, enhancement: enhancement)
+        result.preparationPosition = preparationPosition
+        return result
+    }
+
+    public func withPreparationInput(_ url: URL) -> ResolvedSource {
+        var result = ResolvedSource(url: url, title: title, headers: headers, audio: audio, hlsAudioOptions: hlsAudioOptions,
+            needsPreparation: needsPreparation, needsDelivery: needsDelivery, delivery: delivery,
+            videoKnownPresent: videoKnownPresent, isLive: isLive, conversionPolicy: conversionPolicy,
+            plannedPath: plannedPath, enhancement: enhancement)
+        result.preparationPosition = preparationPosition
+        return result
+    }
 }
 
 public struct PlaylistEntry: Sendable, Equatable {
@@ -382,6 +408,77 @@ enum HLSMaster {
 /// presentation or segment so routed AVPlayer items can retain positive video
 /// evidence even when AirPlay no longer exposes their local tracks.
 public enum HLSVideoEvidence {
+    /// Supplemental inspection never exports manifest text, source addresses,
+    /// metadata tags or helper errors. The helper receives only a local sample.
+    public static func inspectTransportVideo(at url: URL) async -> StreamingVideoCharacteristics? {
+        let work = Task { await transportCharacteristics(at: url, depth: 0) }
+        let deadline = Task {
+            try? await Task.sleep(for: .seconds(8))
+            if !Task.isCancelled { work.cancel() }
+        }
+        defer { deadline.cancel() }
+        return await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }
+    }
+
+    private static func transportCharacteristics(at url: URL, depth: Int) async -> StreamingVideoCharacteristics? {
+        guard depth <= 2, !Task.isCancelled else { return nil }
+        do {
+            guard let fetched = try await sampledBytes(at: url) else { return nil }
+            if !isTransport(fetched.data) {
+                guard let reference = reference(in: fetched.data, at: fetched.base) else { return nil }
+                return await transportCharacteristics(at: reference.url, depth: depth + 1)
+            }
+            let sample = fetched.data
+            guard let executable = HelperExecutables(environment: ProcessInfo.processInfo.environment)
+                    .executable("ffprobe", override: "AIRTHROW_FFPROBE") else { return nil }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                                                   attributes: [.posixPermissions: 0o700])
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let local = directory.appendingPathComponent("sample.ts")
+            try sample.write(to: local, options: .atomic)
+            let output = try await HelperProcess.run(executable: executable, arguments: [
+                "-v", "error", "-protocol_whitelist", "file", "-f", "mpegts", "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name,width,height,pix_fmt,color_transfer,profile,level", "-of", "json", local.path
+            ], timeout: .seconds(4), outputLimit: 16 * 1024)
+            return decodeTransportCharacteristics(output, delivery: depth == 0 ? .transportStream : .hls)
+        } catch { return nil }
+    }
+
+    static func decodeTransportCharacteristics(_ data: Data, delivery: StreamingVideoCharacteristics.Delivery? = nil) -> StreamingVideoCharacteristics? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let streams = root["streams"] as? [[String: Any]], let video = streams.first,
+              let name = video["codec_name"] as? String,
+              let codec = StreamingVideoCharacteristics.Codec(rawValue: name) else { return nil }
+        func dimension(_ key: String) -> Int? {
+            guard let value = video[key] as? Int, (1...16384).contains(value) else { return nil }
+            return value
+        }
+        let depth: Int? = switch video["pix_fmt"] as? String {
+        case "yuv420p", "yuv422p", "yuv444p": 8
+        case "yuv420p10le", "yuv422p10le", "yuv444p10le": 10
+        case "yuv420p12le", "yuv422p12le", "yuv444p12le": 12
+        default: nil
+        }
+        let transfer = (video["color_transfer"] as? String).flatMap(StreamingVideoCharacteristics.Transfer.init(rawValue:))
+        let chroma: StreamingVideoCharacteristics.Chroma? = switch video["pix_fmt"] as? String {
+        case "yuv420p", "yuv420p10le", "yuv420p12le": .yuv420
+        case "yuv422p", "yuv422p10le", "yuv422p12le": .yuv422
+        case "yuv444p", "yuv444p10le", "yuv444p12le": .yuv444
+        default: nil
+        }
+        let profile: StreamingVideoCharacteristics.Profile? = switch (codec, video["profile"] as? String) {
+        case (.hevc, "Main"): .main
+        case (.hevc, "Main 10"): .main10
+        case (.hevc, "Main Still Picture"): .mainStillPicture
+        default: nil
+        }
+        let level = (video["level"] as? Int).flatMap { (1...255).contains($0) ? $0 : nil }
+        return StreamingVideoCharacteristics(codec: codec, width: dimension("width"), height: dimension("height"),
+                                             bitDepth: depth, transfer: transfer, delivery: delivery,
+                                             chroma: chroma, profile: profile, level: level)
+    }
+
     public static func hasVideo(at url: URL) async -> Bool {
         await hasVideo(at: url, depth: 0)
     }
@@ -393,14 +490,74 @@ public enum HLSVideoEvidence {
             if HLSMaster.hasAudioVideo(data, at: url) { return true }
             guard let reference = reference(in: data, at: url) else { return false }
             if reference.isPlaylist { return await hasVideo(at: reference.url, depth: depth + 1) }
-            let asset = AVURLAsset(url: reference.url)
+            if await videoTracks(at: reference.url) { return true }
+            // Some live origins ignore byte ranges: AVFoundation rejects their
+            // standalone TS URL even though HLS playback works. Inspect a small
+            // local TS sample instead, without changing the playback URL/path.
+            return try await sampledTransportVideo(at: reference.url)
+        } catch { return false }
+    }
+
+    private static func videoTracks(at url: URL) async -> Bool {
+        let asset = AVURLAsset(url: url)
+        let timeout = Task {
+            try await Task.sleep(for: .seconds(6))
+            asset.cancelLoading()
+        }
+        defer { timeout.cancel(); asset.cancelLoading() }
+        do {
             return try await withTaskCancellationHandler {
                 try Task.checkCancellation()
                 return try await !asset.loadTracks(withMediaType: .video).isEmpty
-            } onCancel: {
-                asset.cancelLoading()
-            }
+            } onCancel: { asset.cancelLoading() }
         } catch { return false }
+    }
+
+    private static func sampledTransportVideo(at url: URL) async throws -> Bool {
+        guard let sample = try await transportSample(at: url) else { return false }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                                               attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let local = directory.appendingPathComponent("sample.ts")
+        try sample.write(to: local)
+        return await videoTracks(at: local)
+    }
+
+    private static func transportSample(at url: URL) async throws -> Data? {
+        guard let sample = try await sampledBytes(at: url)?.data, isTransport(sample) else { return nil }
+        return sample
+    }
+
+    private static func isTransport(_ sample: Data) -> Bool {
+        sample.count >= 3 * 188 && sample[0] == 0x47 && sample[188] == 0x47 && sample[376] == 0x47
+    }
+
+    private static func sampledBytes(at url: URL) async throws -> (data: Data, base: URL)? {
+        try Task.checkCancellation()
+        let maximumBytes = 256 * 1024
+        let config = URLSessionConfiguration.ephemeral
+        config.httpCookieStorage = nil
+        config.urlCredentialStorage = nil
+        config.urlCache = nil
+        config.timeoutIntervalForRequest = 6
+        config.timeoutIntervalForResource = 8
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        var request = URLRequest(url: url)
+        request.setValue("bytes=0-\(maximumBytes - 1)", forHTTPHeaderField: "Range")
+        let (bytes, response) = try await session.bytes(for: request)
+        guard let http = response as? HTTPURLResponse, [200, 206].contains(http.statusCode),
+              http.statusCode != 206 || http.value(forHTTPHeaderField: "Content-Range")?.hasPrefix("bytes 0-") == true else {
+            return nil
+        }
+        var sample = Data()
+        for try await byte in bytes {
+            try Task.checkCancellation()
+            sample.append(byte)
+            if sample.count == maximumBytes { break }
+        }
+        return (sample, response.url ?? url)
     }
 
     static func reference(in data: Data, at base: URL) -> (url: URL, isPlaylist: Bool)? {

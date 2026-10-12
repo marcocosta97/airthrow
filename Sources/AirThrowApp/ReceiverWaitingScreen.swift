@@ -22,6 +22,7 @@ final class ReceiverWaitingScreen {
     private var generation = UUID()
     private var connected = false
     private(set) var isActive = false
+    var ownsCurrentItem: Bool { item != nil && player.currentItem === item }
 
     init(player: AVPlayer, mediaURL: @escaping () -> URL?,
          changed: @escaping () -> Void, failed: @escaping () -> Void) {
@@ -33,7 +34,10 @@ final class ReceiverWaitingScreen {
 
     func start() {
         guard !isActive else { return }
-        stop()
+        // A failed user-media load may still have our previous item mounted.
+        // Keep it until the new interstitial is ready to replace it, so recovery
+        // does not clear AVPlayer and release the selected receiver.
+        stop(keepingItemForReplacement: true)
         guard let file = mediaURL() else { failed(); return }
         isActive = true
         let id = generation
@@ -45,6 +49,8 @@ final class ReceiverWaitingScreen {
                 catch { stream.stop(); throw error }
                 guard let self, !Task.isCancelled, self.generation == id, self.isActive,
                       let url = server.url else { server.stop(); stream.stop(); return }
+                let previousStream = self.stream
+                let previousServer = self.server
                 self.stream = stream
                 self.server = server
                 let item = AVPlayerItem(url: url)
@@ -62,6 +68,8 @@ final class ReceiverWaitingScreen {
                     }
                 self.player.isMuted = true
                 self.player.replaceCurrentItem(with: item)
+                previousServer?.stop()
+                previousStream?.stop()
                 self.preparation = nil
                 self.changed()
             } catch {

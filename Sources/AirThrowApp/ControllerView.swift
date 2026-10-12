@@ -29,6 +29,7 @@ enum SurfaceColor {
 final class ControllerPresentation: ObservableObject {
     @Published var playlistVisible = false
     @Published var settingsVisible = false
+    @Published var xtreamPlaylistVisible = false
 }
 
 /// Keep the controller alive while Settings covers it, retaining source input
@@ -54,7 +55,50 @@ struct ControllerWindowView: View {
         }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.18),
                    value: presentation.settingsVisible)
+        .sheet(item: sheetBinding) { sheet in
+            switch sheet {
+            case .http(let request):
+                HTTPLoginView(request: controller.httpLoginRequest ?? request, submit: { username, password in
+                    controller.submitHTTPLogin(id: request.id, username: username, password: password)
+                }, cancel: { controller.cancelHTTPLogin(id: request.id) })
+                .id(request.id)
+            case .xtream:
+                XtreamPlaylistView(submit: { url in
+                    try controller.connectXtream(url)
+                    presentation.xtreamPlaylistVisible = false
+                }, cancel: { presentation.xtreamPlaylistVisible = false })
+            }
+        }
+        .onChange(of: controller.httpLoginRequest?.id) { _, request in
+            if request != nil { presentation.xtreamPlaylistVisible = false }
+        }
     }
+    private enum Sheet: Identifiable {
+        case http(HTTPLoginRequest), xtream
+        var id: String {
+            switch self {
+            case .http(let request): "http-\(request.id)"
+            case .xtream: "xtream"
+            }
+        }
+    }
+    private var activeSheet: Sheet? {
+        if let request = controller.httpLoginRequest { return .http(request) }
+        return presentation.xtreamPlaylistVisible ? .xtream : nil
+    }
+    private var sheetBinding: Binding<Sheet?> {
+        let presented = activeSheet
+        return Binding(get: { activeSheet }, set: { value in
+            // A disappearing sheet must not cancel a newer login request.
+            guard value == nil, activeSheet?.id == presented?.id else { return }
+            switch presented {
+            case .http(let request): controller.cancelHTTPLogin(id: request.id)
+            case .xtream: presentation.xtreamPlaylistVisible = false
+            case nil: break
+            }
+        })
+    }
+
 }
 
 struct ControllerView: View {
@@ -114,7 +158,7 @@ struct ControllerView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         VStack(alignment: .leading, spacing: 6) {
                             HStack(spacing: 8) {
-                                TextField("Video URL or file path", text: $url)
+                                TextField("Video or playlist URL", text: $url)
                                     .textFieldStyle(.roundedBorder)
                                     .focused($urlFocused)
                                     .onSubmit(load)
@@ -122,13 +166,15 @@ struct ControllerView: View {
                                     .accessibilityHint("Enter a URL or local file path. You can also drop a video file or link here.")
                                     .help("A direct video URL, website video or playlist, or local video file")
                                 Button(action: chooseFile) { Image(systemName: "folder") }
-                                    .help("Choose a local video file")
-                                    .accessibilityLabel("Choose local video file")
-                                Button("Load", action: load)
-                                    .disabled(url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                                    .help("Load this video without starting playback")
+                                    .help("Choose a video or playlist file")
+                                    .accessibilityLabel("Choose video or playlist file")
+                                Button(controller.iptvImporting ? "Cancel" : "Load") {
+                                    if controller.iptvImporting { controller.cancelIPTVImport() } else { load() }
+                                }
+                                    .disabled(!controller.iptvImporting && url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                    .help(controller.iptvImporting ? "Cancel loading the channel playlist" : "Load this source without starting playback")
                             }
-                            Text("Video URL, website, playlist, or local file")
+                            Text(controller.iptvImporting ? "Loading channel playlist…" : "Video URL, website, playlist, or local file")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -206,22 +252,27 @@ struct ControllerView: View {
                         GeometryReader { geometry in
                             ZStack(alignment: .topLeading) {
                                 SeekProgressSlider(value: Binding(get: {
-                                    let value = scrubbing ? scrub : (controller.pendingSeek ?? status.position ?? 0)
-                                    return min(max(value, range?.start ?? 0), range?.end ?? 1)
+                                    LivePolicy.timelinePosition(status, requested: scrubbing ? scrub : controller.pendingSeek)
                                 }, set: { scrub = $0 }), bounds: (range?.start ?? 0)...(range?.end ?? 1),
                                     readyRanges: PlaybackPolicy.readyRanges(status), onEditingChanged: { editing in
                                     scrubbing = editing
-                                    if !editing { perform { try controller.seek(scrub) } }
+                                    if !editing {
+                                        perform {
+                                            if status.isLive, (LivePolicy.delay(status, position: scrub) ?? .infinity) <= 3 {
+                                                try controller.goLive()
+                                            } else { try controller.seek(scrub) }
+                                        }
+                                    }
                                 })
                                 .frame(height: 20)
                                 .padding(.top, 8)
                                 .disabled(!PlaybackPolicy.canSeek(status))
                                 .accessibilityLabel("Playback position")
-                                .accessibilityValue(PlaybackFormat.time(controller.pendingSeek ?? status.position))
+                                .accessibilityValue(status.isLive ? livePositionLabel : PlaybackFormat.time(controller.pendingSeek ?? status.position))
                                 .accessibilityHint(progressHelp)
                                 .help(progressHelp)
                                 if let hoverTime {
-                                    Text(PlaybackFormat.time(hoverTime))
+                                    Text(status.isLive ? LivePolicy.positionLabel(status, position: hoverTime) : PlaybackFormat.time(hoverTime))
                                         .font(.caption2.monospacedDigit())
                                         .padding(.horizontal, 5).padding(.vertical, 2)
                                         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
@@ -244,7 +295,7 @@ struct ControllerView: View {
                         HStack {
                             Text(livePositionLabel)
                             Spacer()
-                            if status.isLive, (status.liveOffset ?? 0) > 3 {
+                            if status.isLive, !LivePolicy.isAtLive(status), status.liveOffset != nil {
                                 Button("Go Live") { perform { try controller.goLive() } }
                                     .buttonStyle(.link)
                                     .disabled(!canControl)
@@ -302,10 +353,10 @@ struct ControllerView: View {
                 }
 
                 Group {
-                    if let message = status.error ?? controller.notice {
+                    if let message = status.error ?? controller.iptvImportError ?? controller.notice {
                         ScrollView {
                             HStack(alignment: .top, spacing: 8) {
-                                Image(systemName: status.error == nil ? "info.circle" : "exclamationmark.triangle")
+                                Image(systemName: status.error == nil && controller.iptvImportError == nil ? "info.circle" : "exclamationmark.triangle")
                                     .accessibilityHidden(true)
                                 Text(message)
                                     .fixedSize(horizontal: false, vertical: true)
@@ -319,7 +370,7 @@ struct ControllerView: View {
                                     .controlSize(.small)
                                 }
                                 if status.error == nil {
-                                    Button { controller.clearNotice() } label: { Image(systemName: "xmark") }
+                                    Button { controller.clearNotice(); controller.clearIPTVImportError() } label: { Image(systemName: "xmark") }
                                         .buttonStyle(.plain).accessibilityLabel("Dismiss message")
                                 }
                             }
@@ -376,6 +427,9 @@ struct ControllerView: View {
             // Loads from the CLI, shared links and playlists also leave editing.
             if ready { urlFocused = false }
         }
+        .onReceive(controller.$sourceInput) { input in
+            if let input { url = input; urlFocused = false }
+        }
     }
 
     private func section<Content: View>(
@@ -401,10 +455,7 @@ struct ControllerView: View {
 
     private var livePositionLabel: String {
         if status.isLive {
-            let offset = scrubbing
-                ? max(0, (range?.end ?? scrub) - scrub)
-                : (status.liveOffset ?? 0)
-            return offset > 3 ? "−\(PlaybackFormat.time(offset))" : "Live"
+            return LivePolicy.positionLabel(status, position: scrubbing ? scrub : controller.pendingSeek)
         }
         return PlaybackFormat.time(scrubbing ? scrub : (controller.pendingSeek ?? status.position))
     }
@@ -412,13 +463,13 @@ struct ControllerView: View {
     private func load() { perform { try controller.load(url) }; urlFocused = false }
     private func chooseFile() {
         let panel = NSOpenPanel()
-        panel.title = "Choose a Video"
+        panel.title = "Choose a Video or M3U Playlist"
         panel.prompt = "Choose"
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.allowsOtherFileTypes = false
-        panel.allowedContentTypes = ["mp4", "m4v", "mov", "mkv", "webm"].compactMap {
+        panel.allowedContentTypes = ["mp4", "m4v", "mov", "mkv", "webm", "m3u", "m3u8"].compactMap {
             UTType(filenameExtension: $0)
         }
         let completion: (NSApplication.ModalResponse) -> Void = { response in

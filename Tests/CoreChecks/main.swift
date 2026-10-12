@@ -166,6 +166,32 @@ let tests: [(String, () throws -> Void)] = [
         try check(!LivePolicy.isLive(sourceDuration: 20, itemDurationIndefinite: true),
                   "Prepared finite media was classified as live")
     }),
+    ("live timeline ignores native latency and moving buffer edges", {
+        var live = PlaybackSnapshot()
+        live.isLive = true
+        live.recommendedLiveOffset = 12
+        for edge in [100.0, 102, 104, 106] {
+            live.seekableRanges = [SeekRange(start: edge - 30, end: edge)]
+            live.position = edge - 14
+            live.liveOffset = 14
+            try check(LivePolicy.timelinePosition(live) == edge && LivePolicy.positionLabel(live) == "Live",
+                      "The live knob follows the moving buffer rather than staying at Live")
+        }
+        live.liveOffset = 27
+        live.position = 79
+        try check(LivePolicy.timelinePosition(live) == 79 && LivePolicy.positionLabel(live) == "−0:15",
+                  "Real time-shifted playback was hidden as Live")
+        live.liveOffset = 12
+        try check(LivePolicy.timelinePosition(live, requested: 85) == 85
+                  && LivePolicy.positionLabel(live, position: 85) == "−0:09",
+                  "Live presentation hid an explicit seek target")
+        live.recommendedLiveOffset = .nan
+        try check(LivePolicy.delay(live) == 12, "Invalid native latency changed the live delay")
+        var finite = PlaybackSnapshot()
+        finite.duration = 100; finite.position = 42
+        try check(LivePolicy.timelinePosition(finite) == 42 && LivePolicy.delay(finite) == nil,
+                  "Live stabilization changed the finite timeline")
+    }),
     ("shared control policy, labels and time formatting", {
         var snapshot = PlaybackSnapshot()
         snapshot.state = .ready

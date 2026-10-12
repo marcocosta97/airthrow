@@ -4,8 +4,14 @@ import Foundation
 private final class RoutePlayer: AVPlayer, @unchecked Sendable {
     private let lock = NSLock()
     nonisolated(unsafe) private var external = false
+    nonisolated(unsafe) private var emptyReplacements = 0
     override var isExternalPlaybackActive: Bool { lock.withLock { external } }
     func setExternal(_ active: Bool) { lock.withLock { external = active } }
+    var emptyReplacementCount: Int { lock.withLock { emptyReplacements } }
+    override func replaceCurrentItem(with item: AVPlayerItem?) {
+        if item == nil { lock.withLock { emptyReplacements += 1 } }
+        super.replaceCurrentItem(with: item)
+    }
 }
 
 @main
@@ -16,8 +22,8 @@ struct WaitingScreenChecks {
             guard condition else { throw NSError(domain: "WaitingScreenChecks", code: 1,
                                                  userInfo: [NSLocalizedDescriptionKey: message]) }
         }
-        func wait(_ condition: @MainActor () -> Bool) async throws {
-            let end = Date().addingTimeInterval(10)
+        func wait(seconds: Double = 10, _ condition: @MainActor () -> Bool) async throws {
+            let end = Date().addingTimeInterval(seconds)
             while !condition() && Date() < end { try await Task.sleep(for: .milliseconds(50)) }
             try check(condition(), "Timed out waiting for state")
         }
@@ -42,8 +48,17 @@ struct WaitingScreenChecks {
         print("PASS disabled by default behavior")
 
         let player = RoutePlayer()
+        // Supply a local rendering clock without opening or presenting video.
+        let renderingClock = AVPlayerLayer(player: player)
+        defer { withExtendedLifetime(renderingClock) {} }
         let controller = PlaybackController(player: player, showReceiverWaitingScreen: true,
-                                            waitingScreenURL: { file }, prepareSource: nil)
+                                            waitingScreenURL: { file }, resolveSource: { url in
+            if url.lastPathComponent == "timeout.mp4" {
+                try await Task.sleep(for: .seconds(45))
+            }
+            if url.lastPathComponent == "failed.mp4" { throw URLError(.cannotConnectToHost) }
+            return ResolvedSource(url: url)
+        }, prepareSource: nil)
         defer { controller.shutdown() }
         controller.pickerWillOpen()
         controller.stop()
@@ -111,8 +126,44 @@ struct WaitingScreenChecks {
         try check(controller.snapshot.receiverWaiting != true && player.rate == 0,
                   "Replacement autoplays or retains waiting state")
         print("PASS load replaces waiting screen on same player, paused")
+        try controller.load("http://127.0.0.1:1/timeout.mp4")
+        try await wait(seconds: 40) {
+            controller.refresh()
+            return controller.snapshot.receiverWaiting == true && player.currentItem?.status == .readyToPlay
+        }
+        try check(controller.snapshot.state == .failed && controller.snapshot.error?.contains("Loading timed out") == true,
+                  "Waiting screen hides the failed source diagnosis")
+        try check(controller.player === player && controller.snapshot.externalPlaybackActive && player.currentItem != nil,
+                  "Loading timeout dropped the receiver instead of restoring its waiting screen")
+        print("PASS loading timeout restores waiting media on the same player and preserves the error")
+        let beforeRecovery = player.emptyReplacementCount
+        try controller.load("http://127.0.0.1:1/failed.mp4")
+        try await wait {
+            controller.refresh()
+            return controller.snapshot.receiverWaiting == true && player.currentItem?.status == .readyToPlay
+        }
+        try check(player.emptyReplacementCount == beforeRecovery,
+                  "Recovery cleared the retained waiting item before replacing it")
+        print("PASS failure before installing user media preserves the retained waiting item until replacement")
+        try controller.selectXtreamMedia(replacement.url!, title: "Recovery channel", isLive: true)
+        do {
+            try await wait {
+                controller.refresh()
+                return controller.snapshot.state == .playing
+            }
+        } catch {
+            print("Recovery state: \(controller.snapshot.state.rawValue), rate: \(player.rate), item: \(player.currentItem?.status.rawValue ?? -1), waiting: \(controller.snapshot.receiverWaiting == true)")
+            throw error
+        }
+        try check(controller.snapshot.receiverWaiting != true && player.emptyReplacementCount == beforeRecovery
+                  && controller.player === player,
+                  "Channel selection after failure did not replace waiting media and resume without Stop")
+        print("PASS channel selection recovers from failed waiting state without Stop or clearing the receiver")
         controller.stop()
         try check(player.currentItem == nil, "Stop retained media")
-        print("7/7 waiting-screen checks passed")
+        try await Task.sleep(for: .milliseconds(300))
+        try check(player.currentItem == nil && controller.snapshot.receiverWaiting != true,
+                  "Stopped timeout recovery restarted the waiting screen")
+        print("10/10 waiting-screen checks passed")
     }
 }

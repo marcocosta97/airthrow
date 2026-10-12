@@ -9,15 +9,16 @@ struct PlaylistPanel: View {
     @ObservedObject var controller: PlaybackController
 
     var body: some View {
-        Group {
-            if let queue = controller.snapshot.queue {
+        VStack(spacing: 0) {
+            if controller.inspectorPage == .playlist, let queue = controller.snapshot.queue {
+                InspectorHeader(title: "Playlist", back: { controller.inspectorPage = .history })
                 PlaylistView(queue: queue)
+            } else if controller.inspectorPage == .xtream, let library = controller.xtreamLibrary {
+                XtreamPanel(library: library, controller: controller)
+            } else if controller.inspectorPage == .channels, controller.iptvCatalog != nil {
+                IPTVPanel(controller: controller)
             } else {
-                ContentUnavailableView(
-                    "No Playlist",
-                    systemImage: "list.bullet",
-                    description: Text("Load a playlist to see its items here.")
-                )
+                HistoryPanel(controller: controller)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

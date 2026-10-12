@@ -171,6 +171,14 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            Section("Xtream catalogs") {
+                Toggle("Save catalogs between app launches", isOn: Binding(
+                    get: { controller.saveXtreamCatalogs },
+                    set: { controller.setSaveXtreamCatalogs($0) }))
+                Text("Reuse downloaded Live, Films and Series catalogs when reopening AirThrow. Use Refresh to update them. Turning this off removes saved catalogs.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Section("Cookies") {
                 CookieSourceView(cookieStatus: cookieStatus)
             }

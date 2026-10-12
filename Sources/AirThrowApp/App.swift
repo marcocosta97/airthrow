@@ -18,7 +18,7 @@ struct AirThrowMain {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate, NSToolbarDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate, NSToolbarDelegate, NSMenuItemValidation {
     // Fixed playback surface reserves room for a two-line title and warning.
     private static let controllerHeight: CGFloat = 416
     private let controller = PlaybackController()
@@ -34,6 +34,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var presentationObservation: AnyCancellable?
     private var snapshotObservation: AnyCancellable?
     private var menuObservation: AnyCancellable?
+    private var iptvObservation: AnyCancellable?
+    private var httpLoginObservation: AnyCancellable?
     private var menuIsOpen = false
     private var menuCardView: MenuCardView?
     private var menuControlRow: MenuControlRow?
@@ -71,6 +73,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             .sink { [weak self] available in
                 self?.updatePlaylistAvailability(available)
         }
+        iptvObservation = controller.$inspectorPage.dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] page in
+                guard let self, self.controller.inspectorPage == page else { return }
+                if page != .history { self.presentation.playlistVisible = true }
+            }
+        httpLoginObservation = controller.$httpLoginRequest
+            .map { $0?.id }
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] request in
+                if request != nil { self?.showWindow() }
+            }
         menuObservation = controller.$snapshot
             .sink { [weak self] snapshot in
                 self?.refreshOpenMenu(snapshot)
@@ -128,6 +143,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         revealWindow()
     }
 
+    @objc private func addXtreamPlaylist() {
+        showWindow()
+        guard controller.httpLoginRequest == nil else { return }
+        presentation.xtreamPlaylistVisible = true
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(addXtreamPlaylist) {
+            return controller.httpLoginRequest == nil && !presentation.xtreamPlaylistVisible
+        }
+        return true
+    }
+
     private func revealWindow() {
         if window == nil {
             let window = ControllerWindow(contentRect: NSRect(x: 0, y: 0, width: ControllerMetrics.width, height: Self.controllerHeight), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
@@ -182,6 +210,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 guard let collapsed = change.newValue else { return }
                 Task { @MainActor [weak self] in
                     self?.presentation.playlistVisible = !collapsed
+                    if collapsed { self?.controller.inspectorPage = .history }
                 }
             }
 
@@ -225,11 +254,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         guard itemIdentifier == NSToolbarItem.Identifier("WindowControls"),
               let settingsImage = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "Settings"),
-              let playlistImage = NSImage(systemSymbolName: "sidebar.right", accessibilityDescription: "Playlist")
+              let playlistImage = NSImage(systemSymbolName: "sidebar.right", accessibilityDescription: "History")
         else { return nil }
         let group = NSToolbarItemGroup(itemIdentifier: itemIdentifier,
             images: [settingsImage, playlistImage], selectionMode: .selectAny,
-            labels: ["Settings", "Playlist"], target: self,
+            labels: ["Settings", "History"], target: self,
             action: #selector(toggleWindowControl(_:)))
         group.label = "Window controls"
         group.controlRepresentation = .expanded
@@ -237,7 +266,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         group.setSelected(presentation.playlistVisible, at: 1)
         if let control = group.view as? NSSegmentedControl {
             control.setToolTip("Show or hide Settings (⌘,)", forSegment: 0)
-            control.setToolTip("Show or hide the playlist", forSegment: 1)
+            control.setToolTip("Show or hide history", forSegment: 1)
         }
         windowControls = group
         return group
@@ -261,7 +290,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     private func updatePlaylistAvailability(_ available: Bool) {
-        presentation.playlistVisible = available
+        if !available, controller.inspectorPage == .playlist { controller.inspectorPage = .history }
     }
 
     /// AppKit animates the inspector item's collapse; because the split view
@@ -314,7 +343,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 guard let url = request.url else { throw AppFailure(.invalidRequest, "The open command requires a video URL or local file path.") }
                 let playOnReceiver = request.autoplay == true && controller.snapshot.externalPlaybackActive
                 try controller.load(url, autoplay: request.autoplay == true)
-                if !controller.snapshot.externalPlaybackActive { showWindow() }
+                if !controller.snapshot.externalPlaybackActive || controller.iptvImporting { showWindow() }
+                if controller.iptvImporting { return Response(message: "Importing channel playlist.", pending: true, status: controller.snapshot) }
                 return Response(message: playOnReceiver ? "Loading video on the current receiver."
                     : (controller.snapshot.loadingPhase == "resolving"
                         ? "Finding video. Choose a receiver, then play." : "Loading video. Choose a receiver, then play."),
@@ -387,6 +417,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         appMenu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenuItem.submenu = appMenu
         main.addItem(appMenuItem)
+        let fileItem = NSMenuItem()
+        let file = NSMenu(title: "File")
+        let xtream = file.addItem(withTitle: "Add Xtream Server…", action: #selector(addXtreamPlaylist), keyEquivalent: "")
+        xtream.target = self
+        fileItem.submenu = file
+        main.addItem(fileItem)
         let editItem = NSMenuItem()
         let edit = NSMenu(title: "Edit")
         edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")

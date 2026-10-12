@@ -6,6 +6,25 @@ import AirThrowCore
 
 /// Expose only fixed messages/codes. NSError descriptions and userInfo can contain signed URLs.
 enum MediaDiagnostics {
+    static func numericErrors(for error: Error?) -> [MediaErrorCode] {
+        var current = error as NSError?
+        var result: [MediaErrorCode] = []
+        for _ in 0..<8 {
+            guard let error = current else { break }
+            let domain: MediaErrorCode.Domain
+            switch error.domain {
+            case AVFoundationErrorDomain: domain = .avFoundation
+            case NSURLErrorDomain: domain = .urlLoading
+            case "CoreMediaErrorDomain": domain = .coreMedia
+            case NSOSStatusErrorDomain: domain = .osStatus
+            default: domain = .other
+            }
+            result.append(MediaErrorCode(domain: domain, code: error.code))
+            current = error.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return result
+    }
+
     static func reason(for error: Error?, fallback: MediaFailureReason) -> MediaFailureReason {
         var current = error as NSError?
         var inferred: MediaFailureReason?

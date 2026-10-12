@@ -130,7 +130,11 @@ if not (OUT / 'odd-width.mkv').exists():
            '-vf', 'crop=853:480:exact=1', '-t', '1', '-c:v', 'libvpx-vp9',
            '-deadline', 'realtime', '-cpu-used', '8', '-b:v', '0', '-crf', '35',
            '-c:a', 'libopus', OUT / 'odd-width.mkv')
-FILES = {f'/{name}': (OUT / name).read_bytes() for name in ['odd-width.mkv', 'combined.mp4', 'combined.mkv', 'subtitles.mkv', 'video.mp4', 'audio.m4a',
+if not (OUT / 'hevc-main10-sdr.mkv').exists():
+    ffmpeg('-i', OUT / 'combined.mkv', '-c:v', 'libx265', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p10le',
+           '-x265-params', 'log-level=error:pools=1:colorprim=1:transfer=1:colormatrix=1',
+           '-c:a', 'copy', OUT / 'hevc-main10-sdr.mkv')
+FILES = {f'/{name}': (OUT / name).read_bytes() for name in ['hevc-main10-sdr.mkv', 'odd-width.mkv', 'combined.mp4', 'combined.mkv', 'subtitles.mkv', 'video.mp4', 'audio.m4a',
                                                             'flac.mkv', 'multitrack.mkv', 'long.mp4', 'vp9-opus.mkv',
                                                             'hdr.mkv', 'uhd.mkv', 'hevc-sdr.mkv', 'highfps.mkv', 'tenbit.mkv',
                                                             'long-vp9.mkv', 'long-flac.mkv']}
@@ -248,13 +252,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
 server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 try:
-    if "--progressive-only" not in sys.argv and "--cache-only" not in sys.argv and "--network-continuity-only" not in sys.argv:
+    if '--live-hevc-only' in sys.argv or ("--progressive-only" not in sys.argv and "--cache-only" not in sys.argv and "--network-continuity-only" not in sys.argv):
         binary = OUT / 'PreparationChecks'
         run(['swiftc', '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
              ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
+             ROOT / 'Sources/AirThrowApp/XtreamLibrary.swift',
              ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
              ROOT / 'Tests/PreparationChecks/main.swift', '-o', binary], timeout=90)
-        run([binary, f'http://127.0.0.1:{server.server_port}', OUT], live=True, timeout=180)
+        run([binary, f'http://127.0.0.1:{server.server_port}', OUT,
+             *(['--live-hevc-only'] if '--live-hevc-only' in sys.argv else [])], live=True, timeout=180)
+        if '--live-hevc-only' in sys.argv:
+            print('PASS focused live Main 10 SDR remux checks')
+            raise SystemExit(0)
         # Compare each compressed packet: this establishes stream copying rather than merely matching codec names.
         def packets(path):
             result = json.loads(run([FFPROBE, '-v', 'error', '-show_packets', '-show_data_hash', 'sha256',
@@ -321,6 +330,7 @@ try:
     cached = OUT / 'CacheChecks'
     run(['swiftc', '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
          ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
+         ROOT / 'Sources/AirThrowApp/XtreamLibrary.swift',
          ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
          ROOT / 'Tests/CacheChecks/main.swift', '-o', cached], timeout=90)
     run([cached, f'http://127.0.0.1:{server.server_port}', OUT,
@@ -331,6 +341,7 @@ try:
     progressive = OUT / 'ProgressiveChecks'
     run(['swiftc', '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
          ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
+         ROOT / 'Sources/AirThrowApp/XtreamLibrary.swift',
          ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
          ROOT / 'Tests/ProgressiveChecks/main.swift', '-o', progressive], timeout=90)
     (OUT / 'encoder-attempts.txt').unlink(missing_ok=True)

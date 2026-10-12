@@ -39,6 +39,7 @@ public final class PreparedMedia {
     public private(set) var videoFrameRate: Double?
     public private(set) var productionFailure: PreparationFailure?
     public private(set) var isProducing = false
+    fileprivate var liveInputIsTransportStream: Bool?
     public var onFailure: (@MainActor (PreparationFailure) -> Void)?
     public var onReadyRangesChanged: (@MainActor () -> Void)?
     private var progressNotification: Task<Void, Never>?
@@ -130,6 +131,19 @@ public final class PreparedMedia {
             await drainingCache.waitForJobs()
             self.drainingCache = nil
         } else { await cache?.waitForJobs() }
+    }
+    public var liveDiagnostics: LivePipelineDiagnostics {
+        var result = LivePipelineDiagnostics()
+        result.producerActive = isProducing && productionFailure == nil
+        result.producerFailure = productionFailure?.reason
+        result.inputIsTransportStream = liveInputIsTransportStream
+        if let workspace, let playlist = try? HLSPlaylist(directory: workspace.directory) {
+            result.playlistComplete = playlist.complete
+            result.playlistSegments = playlist.count
+            result.playlistSequence = playlist.mediaSequence
+            result.playlistSeconds = playlist.duration
+        }
+        return result
     }
     public var usesBoundedCache: Bool { cache != nil }
     public func prepareSeek(at seconds: Double) async throws { try await cache?.prepareSeek(at: seconds) }
@@ -572,7 +586,8 @@ public struct MediaPreparer: Sendable {
                 if source.isLive {
                     return try await live(workspace: workspace, arguments: arguments, executable: ffmpeg,
                                           host: host, playbackPath: plan.path, plan: plan,
-                                          maximumBytes: liveLimit, ffprobe: ffprobe)
+                                          maximumBytes: liveLimit, ffprobe: ffprobe,
+                                          transportInput: videoInput.format.format_name == "mpegts")
                 }
                 if mode == .progressiveHLS {
                     do {
@@ -749,7 +764,7 @@ public struct MediaPreparer: Sendable {
     @MainActor
     private func live(workspace: PreparationWorkspace, arguments: [String], executable: String,
                       host: String, playbackPath: PlaybackPath, plan: PreparationPlan,
-                      maximumBytes: Int64, ffprobe: String) async throws -> PreparedMedia {
+                      maximumBytes: Int64, ffprobe: String, transportInput: Bool) async throws -> PreparedMedia {
         let playlist = workspace.directory.appendingPathComponent("media.m3u8")
         let arguments = arguments + ["-f", "hls", "-hls_segment_type", plan.fragmentedHLS ? "fmp4" : "mpegts", "-hls_time", "2",
             "-hls_list_size", "6", "-hls_delete_threshold", "3",
@@ -759,6 +774,7 @@ public struct MediaPreparer: Sendable {
         let server = try await MediaHTTPServer.start(file: playlist, host: host, hls: true)
         let prepared = PreparedMedia(server: server, workspace: workspace, playbackPath: playbackPath,
                                      videoHeight: plan.video.height, videoFrameRate: plan.video.frameRate)
+        prepared.liveInputIsTransportStream = transportInput
         prepared.produceLive(executable: executable, arguments: arguments, workspace: workspace,
                              maximumBytes: maximumBytes, videoConversion: plan.videoAction == .convert)
         let started = ContinuousClock.now
@@ -1216,13 +1232,17 @@ public struct MediaPreparer: Sendable {
         }
         var copyableVideo: Bool {
             guard let fps = frameRate, fps.isFinite, fps > 0 else { return false }
+            // Apple receivers support Main 10 SDR. Copy it into hvc1/fMP4;
+            // this does not make 10-bit inputs eligible for video conversion.
+            let main10SDR = codec_name == "hevc" && profile == "Main 10" && pix_fmt == "yuv420p10le"
+                && Self.sdrTransfers.contains((color_transfer ?? "").lowercased())
             let supportedProfile = (codec_name == "h264"
                 && ["Constrained Baseline", "Baseline", "Main", "High"].contains(profile ?? ""))
-                || (codec_name == "hevc" && profile == "Main")
+                || (codec_name == "hevc" && profile == "Main") || main10SDR
             return codec_type == "video" && supportedProfile && !encrypted
-                && ["yuv420p", "yuvj420p"].contains(pix_fmt ?? "")
+                && (["yuv420p", "yuvj420p"].contains(pix_fmt ?? "") || main10SDR)
                 && (1...3840).contains(width ?? 0) && (1...2160).contains(height ?? 0)
-                && !isHDR && !attachedPicture && understoodSDR && fps <= 60
+                && !isHDR && !attachedPicture && (understoodSDR || main10SDR) && fps <= 60
         }
         /// A known 8-bit SDR pixel layout. Anything outside this set (including
         /// 10-bit and exotic layouts) is not understood for our 4:2:0 output.

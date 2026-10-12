@@ -191,7 +191,9 @@ enum LocalSourceAdapter {
     static func candidates(_ input: URL) throws -> [MediaCandidate] {
         let url = try MediaInput.localFile(input)
         let ext = url.pathExtension.lowercased()
-        guard ext != "m3u8" else { throw ResolutionFailure.preparationRequired }
+        guard ext != "m3u8" else {
+            throw AppFailure(.unsupportedOperation, "Local HLS video playlists are not supported. Load an HTTP or HTTPS HLS link instead.")
+        }
         // MP4/MOV and unknown containers get one native attempt through the LAN
         // server. Containers AVPlayer normally cannot read go straight to the
         // existing stream-copy inspection/remux path.

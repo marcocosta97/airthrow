@@ -143,7 +143,52 @@ public enum PlaybackWaitingReason: String, Codable, Sendable {
 
 /// Numeric and categorical playback observations only. Source URLs, request
 /// headers and AVFoundation error text are deliberately excluded.
+public struct StreamingVideoCharacteristics: Codable, Sendable, Equatable {
+    public enum Container: String, Codable, Sendable { case mpegts }
+    public enum Codec: String, Codable, Sendable { case h264, hevc, mpeg2video }
+    public enum Delivery: String, Codable, Sendable { case hls, transportStream }
+    public enum Chroma: String, Codable, Sendable { case yuv420, yuv422, yuv444 }
+    public enum Profile: String, Codable, Sendable { case main, main10, mainStillPicture }
+    public enum Transfer: String, Codable, Sendable {
+        case bt709, smpte2084, aribSTD_B67 = "arib-std-b67"
+    }
+    public let container: Container
+    public let codec: Codec
+    public let width: Int?
+    public let height: Int?
+    public let bitDepth: Int?
+    public let transfer: Transfer?
+    public let delivery: Delivery?
+    public let chroma: Chroma?
+    public let profile: Profile?
+    public let level: Int?
+    /// Apple HLS requires fMP4 for HEVC. Native playback can otherwise report
+    /// playing with audible audio while the receiver displays no video.
+    public var requiresHLSRemux: Bool { delivery == .hls && container == .mpegts && codec == .hevc }
+    init(codec: Codec, width: Int?, height: Int?, bitDepth: Int?, transfer: Transfer?,
+         delivery: Delivery? = nil, chroma: Chroma? = nil, profile: Profile? = nil, level: Int? = nil) {
+        container = .mpegts
+        self.codec = codec
+        self.width = width
+        self.height = height
+        self.bitDepth = bitDepth
+        self.transfer = transfer
+        self.delivery = delivery
+        self.chroma = chroma
+        self.profile = profile
+        self.level = level
+    }
+}
+
+public struct MediaErrorCode: Codable, Sendable, Equatable {
+    public enum Domain: String, Codable, Sendable { case avFoundation, urlLoading, coreMedia, osStatus, other }
+    public let domain: Domain
+    public let code: Int
+    public init(domain: Domain, code: Int) { self.domain = domain; self.code = code }
+}
+
 public struct PlaybackDiagnostics: Codable, Sendable, Equatable {
+    public enum SampleInspectionStatus: String, Codable, Sendable { case pending, unavailable, complete }
     public var itemStatus: String?
     public var playerStatus: String?
     public var timeControlStatus: String?
@@ -156,6 +201,42 @@ public struct PlaybackDiagnostics: Codable, Sendable, Equatable {
     public var observedBitrate: Double?
     public var indicatedBitrate: Double?
     public var stalls: Int?
+    /// Numeric format identifiers and encoded dimensions, when local tracks are available.
+    public var videoCodecTypes: [UInt32]?
+    public var videoWidth: Int?
+    public var videoHeight: Int?
+    public var sampledVideo: StreamingVideoCharacteristics?
+    public var sampleInspectionStatus: SampleInspectionStatus?
+    public var livePipeline: LivePipelineDiagnostics?
+    /// Only numeric errors: log URIs, addresses and provider text are never exposed.
+    public var errorStatusCodes: [Int]?
+    public var itemErrorCode: Int?
+    public var assetErrorCode: Int?
+    public var failureErrors: [MediaErrorCode]?
+    public init() {}
+}
+
+public struct LivePipelineDiagnostics: Codable, Sendable, Equatable {
+    public var producerActive: Bool?
+    public var producerFailure: MediaFailureReason?
+    public var inputIsTransportStream: Bool?
+    public var playlistComplete: Bool?
+    public var playlistSegments: Int?
+    public var playlistSequence: Int?
+    public var playlistSeconds: Double?
+    public var relayReceivedBytes: Int64 = 0
+    public var relayPeakBufferBytes: Int = 0
+    public var relayActiveStreams: Int = 0
+    public var relayFinishedStreams: Int = 0
+    public var relayLastErrorCode: Int?
+    public var relayBufferLimitClosures: Int = 0
+    public var relayEOFClosures: Int = 0
+    public var relayManifestResponses: Int = 0
+    public var relayManifestEndLists: Int = 0
+    public var relayManifestVODs: Int = 0
+    public var relayManifestSequence: Int?
+    public var relayHTTPFailures: Int = 0
+    public var relayLastHTTPStatus: Int?
     public init() {}
 }
 
@@ -195,6 +276,7 @@ public enum MediaFailureReason: String, Codable, Sendable {
     case resolverUnavailable = "resolver_unavailable", resolutionFailed = "resolution_failed"
     case resolutionTimedOut = "resolution_timed_out", unsupportedWebsite = "unsupported_website"
     case signInRequired = "sign_in_required"
+    case httpAuthenticationRequired = "http_authentication_required"
     case liveUnsupported = "live_unsupported"
     case preparationRequired = "preparation_required"
     case preparerUnavailable = "preparer_unavailable", preparationFailed = "preparation_failed"
@@ -208,6 +290,7 @@ public enum MediaFailureReason: String, Codable, Sendable {
         case .resolutionFailed: "Could not find a playable video. The page may require sign-in, be unavailable, or need an updated yt-dlp installation."
         case .resolutionTimedOut: "Finding the video timed out. Check the connection and try again."
         case .unsupportedWebsite: "Choose a public YouTube video, playlist, Mix or live stream. Sign-in and not-yet-started premieres are not supported."
+        case .httpAuthenticationRequired: "This server requires a username and password. Load the link again to sign in."
         case .signInRequired: "YouTube asked for sign-in verification. Add or refresh cookies in Settings → YouTube access, then load again. A cookies file is a snapshot and can expire; a browser source stays current."
         case .liveUnsupported: "This live stream has no supported presentation. Protected media, unsafe tracks and some delivery methods are unsupported."
         case .preparationRequired: "This source cannot use the current preparation settings. Allow video re-encoding for supported SDR sources, or choose another source. HDR, protected media and some delivery methods are unsupported."
@@ -245,6 +328,8 @@ public struct PlaybackSnapshot: Codable, Sendable, Equatable {
     public var isLive = false
     /// Seconds behind the current live edge. Present only for live media.
     public var liveOffset: Double?
+    /// Native live playback has a deliberate delay for buffering/network conditions.
+    public var recommendedLiveOffset: Double?
     /// nil means audio inspection was unavailable or no source is loaded.
     public var hasAudio: Bool?
     public var error: String?
@@ -327,6 +412,34 @@ public enum LivePolicy {
     /// finite HLS presentations still expose a recommended live offset.
     public static func isLive(sourceDuration: Double?, itemDurationIndefinite: Bool) -> Bool {
         sourceDuration == nil && itemDurationIndefinite
+    }
+
+    public static func delay(_ snapshot: PlaybackSnapshot, position: Double? = nil) -> Double? {
+        guard snapshot.isLive else { return nil }
+        let offset: Double?
+        if let position, let edge = snapshot.seekableRanges.last?.end {
+            offset = max(0, edge - position)
+        } else { offset = snapshot.liveOffset }
+        guard let offset, offset.isFinite else { return nil }
+        let target = snapshot.recommendedLiveOffset.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil } ?? 0
+        return max(0, offset - target)
+    }
+
+    public static func isAtLive(_ snapshot: PlaybackSnapshot) -> Bool {
+        delay(snapshot).map { $0 <= 3 } ?? false
+    }
+
+    /// Pin the displayed knob at Live without seeking the player on every
+    /// manifest update. Explicit drags and pending seeks keep their real target.
+    public static func timelinePosition(_ snapshot: PlaybackSnapshot, requested: Double? = nil) -> Double {
+        let range = PlaybackPolicy.activeSeekRange(snapshot)
+        let position = requested ?? (isAtLive(snapshot) ? range?.end : snapshot.position) ?? 0
+        return min(max(position, range?.start ?? 0), range?.end ?? 1)
+    }
+
+    public static func positionLabel(_ snapshot: PlaybackSnapshot, position: Double? = nil) -> String {
+        let offset = delay(snapshot, position: position) ?? 0
+        return offset > 3 ? "−\(PlaybackFormat.time(offset))" : "Live"
     }
 }
 
@@ -502,6 +615,7 @@ public enum PlaybackPolicy {
         case .idle: "Ready for your next video"
         case .loading:
             switch snapshot.loadingPhase {
+            case "authentication": "Sign in to server"
             case "resolving": "Finding video…"
             case "preparing": "Preparing video…"
             default: "Loading video…"
@@ -613,9 +727,7 @@ public enum MenuModel {
                 : "\(state) · AirPlay not connected"
         }
         if snapshot.isLive {
-            let position = (snapshot.liveOffset ?? 0) > 3
-                ? "−\(PlaybackFormat.time(snapshot.liveOffset))"
-                : "Live"
+            let position = LivePolicy.positionLabel(snapshot)
             return "\(state) · \(position)"
         }
         guard snapshot.position != nil || snapshot.duration != nil else {

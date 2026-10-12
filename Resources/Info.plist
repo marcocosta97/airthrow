@@ -33,6 +33,6 @@
     <key>NSHighResolutionCapable</key><true/>
     <key>NSLocalNetworkUsageDescription</key><string>AirThrow connects to the AirPlay video receiver you choose on your local network.</string>
     <key>NSAppTransportSecurity</key><dict>
-        <key>NSAllowsArbitraryLoadsForMedia</key><true/>
+        <key>NSAllowsArbitraryLoads</key><true/>
     </dict>
 </dict></plist>

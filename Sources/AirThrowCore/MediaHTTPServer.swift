@@ -5,7 +5,7 @@ import Darwin
 
 enum MediaResourceFailure: Error { case notFound }
 
-/// Session media under an unguessable path; no proxy or directory routes.
+/// Session media under an unguessable path; only explicitly registered resources.
 @MainActor
 public final class MediaHTTPServer {
     public private(set) var url: URL?
@@ -21,6 +21,7 @@ public final class MediaHTTPServer {
     private var startupTimeout: Task<Void, Never>?
     private var clients: [ObjectIdentifier: Client] = [:]
     private var stopped = false
+    private weak var relay: HTTPMediaRelay?
     private var loadResource: (@MainActor @Sendable (String) async throws -> URL)?
     private var releaseResource: (@MainActor @Sendable (URL) -> Void)?
 
@@ -33,6 +34,7 @@ public final class MediaHTTPServer {
         var timeout: Task<Void, Never>?
         var loading: Task<Void, Never>?
         var loadedResource: URL?
+        var stream: HTTPRelayStream?
         init(_ connection: NWConnection) { self.connection = connection }
         deinit { try? file?.close(); timeout?.cancel(); loading?.cancel() }
     }
@@ -40,8 +42,15 @@ public final class MediaHTTPServer {
     public static func start(file: URL, host: String? = nil, hls: Bool = false,
                              loadResource: (@MainActor @Sendable (String) async throws -> URL)? = nil,
                              releaseResource: (@MainActor @Sendable (URL) -> Void)? = nil) async throws -> MediaHTTPServer {
+        try await start(file: file, host: host, hls: hls, loadResource: loadResource, releaseResource: releaseResource, relay: nil)
+    }
+
+    static func start(file: URL, host: String? = nil, hls: Bool = false,
+                      loadResource: (@MainActor @Sendable (String) async throws -> URL)? = nil,
+                      releaseResource: (@MainActor @Sendable (URL) -> Void)? = nil,
+                      relay: HTTPMediaRelay?) async throws -> MediaHTTPServer {
         let server = try MediaHTTPServer(file: file, host: host ?? localAddress(), hls: hls,
-                                         loadResource: loadResource, releaseResource: releaseResource)
+                                         loadResource: loadResource, releaseResource: releaseResource, relay: relay)
         try await withTaskCancellationHandler {
             try Task.checkCancellation()
             try await withCheckedThrowingContinuation { continuation in
@@ -78,11 +87,11 @@ public final class MediaHTTPServer {
 
     private init(file: URL, host: String, hls: Bool,
                  loadResource: (@MainActor @Sendable (String) async throws -> URL)?,
-                 releaseResource: (@MainActor @Sendable (URL) -> Void)?) throws {
+                 releaseResource: (@MainActor @Sendable (URL) -> Void)?, relay: HTTPMediaRelay?) throws {
         var address = in_addr()
         guard inet_pton(AF_INET, host, &address) == 1 else { throw PreparationFailure.delivery }
         self.file = file; self.host = host; self.hls = hls
-        self.loadResource = loadResource; self.releaseResource = releaseResource
+        self.loadResource = loadResource; self.releaseResource = releaseResource; self.relay = relay
         let ext = file.pathExtension.lowercased()
         if hls {
             mediaName = "media.m3u8"
@@ -92,7 +101,7 @@ public final class MediaHTTPServer {
             mediaName = safeExtensions.contains(ext) ? "media.\(ext)" : "media"
             mediaContentType = Self.contentType(forExtension: ext)
         }
-        if !hls {
+        if !hls, relay == nil {
             let size = (try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.int64Value ?? 0
             guard size > 0 else { throw PreparationFailure.failed }
         }
@@ -139,7 +148,7 @@ public final class MediaHTTPServer {
         listener.cancel()
         listener.stateUpdateHandler = nil; listener.newConnectionHandler = nil
         for client in Array(clients.values) { finish(client) }
-        loadResource = nil; releaseResource = nil
+        loadResource = nil; releaseResource = nil; relay = nil
     }
 
     deinit {
@@ -169,6 +178,7 @@ public final class MediaHTTPServer {
         client.timeout?.cancel()
         client.loading?.cancel()
         client.connection.cancel()
+        let stream = client.stream; client.stream = nil; stream?.cancel()
         try? client.file?.close(); client.file = nil
         if let resource = client.loadedResource { releaseResource?(resource); client.loadedResource = nil }
         clients.removeValue(forKey: ObjectIdentifier(client))
@@ -196,7 +206,9 @@ public final class MediaHTTPServer {
         let requested = String(request[1])
         let resource: URL
         let contentType: String
-        if requested == path {
+        if relay != nil {
+            resource = file; contentType = mediaContentType
+        } else if requested == path {
             resource = file
             contentType = mediaContentType
         } else if hls, requested.hasPrefix(prefix),
@@ -216,7 +228,20 @@ public final class MediaHTTPServer {
         guard headers["transfer-encoding"] == nil, headers["content-length"] == nil || headers["content-length"] == "0" else {
             reply(client, code: "400 Bad Request"); return
         }
-        if requested != path, let loadResource {
+        if let relay {
+            client.stream = relay.serve(path: requested, method: String(request[0]), headers: headers,
+                send: { [weak self, weak client] data, completed in
+                    guard let self, let client, self.clients[ObjectIdentifier(client)] != nil else { return }
+                    self.armTimeout(client)
+                    client.connection.send(content: data, completion: .contentProcessed { [weak self] error in
+                        MainActor.assumeIsolated {
+                            guard let self, self.clients[ObjectIdentifier(client)] != nil else { return }
+                            if error != nil { self.finish(client) } else { completed() }
+                        }
+                    })
+                }, finish: { [weak self, weak client] in if let client { self?.finish(client) } })
+            if client.stream == nil { reply(client, code: "404 Not Found") }
+        } else if requested != path, let loadResource {
             armTimeout(client, seconds: 600)
             let name = String(requested.dropFirst(prefix.count))
             // Stop clears the server's callbacks while this request may still
