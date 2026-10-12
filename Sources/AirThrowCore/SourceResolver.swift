@@ -113,9 +113,11 @@ public struct ResolvedSource: Sendable {
     }
 
     public func withTransportRemux(isLive: Bool) -> ResolvedSource {
-        ResolvedSource(url: url, title: title, headers: headers, audio: audio, hlsAudioOptions: hlsAudioOptions,
-            needsPreparation: true, delivery: delivery, videoKnownPresent: true, isLive: isLive,
+        var result = ResolvedSource(url: url, title: title, headers: headers, audio: audio, hlsAudioOptions: hlsAudioOptions,
+            needsPreparation: true, needsDelivery: needsDelivery, delivery: delivery, videoKnownPresent: true, isLive: isLive,
             conversionPolicy: conversionPolicy, plannedPath: .remux, enhancement: enhancement)
+        result.preparationPosition = preparationPosition
+        return result
     }
 
     /// A catalog's Live section identifies an indefinite presentation even
@@ -420,13 +422,14 @@ public enum HLSVideoEvidence {
         return await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }
     }
 
-    private static func transportCharacteristics(at url: URL, depth: Int) async -> StreamingVideoCharacteristics? {
+    private static func transportCharacteristics(at url: URL, depth: Int, isLive: Bool? = nil) async -> StreamingVideoCharacteristics? {
         guard depth <= 2, !Task.isCancelled else { return nil }
         do {
             guard let fetched = try await sampledBytes(at: url) else { return nil }
             if !isTransport(fetched.data) {
                 guard let reference = reference(in: fetched.data, at: fetched.base) else { return nil }
-                return await transportCharacteristics(at: reference.url, depth: depth + 1)
+                return await transportCharacteristics(at: reference.url, depth: depth + 1,
+                    isLive: livePresentation(in: fetched.data) ?? isLive)
             }
             let sample = fetched.data
             guard let executable = HelperExecutables(environment: ProcessInfo.processInfo.environment)
@@ -441,11 +444,19 @@ public enum HLSVideoEvidence {
                 "-v", "error", "-protocol_whitelist", "file", "-f", "mpegts", "-select_streams", "v:0",
                 "-show_entries", "stream=codec_name,width,height,pix_fmt,color_transfer,profile,level", "-of", "json", local.path
             ], timeout: .seconds(4), outputLimit: 16 * 1024)
-            return decodeTransportCharacteristics(output, delivery: depth == 0 ? .transportStream : .hls)
+            return decodeTransportCharacteristics(output, delivery: depth == 0 ? .transportStream : .hls, isLive: isLive)
         } catch { return nil }
     }
 
-    static func decodeTransportCharacteristics(_ data: Data, delivery: StreamingVideoCharacteristics.Delivery? = nil) -> StreamingVideoCharacteristics? {
+    static func livePresentation(in data: Data) -> Bool? {
+        guard let text = String(data: data, encoding: .utf8) else { return nil }
+        let lines = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
+        guard lines.first == "#EXTM3U", lines.contains(where: { $0.hasPrefix("#EXT-X-TARGETDURATION:") }) else { return nil }
+        return !lines.contains("#EXT-X-ENDLIST") && !lines.contains("#EXT-X-PLAYLIST-TYPE:VOD")
+    }
+
+    static func decodeTransportCharacteristics(_ data: Data, delivery: StreamingVideoCharacteristics.Delivery? = nil,
+                                               isLive: Bool? = nil) -> StreamingVideoCharacteristics? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let streams = root["streams"] as? [[String: Any]], let video = streams.first,
               let name = video["codec_name"] as? String,
@@ -476,7 +487,7 @@ public enum HLSVideoEvidence {
         let level = (video["level"] as? Int).flatMap { (1...255).contains($0) ? $0 : nil }
         return StreamingVideoCharacteristics(codec: codec, width: dimension("width"), height: dimension("height"),
                                              bitDepth: depth, transfer: transfer, delivery: delivery,
-                                             chroma: chroma, profile: profile, level: level)
+                                             chroma: chroma, profile: profile, level: level, isLive: isLive)
     }
 
     public static func hasVideo(at url: URL) async -> Bool {

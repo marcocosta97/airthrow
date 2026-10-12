@@ -76,7 +76,6 @@ final class PlaybackController: ObservableObject {
     private var notifications: [NSObjectProtocol] = []
     private var timeObserver: Any?
     private var loadTask: Task<Void, Never>?
-    private var streamingInspectionTask: Task<Void, Never>?
     private var sampledVideo: StreamingVideoCharacteristics?
     private var sampleInspectionStatus: PlaybackDiagnostics.SampleInspectionStatus?
     private var preparationInputRelay: HTTPMediaRelay?
@@ -86,7 +85,7 @@ final class PlaybackController: ObservableObject {
     private var assetErrorCode: Int?
     private var assetFailureErrors: [MediaErrorCode]?
     private var inspectFirstLiveInput: Bool
-    private let enableLiveRemuxFallback: Bool
+    private let enableCompatibilityFallback: Bool
     private var drainingLoads: [UUID: Task<Void, Never>] = [:]
     private var loadingAsset: AVURLAsset?
     private var timeoutTask: Task<Void, Never>?
@@ -219,7 +218,7 @@ final class PlaybackController: ObservableObject {
          inspectVideoEvidence: @escaping @Sendable (URL) async -> Bool = { await HLSVideoEvidence.hasVideo(at: $0) },
          inspectStreamingVideo: @escaping @Sendable (URL) async -> StreamingVideoCharacteristics? = { await HLSVideoEvidence.inspectTransportVideo(at: $0) },
          inspectFirstLiveInput: Bool = false,
-         enableLiveRemuxFallback: Bool = true,
+         enableCompatibilityFallback: Bool = true,
          makePlayerItem: @escaping @MainActor (AVURLAsset) -> AVPlayerItem = { AVPlayerItem(asset: $0) },
          checkHTTPAuthentication: (@MainActor @Sendable (URL, HTTPLoginCredentials?) async throws -> HTTPLoginChallenge?)? = nil,
          loadIPTVCatalog: @escaping @Sendable (URL) async throws -> IPTVCatalog = { try await IPTVCatalogLoader.load($0) },
@@ -240,7 +239,7 @@ final class PlaybackController: ObservableObject {
         self.inspectVideoEvidence = inspectVideoEvidence
         self.inspectStreamingVideo = inspectStreamingVideo
         self.inspectFirstLiveInput = inspectFirstLiveInput
-        self.enableLiveRemuxFallback = enableLiveRemuxFallback
+        self.enableCompatibilityFallback = enableCompatibilityFallback
         #if DEBUG
         self.inspectFirstLiveInput = inspectFirstLiveInput
             || ProcessInfo.processInfo.environment["AIRTHROW_DIAGNOSE_FIRST_LIVE_INPUT"] == "1"
@@ -399,7 +398,7 @@ final class PlaybackController: ObservableObject {
 
     func selectXtreamMedia(_ url: URL, title: String, isLive: Bool = false) throws {
         let url = try MediaInput.url(url.absoluteString)
-        let autoplay = channelAutoplay
+        let autoplay = replacementAutoplay
         startLoad(url, autoplay: autoplay, titleOverride: title, liveChannel: isLive)
         selectedIPTVChannelID = nil
     }
@@ -444,14 +443,15 @@ final class PlaybackController: ObservableObject {
         guard let channel = iptvCatalog?.channels.first(where: { $0.id == id }) else {
             throw AppFailure(.invalidRequest, "This channel is no longer available. Choose a channel from the current playlist.")
         }
-        let autoplay = channelAutoplay
+        let autoplay = replacementAutoplay
         startLoad(channel.url, autoplay: autoplay, titleOverride: channel.name, liveChannel: true)
         selectedIPTVChannelID = id
     }
 
-    private var channelAutoplay: Bool {
-        playWhenReady || (player.isExternalPlaybackActive
-            && (player.rate > 0 || playbackRequested || (failure != nil && keepReceiverOnFailure)))
+    private var replacementAutoplay: Bool {
+        PlaybackPolicy.shouldAutoplayReplacement(pendingPlay: playWhenReady, playbackRequested: playbackRequested,
+            external: player.isExternalPlaybackActive, playing: player.rate > 0,
+            recoveringReceiver: failure != nil && keepReceiverOnFailure)
     }
 
     private var conversionPolicy: ConversionPolicy { allowVideoConversion ? .allowVideo : .avoidVideo }
@@ -935,7 +935,7 @@ final class PlaybackController: ObservableObject {
             do {
                 var source: ResolvedSource
                 if let fallback {
-                    source = fallback.withConversionPolicy(fallback.isLive && fallback.playbackPath == .remux ? .avoidVideo : policy)
+                    source = fallback.withConversionPolicy(fallback.playbackPath == .remux ? fallback.conversionPolicy : policy)
                 }
                 else {
                     guard let self else { return }
@@ -980,14 +980,14 @@ final class PlaybackController: ObservableObject {
                 self.videoEnhancement = appliedEnhancement
                 if (sourceHeight ?? 0) > 1080 { self.enhancementOutput4K = true }
                 source.preparationPosition = preferences.resumePosition
-                // Inspect before mounting the new live item, not while it is
+                // Inspect before mounting an unknown streaming item, not while it is
                 // playing. Unknown metadata stays native; only a positively
                 // identified HEVC-in-TS HLS presentation changes its plan.
                 // Helpers receive a local sample, never the protected origin.
-                let checkLiveCompatibility = self.enableLiveRemuxFallback && self.prepareSource != nil
-                    && source.headers.isEmpty && source.audio == nil
-                if (checkLiveCompatibility || (self.inspectFirstLiveInput && canInspectBeforePlayback)),
-                   fallback == nil, source.isLive, source.playbackPath == .direct,
+                let checkCompatibility = self.enableCompatibilityFallback && self.prepareSource != nil
+                    && MediaSelector.shouldInspectCompatibility(of: source)
+                if (checkCompatibility || (self.inspectFirstLiveInput && canInspectBeforePlayback && source.isLive)),
+                   fallback == nil, source.playbackPath == .direct,
                    !source.needsPreparationPipeline, !source.url.isFileURL {
                     self.inspectFirstLiveInput = false
                     self.sampleInspectionStatus = .pending
@@ -996,9 +996,10 @@ final class PlaybackController: ObservableObject {
                     guard !Task.isCancelled, self.generation == id else { return }
                     self.sampledVideo = sample
                     self.sampleInspectionStatus = sample == nil ? .unavailable : .complete
-                    if checkLiveCompatibility, sample?.requiresHLSRemux == true {
-                        source = source.withTransportRemux(isLive: true).withConversionPolicy(.avoidVideo)
-                        self.notice = "Preparing a compatible live stream for AirPlay."
+                    if sample?.isLive == true { source = source.withLivePresentation() }
+                    if checkCompatibility, let remux = MediaSelector.remuxFallback(for: source, sampledVideo: sample) {
+                        source = remux
+                        self.notice = "Preparing a compatible stream for AirPlay."
                     }
                 }
                 self.selectedSource = source
@@ -1014,9 +1015,9 @@ final class PlaybackController: ObservableObject {
                     self.timeoutTask?.cancel()
                     self.refresh()
                     var preparationInput = source
-                    // Keep protected live origins out of helper arguments. The
+                    // Keep protected origins out of helper arguments. The
                     // app owns upstream requests; helpers see an opaque loopback route.
-                    if source.isLive, source.plannedPath == .remux, source.videoKnownPresent,
+                    if source.plannedPath == .remux, source.videoKnownPresent,
                        !source.url.isFileURL, source.headers.isEmpty, source.audio == nil {
                         let relay = try await HTTPMediaRelay.start(source: source.url, host: "127.0.0.1")
                         guard !Task.isCancelled, self.generation == id, let local = relay.url else {
@@ -1235,20 +1236,6 @@ final class PlaybackController: ObservableObject {
                 self.mediaItem = item
                 self.player.replaceCurrentItem(with: item)
                 self.refresh()
-                // Active live inspection would open a second origin request.
-                // Preserve Direct and diagnose using the mounted player's data.
-                if source.playbackPath == .direct, video.isEmpty, !self.loadingLiveChannel,
-                   !source.isLive, !playbackURL.isFileURL {
-                    self.sampleInspectionStatus = .pending
-                    self.refresh()
-                    self.streamingInspectionTask = Task { [weak self] in
-                        let result = await self?.inspectStreamingVideo(playbackURL)
-                        guard let self, !Task.isCancelled, self.generation == id else { return }
-                        self.sampledVideo = result
-                        self.sampleInspectionStatus = result == nil ? .unavailable : .complete
-                        self.refresh()
-                    }
-                }
             } catch {
                 guard let self, !Task.isCancelled, self.generation == id else { return }
                 if case let PreparationFailure.videoConversionRequired(height, frameRate) = error {
@@ -1422,7 +1409,7 @@ final class PlaybackController: ObservableObject {
         guard let queue, queue.currentIndex > 0 else {
             throw AppFailure(.unsupportedOperation, "There is no previous playlist item.")
         }
-        let autoplay = hasPlayed && player.rate > 0 && player.isExternalPlaybackActive
+        let autoplay = replacementAutoplay
         loadQueueItem(at: queue.currentIndex - 1, direction: -1, autoplay: autoplay)
     }
 
@@ -1430,7 +1417,7 @@ final class PlaybackController: ObservableObject {
         guard let queue, queue.currentIndex + 1 < queue.entries.count else {
             throw AppFailure(.unsupportedOperation, "There is no next playlist item.")
         }
-        let autoplay = hasPlayed && player.rate > 0 && player.isExternalPlaybackActive
+        let autoplay = replacementAutoplay
         loadQueueItem(at: queue.currentIndex + 1, direction: 1, autoplay: autoplay)
     }
 
@@ -1838,7 +1825,6 @@ final class PlaybackController: ObservableObject {
         let installedPrepared = preparedMedia != nil && mediaItem != nil && player.currentItem === mediaItem
         generation = UUID()
         loadTask?.cancel(); loadTask = nil
-        streamingInspectionTask?.cancel(); streamingInspectionTask = nil
         sampledVideo = nil
         sampleInspectionStatus = nil
         preparationInputRelay?.stop(); preparationInputRelay = nil
@@ -1919,43 +1905,28 @@ final class PlaybackController: ObservableObject {
         // A producer failure may cancel an in-flight asset load. Preserve the
         // original diagnosis when that cancellation subsequently reports back.
         guard failure == nil else { return }
-        // A native format failure may arrive after live playback has started.
-        // Retry this presentation once, on the same player and receiver. The
-        // prepared plan cannot re-enter this branch or enable video encoding.
-        if enableLiveRemuxFallback, prepareSource != nil,
-           reason == .unreadableMedia || reason == .externalPlaybackUnsupported,
-           let source = selectedSource, source.isLive, source.playbackPath == .direct,
-           !source.needsPreparationPipeline, !source.url.isFileURL,
-           source.headers.isEmpty, source.audio == nil {
-            let autoplay = playWhenReady || playbackRequested || player.rate > 0
-            startLoad(originalSourceURL ?? source.url, retry: retriedResolution,
-                      fallback: source.withTransportRemux(isLive: true).withConversionPolicy(.avoidVideo),
-                      preservingQueue: queue != nil, autoplay: autoplay, titleOverride: title,
-                      sourceChoice: sourceChoice, changingSource: changingSource, preferences: loadPreferences)
-            notice = "Preparing a compatible live stream for AirPlay."
-            return
-        }
         // A stale signed source may fail during initial loading. Resolve once more,
         // still paused. Never restart established playback or retry indefinitely.
         if reason == .sourceUnavailable, let websiteURL, !retriedResolution, !hasPlayed {
             startLoad(websiteURL, retry: true, preservingQueue: queue != nil,
-                      autoplay: playWhenReady, titleOverride: queue.map { $0.entries[$0.currentIndex].title },
+                      autoplay: replacementAutoplay, titleOverride: queue.map { $0.entries[$0.currentIndex].title },
                       sourceChoice: sourceChoice, changingSource: changingSource, preferences: loadPreferences)
             return
         }
-        if !hasPlayed, !loadingLiveChannel, prepareSource != nil, let selectedSource, !selectedSource.isLive,
-           let remuxFallback = MediaSelector.remuxFallback(for: selectedSource, reason: reason) {
+        if enableCompatibilityFallback, prepareSource != nil, let selectedSource,
+           let remuxFallback = MediaSelector.remuxFallback(for: selectedSource, reason: reason, hasPlayed: hasPlayed) {
             // Prefer the best available remux presentation over remuxing the
             // failed native URL, so a fallback is not stuck at the low-quality
             // direct stream.
-            let fallback = sourceChoice == nil
-                ? (MediaSelector.bestRemuxFallback(from: sourceCandidates, policy: selectedSource.conversionPolicy)
+            let fallback = sourceChoice == nil && !selectedSource.isLive
+                ? (MediaSelector.bestRemuxFallback(from: sourceCandidates, policy: .avoidVideo)
                    ?? remuxFallback)
                 : remuxFallback
             startLoad(originalSourceURL ?? selectedSource.url, retry: retriedResolution, fallback: fallback,
-                      preservingQueue: queue != nil, autoplay: playWhenReady,
+                      preservingQueue: queue != nil, autoplay: replacementAutoplay,
                       titleOverride: title, sourceChoice: sourceChoice, changingSource: changingSource,
                       preferences: loadPreferences)
+            notice = "Preparing a compatible stream for AirPlay."
             return
         }
         if advancingQueue, reason != .signInRequired, !changingSource, sourceChoice == nil,
@@ -1965,7 +1936,7 @@ final class PlaybackController: ObservableObject {
             let nextIndex = queue.currentIndex + queueDirection
             self.queue = queue
             notice = "Skipped “\(failedTitle)” because it could not be played."
-            loadQueueItem(at: nextIndex, direction: queueDirection, autoplay: playWhenReady,
+            loadQueueItem(at: nextIndex, direction: queueDirection, autoplay: replacementAutoplay,
                           attemptsRemaining: queueAttemptsRemaining - 1)
             return
         }
@@ -1989,7 +1960,6 @@ final class PlaybackController: ObservableObject {
         failureReason = reason
         failure = message ?? reason.message
         loadTask?.cancel(); loadTask = nil
-        streamingInspectionTask?.cancel(); streamingInspectionTask = nil
         sampledVideo = nil
         sampleInspectionStatus = nil
         preparationInputRelay?.stop(); preparationInputRelay = nil
@@ -2139,6 +2109,10 @@ final class PlaybackController: ObservableObject {
             return
         }
         if let item, item.status == .readyToPlay, failure == nil {
+            if let source = selectedSource, !source.isLive, preparedMedia == nil,
+               LivePolicy.isLive(sourceDuration: nil, itemDurationIndefinite: item.duration.isIndefinite) {
+                selectedSource = source.withLivePresentation()
+            }
             // Streaming assets may expose no AVAsset tracks. Inspect the ready
             // player item's tracks and size before concluding that video/audio is absent.
             let types = item.tracks.compactMap { $0.assetTrack?.mediaType }

@@ -164,14 +164,26 @@ public enum MediaSelector {
         return (left.bitrate ?? 0) < (right.bitrate ?? 0)
     }
 
-    /// A native format failure may justify inspection/remuxing. Network, DRM,
-    /// audio-only and already-prepared failures must not start another job.
-    public static func remuxFallback(for source: ResolvedSource, reason: MediaFailureReason) -> ResolvedSource? {
-        guard reason == .unreadableMedia, !source.needsPreparation, source.delivery != .hls else { return nil }
-        return ResolvedSource(url: source.url, title: source.title, headers: source.headers,
-                              audio: source.audio, needsPreparation: true, needsDelivery: source.needsDelivery,
-                              delivery: source.delivery, videoKnownPresent: source.videoKnownPresent,
-                              isLive: source.isLive, conversionPolicy: source.conversionPolicy)
+    public static func shouldInspectCompatibility(of source: ResolvedSource) -> Bool {
+        source.playbackPath == .direct && !source.needsPreparation && !source.url.isFileURL
+            && source.headers.isEmpty && source.audio == nil
+            && (source.isLive || source.delivery == .hls || source.delivery == .unknown)
+    }
+
+    /// One source-neutral recovery policy. Known incompatible HLS packaging
+    /// can be handled before native playback; format errors can recover live
+    /// playback later. Network, DRM, audio-only and prepared failures never retry.
+    public static func remuxFallback(for source: ResolvedSource, reason: MediaFailureReason? = nil,
+                                     hasPlayed: Bool = false, sampledVideo: StreamingVideoCharacteristics? = nil) -> ResolvedSource? {
+        guard source.playbackPath == .direct, !source.needsPreparation else { return nil }
+        if let reason {
+            guard reason == .unreadableMedia || reason == .externalPlaybackUnsupported,
+                  !hasPlayed || source.isLive else { return nil }
+        } else {
+            guard sampledVideo?.requiresHLSRemux == true else { return nil }
+        }
+        guard !source.isLive || (!source.url.isFileURL && source.headers.isEmpty && source.audio == nil) else { return nil }
+        return source.withTransportRemux(isLive: source.isLive).withConversionPolicy(.avoidVideo)
     }
 
     /// When a native presentation fails and the source must be remuxed, prefer
@@ -212,7 +224,8 @@ enum DirectSourceAdapter {
         // only a routing hint, not proof of the contained codecs.
         let ext = url.pathExtension.lowercased()
         let needsPreparation = ["mkv", "webm", "mpg", "mpeg", "vob"].contains(ext)
-        let delivery: MediaDelivery = ext == "m3u8" ? .hls : (needsPreparation ? .file : .unknown)
+        let delivery: MediaDelivery = ext == "m3u8" ? .hls
+            : (needsPreparation || ["mp4", "m4v", "mov"].contains(ext) ? .file : .unknown)
         return [MediaCandidate(source: ResolvedSource(url: url, needsPreparation: needsPreparation,
                                                        delivery: delivery))]
     }

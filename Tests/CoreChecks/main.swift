@@ -26,7 +26,8 @@ let tests: [(String, () throws -> Void)] = [
         let fallback = MediaSelector.remuxFallback(for: file.source, reason: .unreadableMedia)
         try check(fallback?.playbackPath == .remux, "Native format failure did not permit remux inspection")
         try check(MediaSelector.remuxFallback(for: fallback!, reason: .unreadableMedia) == nil, "Preparation retried itself")
-        try check(MediaSelector.remuxFallback(for: hls.source, reason: .unreadableMedia) == nil, "Unsupported HLS remux attempted")
+        try check(MediaSelector.remuxFallback(for: hls.source, reason: .unreadableMedia)?.playbackPath == .remux,
+                  "HLS format recovery did not use the shared fallback")
         for reason: MediaFailureReason in [.network, .sourceUnavailable, .protectedMedia, .noVideo] {
             try check(MediaSelector.remuxFallback(for: file.source, reason: reason) == nil, "Unrelated failure started remuxing")
         }
@@ -157,6 +158,38 @@ let tests: [(String, () throws -> Void)] = [
             QueuePolicy.shouldAdvanceAfterEnd(hasPlayed: true, externalPlaybackActive: true, isProbing: true, hasNext: true),
             QueuePolicy.shouldAdvanceAfterEnd(hasPlayed: true, externalPlaybackActive: true, isProbing: false, hasNext: false)
         ] { try check(!condition, "Playlist advanced without a genuine routed playback end") }
+    }),
+    ("shared replacement playback intent", {
+        try check(PlaybackPolicy.shouldAutoplayReplacement(pendingPlay: false, playbackRequested: true,
+            external: true, playing: false, recoveringReceiver: false), "Buffering lost the requested playback intent")
+        try check(PlaybackPolicy.shouldAutoplayReplacement(pendingPlay: false, playbackRequested: false,
+            external: true, playing: false, recoveringReceiver: true), "Receiver recovery lost autoplay")
+        try check(!PlaybackPolicy.shouldAutoplayReplacement(pendingPlay: false, playbackRequested: false,
+            external: true, playing: false, recoveringReceiver: false), "A user-paused replacement autoplayed")
+        try check(!PlaybackPolicy.shouldAutoplayReplacement(pendingPlay: false, playbackRequested: true,
+            external: false, playing: true, recoveringReceiver: true), "An inactive receiver armed replacement playback")
+    }),
+    ("shared compatibility recovery boundaries", {
+        let url = URL(string: "https://example.test/stream.m3u8")!
+        let live = ResolvedSource(url: url, delivery: .hls, isLive: true, conversionPolicy: .allowVideo)
+        let finite = ResolvedSource(url: url, delivery: .hls)
+        let sampled = StreamingVideoCharacteristics(codec: .hevc, width: 3840, height: 2160,
+            bitDepth: 10, transfer: .bt709, delivery: .hls, isLive: true)
+        try check(MediaSelector.remuxFallback(for: live, sampledVideo: sampled)?.conversionPolicy == .avoidVideo,
+                  "Automatic HEVC HLS recovery allowed video encoding")
+        try check(MediaSelector.remuxFallback(for: live, reason: .externalPlaybackUnsupported, hasPlayed: true) != nil,
+                  "An established live presentation could not recover a format failure")
+        try check(MediaSelector.remuxFallback(for: finite, reason: .unreadableMedia, hasPlayed: true) == nil,
+                  "Established finite playback restarted unexpectedly")
+        for source in [live, finite] {
+            for reason: MediaFailureReason in [.network, .sourceUnavailable, .protectedMedia, .noVideo, .playbackInterrupted] {
+                try check(MediaSelector.remuxFallback(for: source, reason: reason) == nil,
+                          "A non-format failure enabled remux")
+            }
+        }
+        try check(MediaSelector.shouldInspectCompatibility(of: finite), "Direct HLS skipped compatibility inspection")
+        try check(!MediaSelector.shouldInspectCompatibility(of: ResolvedSource(url: url, delivery: .file)),
+                  "Known finite file delivery opened a supplemental request")
     }),
     ("finite HLS is not live", {
         try check(!LivePolicy.isLive(sourceDuration: nil, itemDurationIndefinite: false),

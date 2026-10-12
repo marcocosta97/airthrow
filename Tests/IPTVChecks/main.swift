@@ -318,7 +318,7 @@ struct IPTVChecks {
         let preflight = PlaybackController(player: ReceiverPlayer(), showReceiverWaitingScreen: false,
             resolveSource: { ResolvedSource(url: $0) },
             inspectStreamingVideo: { _ in await preflightProbes.record(); return hevc }, inspectFirstLiveInput: true,
-            enableLiveRemuxFallback: false,
+            enableCompatibilityFallback: false,
             prepareSource: { source in await preflightPreparations.record(source); throw PreparationFailure.unsupported })
         try preflight.selectXtreamMedia(base.appendingPathComponent("video.mp4"), title: "Preflight channel", isLive: true)
         try await wait(seconds: 12) { preflight.snapshot.state == .ready }
@@ -365,7 +365,7 @@ struct IPTVChecks {
         let cancelledRecorder = RemuxInputRecorder()
         let pendingProbe = ProbeCounter()
         let cancelledPreflight = PlaybackController(player: ReceiverPlayer(), showReceiverWaitingScreen: false,
-            resolveSource: { ResolvedSource(url: $0) }, inspectStreamingVideo: { _ in
+            resolveSource: { ResolvedSource(url: $0, delivery: $0.pathExtension == "mp4" ? .file : .hls) }, inspectStreamingVideo: { _ in
                 await pendingProbe.record()
                 try? await Task.sleep(for: .milliseconds(500))
                 return hevc
@@ -400,6 +400,63 @@ struct IPTVChecks {
         try check(hevc?.requiresHLSRemux == true && directHEVC?.requiresHLSRemux == false
                   && transport?.requiresHLSRemux == false,
                   "Compatibility fallback is specific to HEVC in MPEG-TS HLS")
+        try check(hevc?.isLive == true && transport?.isLive == true && directHEVC?.isLive == nil,
+                  "Live presentation is inferred from a media playlist rather than its input route or TS container")
+        try check(HLSVideoEvidence.livePresentation(in: Data("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-ENDLIST\n".utf8)) == false
+                  && HLSVideoEvidence.livePresentation(in: Data("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\nvariant.m3u8\n".utf8)) == nil,
+                  "Finite HLS and an unknown master never become live merely because they are playlists")
+        let sourceRecorder = RemuxInputRecorder()
+        let directSource = PlaybackController(player: ReceiverPlayer(), showReceiverWaitingScreen: false,
+            resolveSource: { ResolvedSource(url: $0, delivery: .hls) }, inspectStreamingVideo: { _ in hevc },
+            prepareSource: { source in await sourceRecorder.record(source); throw PreparationFailure.unsupported })
+        try directSource.load(liveURL.absoluteString)
+        try await wait(seconds: 12) { directSource.snapshot.state == .failed }
+        let sourceInput = await sourceRecorder.input
+        try check(sourceInput?.isLive == true && sourceInput?.playbackPath == .remux,
+                  "An HLS link opened through Source receives the same live detection and remux fallback as a catalog channel")
+        directSource.shutdown()
+        let queuePlayer = ReceiverPlayer()
+        let queueController = PlaybackController(player: queuePlayer, showReceiverWaitingScreen: false,
+            resolveSource: { ResolvedSource(url: $0, delivery: .file) },
+            resolvePlaylist: { _ in ResolvedPlaylist(title: "Synthetic YouTube queue", entries: [
+                PlaylistEntry(url: base.appendingPathComponent("video.mp4"), title: "First"),
+                PlaylistEntry(url: base.appendingPathComponent("second.mp4"), title: "Second")], truncated: false) })
+        let queueURL = URL(string: "https://www.youtube.com/playlist?list=PLsynthetic123456")!
+        try queueController.load(queueURL.absoluteString, autoplay: true)
+        try await wait(seconds: 12) { queueController.snapshot.state == .playing }
+        queuePlayer.rate = 0; queuePlayer.setBuffering(true); queueController.refresh()
+        try queueController.next()
+        queuePlayer.setBuffering(false)
+        try await wait(seconds: 12) { queueController.snapshot.state == .playing && queueController.snapshot.queue?.currentIndex == 1 }
+        try check(queueController.player === queuePlayer && queuePlayer.rate > 0,
+                  "YouTube queue Next preserves requested playback through zero-rate buffering on the same receiver")
+        queueController.pause()
+        try queueController.previous()
+        try await wait(seconds: 12) { queueController.snapshot.state == .ready }
+        try check(queuePlayer.rate == 0 && queueController.snapshot.queue?.currentIndex == 0,
+                  "YouTube queue Previous respects an explicit user pause")
+        // Begin a new forward queue traversal; Previous deliberately preserves
+        // backward skipping semantics when it encounters an unavailable item.
+        try queueController.load(queueURL.absoluteString, autoplay: true)
+        try await wait(seconds: 8) { queueController.snapshot.state == .playing }
+        NotificationCenter.default.post(name: .AVPlayerItemFailedToPlayToEndTime, object: queuePlayer.currentItem,
+            userInfo: [AVPlayerItemFailedToPlayToEndTimeErrorKey: NSError(domain: NSURLErrorDomain,
+                code: URLError.networkConnectionLost.rawValue)])
+        try await wait(seconds: 12) { queueController.snapshot.state == .playing && queueController.snapshot.queue?.currentIndex == 1 }
+        try check(queuePlayer.rate > 0, "Skipping an unavailable YouTube queue item preserves playback intent")
+        queueController.shutdown()
+        let queueRemuxRecorder = RemuxInputRecorder()
+        let liveQueue = PlaybackController(player: ReceiverPlayer(), showReceiverWaitingScreen: false,
+            resolveSource: { ResolvedSource(url: $0, delivery: .hls) }, inspectStreamingVideo: { _ in hevc },
+            resolvePlaylist: { _ in ResolvedPlaylist(title: "Synthetic live queue", entries: [
+                PlaylistEntry(url: liveURL, title: "Live")], truncated: false) },
+            prepareSource: { source in await queueRemuxRecorder.record(source); throw PreparationFailure.unsupported })
+        try liveQueue.load(queueURL.absoluteString)
+        try await wait(seconds: 12) { liveQueue.snapshot.state == .failed }
+        let queueRemuxInput = await queueRemuxRecorder.input
+        try check(queueRemuxInput?.isLive == true && queueRemuxInput?.playbackPath == .remux,
+                  "A resolved YouTube queue item uses the same compatibility fallback as IPTV, without a provider branch")
+        liveQueue.shutdown()
         let privateError = NSError(domain: "private-domain", code: 77,
             userInfo: [NSLocalizedDescriptionKey: "private-fixture-description"])
         let nativeError = NSError(domain: AVFoundationErrorDomain, code: -11870,

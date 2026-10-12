@@ -162,11 +162,13 @@ public struct StreamingVideoCharacteristics: Codable, Sendable, Equatable {
     public let chroma: Chroma?
     public let profile: Profile?
     public let level: Int?
+    public let isLive: Bool?
     /// Apple HLS requires fMP4 for HEVC. Native playback can otherwise report
     /// playing with audible audio while the receiver displays no video.
     public var requiresHLSRemux: Bool { delivery == .hls && container == .mpegts && codec == .hevc }
-    init(codec: Codec, width: Int?, height: Int?, bitDepth: Int?, transfer: Transfer?,
-         delivery: Delivery? = nil, chroma: Chroma? = nil, profile: Profile? = nil, level: Int? = nil) {
+    public init(codec: Codec, width: Int?, height: Int?, bitDepth: Int?, transfer: Transfer?,
+         delivery: Delivery? = nil, chroma: Chroma? = nil, profile: Profile? = nil, level: Int? = nil,
+         isLive: Bool? = nil) {
         container = .mpegts
         self.codec = codec
         self.width = width
@@ -177,6 +179,7 @@ public struct StreamingVideoCharacteristics: Codable, Sendable, Equatable {
         self.chroma = chroma
         self.profile = profile
         self.level = level
+        self.isLive = isLive
     }
 }
 
@@ -560,6 +563,12 @@ public enum MediaInput {
 
 /// A pure policy shared by observations and tests. Requested actions never masquerade as observed playback.
 public enum PlaybackPolicy {
+    /// Preserve user intent across every replacement, including a zero-rate
+    /// buffering item and recovery while the same receiver remains selected.
+    public static func shouldAutoplayReplacement(pendingPlay: Bool, playbackRequested: Bool,
+                                                 external: Bool, playing: Bool, recoveringReceiver: Bool) -> Bool {
+        pendingPlay || (external && (playing || playbackRequested || recoveringReceiver))
+    }
     public static func state(hasItem: Bool, failed: Bool, ready: Bool, connecting: Bool,
                              external: Bool, ended: Bool, playing: Bool, waiting: Bool,
                              hasPlayed: Bool) -> PlaybackState {

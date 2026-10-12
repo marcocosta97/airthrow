@@ -39,7 +39,8 @@ public struct YTDLPSourceAdapter: SourceAdapter {
                 // Probe evidence may vary between loads; the original direct
                 // presentation must retain the same identity when it does.
                 let direct = DirectSourceAdapter.candidates(url)[0]
-                return [MediaCandidate(source: ResolvedSource(url: url, videoKnownPresent: true), id: direct.id)]
+                return [MediaCandidate(source: ResolvedSource(url: url, delivery: direct.source.delivery,
+                                                             videoKnownPresent: true), id: direct.id)]
             }
         }
         var arguments = ["--ignore-config", "--no-plugin-dirs", "--no-cache-dir",
