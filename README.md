@@ -21,6 +21,7 @@ your screen.
 </p>
 
 - **Links and files** — direct video URLs, website streams (e.g. Youtube, Twitch), local videos and playlists.
+- **IPTV and Xtream** — channel playlists, plus Xtream live TV, films and series.
 - **Playback options** — video and audio sources, supported subtitles, and optional
   clean up and upscaling to 1080p or 4K.
 - **One session** — control playback from the app, menu bar or `athrow` CLI.
@@ -55,8 +56,8 @@ This produces a locally signed app, a ZIP archive, and the `build/athrow` CLI.
 
 1. Paste a direct video URL, a website link, or a local file path, or drop a
    file onto the source area, then click **Load**.
-2. In **Video options**, choose the source, enhancement and output resolution,
-   then close the menu to reload once, paused. Audio and supported subtitles
+2. In **Video options**, choose the source quality, enhancement and output resolution,
+   then close the menu to apply your changes. Audio and supported subtitles
    can be selected under **Source**.
 3. Click the AirPlay button and choose a video-capable receiver, then press
    **Play** when the video and route are ready.
@@ -90,6 +91,15 @@ Disk Access; Chrome-family browsers may ask for Keychain access.
 
 Choose a local video with the folder button, drop it on the source area, or pass
 its path to `athrow open`.
+
+## IPTV and Xtream
+
+Load an M3U/M3U8 channel playlist link or local playlist from **Source**, then
+choose a channel in the sidebar. For Xtream, use **File → Add Xtream Server…**
+and enter your server address and account details.
+
+Browse Xtream live TV, films and series by category or search. Programme guides
+are available when provided by the server.
 
 ## Limitations
 
