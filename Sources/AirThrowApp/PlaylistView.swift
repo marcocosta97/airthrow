@@ -22,6 +22,7 @@ struct PlaylistPanel: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .scrollContentBackground(.hidden)
         .background(Color(nsColor: SurfaceColor.window))
     }
 }
