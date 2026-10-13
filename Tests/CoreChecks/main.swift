@@ -204,7 +204,7 @@ let tests: [(String, () throws -> Void)] = [
         live.isLive = true
         live.recommendedLiveOffset = 12
         for edge in [100.0, 102, 104, 106] {
-            live.seekableRanges = [SeekRange(start: edge - 30, end: edge)]
+            live.seekableRanges = [SeekRange(start: edge - 60, end: edge)]
             live.position = edge - 14
             live.liveOffset = 14
             try check(LivePolicy.timelinePosition(live) == edge && LivePolicy.positionLabel(live) == "Live",
@@ -224,6 +224,42 @@ let tests: [(String, () throws -> Void)] = [
         finite.duration = 100; finite.position = 42
         try check(LivePolicy.timelinePosition(finite) == 42 && LivePolicy.delay(finite) == nil,
                   "Live stabilization changed the finite timeline")
+    }),
+    ("live controls follow actual seek targets", {
+        var live = PlaybackSnapshot()
+        live.isLive = true; live.state = .playing; live.externalPlaybackActive = true
+        live.position = 95; live.liveOffset = 5
+        try check(!PlaybackPolicy.canSeek(live) && LivePolicy.timelinePosition(live) == 1,
+                  "Live without ranges exposed an interactive or moving timeline")
+        live.seekableRanges = [SeekRange(start: 80, end: 100)]
+        live.recommendedLiveOffset = 12
+        try check(PlaybackPolicy.canSeek(live) && PlaybackPolicy.canSkip(live, by: -10)
+                  && !PlaybackPolicy.canSkip(live, by: 10) && PlaybackPolicy.canControl(live),
+                  "A short seekable live window lost rewind or allowed seeking beyond the live edge")
+        live.position = 85
+        try check(!PlaybackPolicy.canSkip(live, by: -10) && PlaybackPolicy.canSkip(live, by: 10),
+                  "Directional skips ignored the window start")
+        try check(PlaybackPolicy.skipTarget(live, by: -10, position: 90) == 80
+                  && PlaybackPolicy.skipTarget(live, by: -10, position: 80) == nil,
+                  "Rapid skips ignored the pending seek position or clamped an unavailable target")
+        live.seekableRanges = [SeekRange(start: 0, end: 75), SeekRange(start: 80, end: 100)]
+        try check(!PlaybackPolicy.canSkip(live, by: -10), "Live skip crossed into an older discontinuous range")
+        live.state = .paused
+        try check(PlaybackPolicy.canControl(live) && PlaybackPolicy.canSeek(live), "Paused live lost its controls")
+        live.seekableRanges = [SeekRange(start: .nan, end: 100)]
+        try check(!PlaybackPolicy.canSeek(live) && !PlaybackPolicy.canSkip(live, by: -10), "Invalid live range enabled seek")
+        live.seekableRanges = [SeekRange(start: 100, end: 100)]
+        try check(!PlaybackPolicy.canSeek(live), "Empty live range enabled seek")
+        var finite = PlaybackSnapshot()
+        finite.state = .playing; finite.externalPlaybackActive = true; finite.position = 15
+        finite.seekableRanges = [SeekRange(start: 0, end: 20), SeekRange(start: 30, end: 100)]
+        try check(PlaybackPolicy.canSkip(finite, by: -10) && !PlaybackPolicy.canSkip(finite, by: 10),
+                  "Finite skips ignored discontinuous seek ranges")
+        guard case .controls(let controls) = MenuModel.elements(for: finite)[2] else {
+            throw CheckFailure(message: "Menu controls missing")
+        }
+        try check(controls.canSkipBackward && !controls.canSkipForward, "Menu skip availability differs from shared policy")
+        try check(!PlaybackPolicy.canSkip(finite, by: .infinity), "Nonfinite skip target was allowed")
     }),
     ("shared control policy, labels and time formatting", {
         var snapshot = PlaybackSnapshot()
@@ -252,6 +288,7 @@ let tests: [(String, () throws -> Void)] = [
         try check(PlaybackPolicy.activeSeekRange(durationOnly) == SeekRange(start: 0, end: 100) && !PlaybackPolicy.canSeek(durationOnly),
                   "canSeek allowed seek with empty seekableRanges despite known duration")
         snapshot.state = .buffering
+        snapshot.seekableRanges = [SeekRange(start: 30, end: 90)]
         try check(PlaybackPolicy.isPlaying(snapshot) && PlaybackPolicy.canSeek(snapshot),
                   "Buffering control state was wrong")
         snapshot.state = .loading

@@ -411,6 +411,13 @@ public enum QueuePolicy {
 }
 
 public enum LivePolicy {
+    /// Use the actual seekable window, independently of delivery or encoding.
+    public static func supportsTimeShift(_ snapshot: PlaybackSnapshot) -> Bool {
+        guard snapshot.isLive, let range = snapshot.seekableRanges.last,
+              range.start.isFinite, range.end.isFinite, range.end > range.start else { return false }
+        return true
+    }
+
     /// A finite AVPlayer duration is authoritative for on-demand media. Some
     /// finite HLS presentations still expose a recommended live offset.
     public static func isLive(sourceDuration: Double?, itemDurationIndefinite: Bool) -> Bool {
@@ -436,11 +443,13 @@ public enum LivePolicy {
     /// manifest update. Explicit drags and pending seeks keep their real target.
     public static func timelinePosition(_ snapshot: PlaybackSnapshot, requested: Double? = nil) -> Double {
         let range = PlaybackPolicy.activeSeekRange(snapshot)
+        if snapshot.isLive, !supportsTimeShift(snapshot) { return range?.end ?? 1 }
         let position = requested ?? (isAtLive(snapshot) ? range?.end : snapshot.position) ?? 0
         return min(max(position, range?.start ?? 0), range?.end ?? 1)
     }
 
     public static func positionLabel(_ snapshot: PlaybackSnapshot, position: Double? = nil) -> String {
+        if snapshot.isLive, !supportsTimeShift(snapshot) { return "Live" }
         let offset = delay(snapshot, position: position) ?? 0
         return offset > 3 ? "−\(PlaybackFormat.time(offset))" : "Live"
     }
@@ -611,9 +620,23 @@ public enum PlaybackPolicy {
 
     public static func canSeek(_ snapshot: PlaybackSnapshot) -> Bool {
         canControl(snapshot) && !snapshot.seekableRanges.isEmpty && activeSeekRange(snapshot) != nil
+            && (!snapshot.isLive || LivePolicy.supportsTimeShift(snapshot))
+    }
+
+    public static func skipTarget(_ snapshot: PlaybackSnapshot, by seconds: Double, position: Double? = nil) -> Double? {
+        guard canSeek(snapshot), seconds.isFinite,
+              let position = position ?? snapshot.position, position.isFinite else { return nil }
+        let target = position + seconds
+        let ranges = snapshot.isLive ? Array(snapshot.seekableRanges.suffix(1)) : snapshot.seekableRanges
+        return ranges.contains { $0.start.isFinite && $0.end.isFinite && $0.end > $0.start && $0.contains(target) } ? target : nil
+    }
+
+    public static func canSkip(_ snapshot: PlaybackSnapshot, by seconds: Double, position: Double? = nil) -> Bool {
+        skipTarget(snapshot, by: seconds, position: position) != nil
     }
 
     public static func readyRanges(_ snapshot: PlaybackSnapshot) -> [SeekRange] {
+        if snapshot.isLive, !LivePolicy.supportsTimeShift(snapshot) { return [] }
         guard ![.idle, .loading, .failed].contains(snapshot.state),
               let bounds = activeSeekRange(snapshot) else { return [] }
         return SeekRange.merged(snapshot.preparedRanges ?? snapshot.diagnostics?.bufferedRanges ?? [], within: bounds)
@@ -672,13 +695,17 @@ public struct MenuControlState: Equatable, Sendable {
     public let canToggle: Bool
     public let canStop: Bool
     public let canSeek: Bool
+    public let canSkipBackward: Bool
+    public let canSkipForward: Bool
     public let playlist: MenuPlaylistControls?
     public init(isPlaying: Bool, canToggle: Bool, canStop: Bool, canSeek: Bool,
-                playlist: MenuPlaylistControls?) {
+                playlist: MenuPlaylistControls?, canSkipBackward: Bool? = nil, canSkipForward: Bool? = nil) {
         self.isPlaying = isPlaying
         self.canToggle = canToggle
         self.canStop = canStop
         self.canSeek = canSeek
+        self.canSkipBackward = canSkipBackward ?? canSeek
+        self.canSkipForward = canSkipForward ?? canSeek
         self.playlist = playlist
     }
 }
@@ -716,7 +743,9 @@ public enum MenuModel {
             canToggle: PlaybackPolicy.canControl(snapshot),
             canStop: snapshot.state != .idle || snapshot.receiverWaiting == true,
             canSeek: PlaybackPolicy.canSeek(snapshot),
-            playlist: playlist
+            playlist: playlist,
+            canSkipBackward: PlaybackPolicy.canSkip(snapshot, by: -skipInterval),
+            canSkipForward: PlaybackPolicy.canSkip(snapshot, by: skipInterval)
         )
         return [
             .card(title: snapshot.title, status: statusText(snapshot)),

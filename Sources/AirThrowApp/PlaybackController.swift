@@ -1450,6 +1450,9 @@ final class PlaybackController: ObservableObject {
     }
 
     func seek(_ seconds: Double) throws {
+        guard !snapshot.isLive || LivePolicy.supportsTimeShift(snapshot) else {
+            throw AppFailure(.unsupportedOperation, "This live stream does not currently offer a rewind window.")
+        }
         try MediaInput.validateSeek(seconds, ranges: snapshot.seekableRanges)
         guard !loadInProgress, failure == nil, mediaItem?.status == .readyToPlay else {
             throw AppFailure(.unsupportedOperation, "Wait for a video to finish loading before seeking.")
@@ -1549,12 +1552,10 @@ final class PlaybackController: ObservableObject {
     /// Accumulate rapid skips from the latest request, within prepared/seekable media.
     func skip(by seconds: Double) throws {
         guard seconds.isFinite else { throw AppFailure(.invalidRequest, "Use a finite seek interval.") }
-        let range = snapshot.isLive ? snapshot.seekableRanges.last : snapshot.seekableRanges.first
-        guard let range else {
-            throw AppFailure(.unsupportedOperation, "This video does not currently support seeking.")
+        guard let target = PlaybackPolicy.skipTarget(snapshot, by: seconds, position: pendingSeek) else {
+            throw AppFailure(.unsupportedOperation, "The requested position is outside the currently seekable window.")
         }
-        let position = pendingSeek ?? snapshot.position ?? range.start
-        try seek(min(max(position + seconds, range.start), range.end))
+        try seek(target)
     }
 
     func goLive() throws {

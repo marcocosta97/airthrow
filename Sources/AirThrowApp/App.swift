@@ -170,8 +170,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                         if PlaybackPolicy.isPlaying(status) { self.controller.pause() }
                         else { try self.controller.play() }
                     case .backward, .forward:
-                        guard PlaybackPolicy.canSeek(status) else { return false }
-                        try self.controller.skip(by: key == .backward ? -10 : 10)
+                        let interval: Double = key == .backward ? -10 : 10
+                        guard PlaybackPolicy.canSkip(status, by: interval, position: self.controller.pendingSeek) else { return false }
+                        try self.controller.skip(by: interval)
                     }
                 } catch { self.controller.displayError(error) }
                 return true
@@ -699,12 +700,12 @@ private final class MenuControlRow: NSView {
         switch command {
         case .previous:
             ("backward.end.fill", "Previous Playlist Item", controls.playlist?.canPrevious == true)
-        case .skipBackward: ("gobackward.10", "Back 10 Seconds", controls.canSeek)
+        case .skipBackward: ("gobackward.10", "Back 10 Seconds", controls.canSkipBackward)
         case .togglePlayback:
             (controls.isPlaying ? "pause.fill" : "play.fill",
              controls.isPlaying ? "Pause" : "Play", controls.canToggle)
         case .stop: ("stop.fill", "Stop", controls.canStop)
-        case .skipForward: ("goforward.10", "Forward 10 Seconds", controls.canSeek)
+        case .skipForward: ("goforward.10", "Forward 10 Seconds", controls.canSkipForward)
         case .next:
             ("forward.end.fill", "Next Playlist Item", controls.playlist?.canNext == true)
         case .showController, .quit: ("", "", false)

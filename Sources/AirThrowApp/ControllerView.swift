@@ -114,6 +114,9 @@ struct ControllerView: View {
 
     private var status: PlaybackSnapshot { controller.snapshot }
     private var progressHelp: String {
+        if status.isLive, !LivePolicy.supportsTimeShift(status) {
+            return "Live broadcast. No rewind window is currently available."
+        }
         let ranges = PlaybackPolicy.readyRanges(status)
         let label = status.preparedRanges == nil ? "Buffered video" : "Video ready on this Mac"
         guard !ranges.isEmpty else { return "Highlighted sections show \(label.lowercased())." }
@@ -271,7 +274,7 @@ struct ControllerView: View {
                                 .accessibilityValue(status.isLive ? livePositionLabel : PlaybackFormat.time(controller.pendingSeek ?? status.position))
                                 .accessibilityHint(progressHelp)
                                 .help(progressHelp)
-                                if let hoverTime {
+                                if PlaybackPolicy.canSeek(status), let hoverTime {
                                     Text(status.isLive ? LivePolicy.positionLabel(status, position: hoverTime) : PlaybackFormat.time(hoverTime))
                                         .font(.caption2.monospacedDigit())
                                         .padding(.horizontal, 5).padding(.vertical, 2)
@@ -284,7 +287,7 @@ struct ControllerView: View {
                             .onContinuousHover { phase in
                                 switch phase {
                                 case .active(let location):
-                                    guard let range, geometry.size.width > 0 else { hoverTime = nil; return }
+                                    guard PlaybackPolicy.canSeek(status), let range, geometry.size.width > 0 else { hoverTime = nil; return }
                                     hoverX = min(max(location.x, 0), geometry.size.width)
                                     hoverTime = range.start + (range.end - range.start) * hoverX / geometry.size.width
                                 case .ended: hoverTime = nil
@@ -295,7 +298,7 @@ struct ControllerView: View {
                         HStack {
                             Text(livePositionLabel)
                             Spacer()
-                            if status.isLive, !LivePolicy.isAtLive(status), status.liveOffset != nil {
+                            if LivePolicy.supportsTimeShift(status), !LivePolicy.isAtLive(status), status.liveOffset != nil {
                                 Button("Go Live") { perform { try controller.goLive() } }
                                     .buttonStyle(.link)
                                     .disabled(!canControl)
@@ -315,7 +318,7 @@ struct ControllerView: View {
                         Button { perform { try controller.skip(by: -10) } } label: {
                             Image(systemName: "gobackward.10")
                         }
-                        .disabled(!PlaybackPolicy.canSeek(status))
+                        .disabled(!PlaybackPolicy.canSkip(status, by: -10, position: controller.pendingSeek))
                         .help("Back 10 seconds (←)").accessibilityLabel("Back 10 seconds")
 
                         Button {
@@ -335,7 +338,7 @@ struct ControllerView: View {
                         Button { perform { try controller.skip(by: 10) } } label: {
                             Image(systemName: "goforward.10")
                         }
-                        .disabled(!PlaybackPolicy.canSeek(status))
+                        .disabled(!PlaybackPolicy.canSkip(status, by: 10, position: controller.pendingSeek))
                         .help("Forward 10 seconds (→)").accessibilityLabel("Forward 10 seconds")
 
                         if let queue = status.queue {
