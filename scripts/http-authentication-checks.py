@@ -33,6 +33,8 @@ run([ffmpeg, '-v', 'error', '-nostdin', '-i', FIXTURES / 'video.mp4', '-c:v', 'c
 run([ffmpeg, '-v', 'error', '-nostdin', '-i', FIXTURES / 'video.mp4', '-c', 'copy', '-hls_time', '2',
      '-hls_playlist_type', 'vod', FIXTURES / 'stream.m3u8'])
 (FIXTURES / 'master.m3u8').write_text('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=320x180,CODECS="avc1.64000c,mp4a.40.2"\nstream.m3u8\n')
+(FIXTURES / 'qualities.m3u8').write_text('#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="A",URI="stream.m3u8"\n#EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=320x180,CODECS="avc1.64000c,mp4a.40.2",AUDIO="a"\nstream.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=640x360,CODECS="avc1.64000c,mp4a.40.2",AUDIO="a"\nstream.m3u8?high=1\n')
+(FIXTURES / 'controller-qualities.m3u8').write_text('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=320x180,CODECS="avc1.64000c,mp4a.40.2"\nstream.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=640x360,CODECS="avc1.64000c,mp4a.40.2"\nstream.m3u8?high=1\n')
 (FIXTURES / 'attributes.m3u8').write_text('#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="A",URI="stream.m3u8?token=a%2Bb%26c"\n#EXT-X-KEY:METHOD=AES-128,URI="key"\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:2,\nstream0.ts\n')
 (FIXTURES / 'unsafe.m3u8').write_text('#EXTM3U\n#EXTINF:2,\nfile:///etc/passwd\n')
 (FIXTURES / 'oversized.m3u8').write_text('#EXTM3U\n' + '#' * 1_048_576)

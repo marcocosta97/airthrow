@@ -190,6 +190,29 @@ public struct MediaErrorCode: Codable, Sendable, Equatable {
     public init(domain: Domain, code: Int) { self.domain = domain; self.code = code }
 }
 
+/// Numeric extractor inventory, including formats that are not playable.
+public struct SourceDiscoverySummary: Codable, Sendable, Equatable {
+    public let formatCount: Int
+    public let maximumAdvertisedVideoHeight: Int?
+    public init(formatCount: Int, maximumAdvertisedVideoHeight: Int?) {
+        self.formatCount = formatCount; self.maximumAdvertisedVideoHeight = maximumAdvertisedVideoHeight
+    }
+}
+
+/// Advertised HLS attributes only; never includes rendition URLs or names.
+public struct HLSVariantSummary: Codable, Sendable, Equatable {
+    public let width: Int?
+    public let height: Int?
+    public let frameRate: Double?
+    public let peakBitrate: Double?
+    public let averageBitrate: Double?
+    public let videoCodecs: [UInt32]
+    public init(width: Int?, height: Int?, frameRate: Double?, peakBitrate: Double?, averageBitrate: Double?, videoCodecs: [UInt32]) {
+        self.width = width; self.height = height; self.frameRate = frameRate
+        self.peakBitrate = peakBitrate; self.averageBitrate = averageBitrate; self.videoCodecs = videoCodecs
+    }
+}
+
 public struct PlaybackDiagnostics: Codable, Sendable, Equatable {
     public enum SampleInspectionStatus: String, Codable, Sendable { case pending, unavailable, complete }
     public var itemStatus: String?
@@ -209,6 +232,9 @@ public struct PlaybackDiagnostics: Codable, Sendable, Equatable {
     public var videoWidth: Int?
     public var videoHeight: Int?
     public var sampledVideo: StreamingVideoCharacteristics?
+    public var sourceDiscovery: SourceDiscoverySummary?
+    public var hlsVariantCount: Int?
+    public var hlsVariants: [HLSVariantSummary]?
     public var sampleInspectionStatus: SampleInspectionStatus?
     public var livePipeline: LivePipelineDiagnostics?
     /// Only numeric errors: log URIs, addresses and provider text are never exposed.
@@ -333,6 +359,9 @@ public struct PlaybackSnapshot: Codable, Sendable, Equatable {
     public var liveOffset: Double?
     /// Native live playback has a deliberate delay for buffering/network conditions.
     public var recommendedLiveOffset: Double?
+    /// Smallest observed live-edge advance. Manifest updates move this edge in
+    /// chunks even when the playhead advances continuously.
+    public var liveEdgeUpdateInterval: Double?
     /// nil means audio inspection was unavailable or no source is loaded.
     public var hasAudio: Bool?
     public var error: String?
@@ -350,6 +379,9 @@ public struct PlaybackSnapshot: Codable, Sendable, Equatable {
     /// Quality label of the selected presentation (for example "720p60"),
     /// when the adapter knows it. Never contains URLs or provider identifiers.
     public var quality: String?
+    /// Presentation size reported by AVPlayerItem, not proof of receiver output.
+    public var reportedVideoWidth: Int?
+    public var reportedVideoHeight: Int?
     /// Additive, privacy-safe observations for troubleshooting and future policy.
     public var diagnostics: PlaybackDiagnostics?
     /// Present while a playlist owns the shared playback session.
@@ -390,6 +422,8 @@ public struct SubtitleOptionSnapshot: Codable, Sendable, Equatable, Identifiable
 
 public struct SourceOptionSnapshot: Codable, Sendable, Equatable, Identifiable {
     public let id: String
+    public let bitrate: Double?
+    public let isAdaptive: Bool?
     /// Session-scoped identity shared by presentations with the same video stream.
     public let videoGroupID: String?
     public let quality: String
@@ -397,8 +431,9 @@ public struct SourceOptionSnapshot: Codable, Sendable, Equatable, Identifiable {
     public let playbackPath: PlaybackPath
     public let unavailableReason: String?
     public init(id: String, quality: String, audio: String?, playbackPath: PlaybackPath,
-                unavailableReason: String?, videoGroupID: String? = nil) {
-        self.id = id; self.videoGroupID = videoGroupID; self.quality = quality; self.audio = audio
+                unavailableReason: String?, videoGroupID: String? = nil, bitrate: Double? = nil, isAdaptive: Bool? = nil) {
+        self.id = id; self.videoGroupID = videoGroupID; self.quality = quality
+        self.bitrate = bitrate; self.isAdaptive = isAdaptive; self.audio = audio
         self.playbackPath = playbackPath; self.unavailableReason = unavailableReason
     }
 }
@@ -411,6 +446,17 @@ public enum QueuePolicy {
 }
 
 public enum LivePolicy {
+    public static func edgeUpdateInterval(previous: PlaybackSnapshot, current: PlaybackSnapshot) -> Double? {
+        guard previous.isLive, current.isLive,
+              let oldEdge = previous.seekableRanges.last?.end,
+              let newEdge = current.seekableRanges.last?.end,
+              oldEdge.isFinite, newEdge.isFinite, newEdge >= oldEdge else { return nil }
+        let known = previous.liveEdgeUpdateInterval.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+        let advance = newEdge - oldEdge
+        guard advance > 0 else { return known }
+        return min(known ?? advance, advance)
+    }
+
     /// Use the actual seekable window, independently of delivery or encoding.
     public static func supportsTimeShift(_ snapshot: PlaybackSnapshot) -> Bool {
         guard snapshot.isLive, let range = snapshot.seekableRanges.last,
@@ -436,7 +482,9 @@ public enum LivePolicy {
     }
 
     public static func isAtLive(_ snapshot: PlaybackSnapshot) -> Bool {
-        delay(snapshot).map { $0 <= 3 } ?? false
+        let cadence = snapshot.liveEdgeUpdateInterval.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } ?? 0
+        let tolerance = snapshot.state == .paused ? 3 : max(3, cadence)
+        return delay(snapshot).map { $0 <= tolerance } ?? false
     }
 
     /// Pin the displayed knob at Live without seeking the player on every
@@ -450,6 +498,7 @@ public enum LivePolicy {
 
     public static func positionLabel(_ snapshot: PlaybackSnapshot, position: Double? = nil) -> String {
         if snapshot.isLive, !supportsTimeShift(snapshot) { return "Live" }
+        if position == nil, isAtLive(snapshot) { return "Live" }
         let offset = delay(snapshot, position: position) ?? 0
         return offset > 3 ? "−\(PlaybackFormat.time(offset))" : "Live"
     }

@@ -225,6 +225,74 @@ let tests: [(String, () throws -> Void)] = [
         try check(LivePolicy.timelinePosition(finite) == 42 && LivePolicy.delay(finite) == nil,
                   "Live stabilization changed the finite timeline")
     }),
+    ("segmented live-edge updates do not move the Live indicator", {
+        var previous = PlaybackSnapshot()
+        previous.isLive = true; previous.state = .playing
+        previous.seekableRanges = [SeekRange(start: 145, end: 3730)]
+        previous.position = 3714; previous.liveOffset = 16; previous.recommendedLiveOffset = 15
+        for edge in [3735.0, 3740, 3745, 3750] {
+            var current = previous
+            current.seekableRanges = [SeekRange(start: edge - 3585, end: edge)]
+            current.position = edge - 19.5; current.liveOffset = 19.5
+            current.liveEdgeUpdateInterval = LivePolicy.edgeUpdateInterval(previous: previous, current: current)
+            try check(current.liveEdgeUpdateInterval == 5 && LivePolicy.timelinePosition(current) == edge
+                      && LivePolicy.positionLabel(current) == "Live",
+                      "Five-second manifest update made the continuous live playhead jump backwards")
+            current.liveOffset = 15.5; current.position = edge - 15.5
+            current.liveEdgeUpdateInterval = LivePolicy.edgeUpdateInterval(previous: current, current: current)
+            try check(LivePolicy.timelinePosition(current) == edge, "Between-update playback lost the live pin")
+            previous = current
+        }
+        previous.position = 3721; previous.liveOffset = 29
+        try check(!LivePolicy.isAtLive(previous) && LivePolicy.timelinePosition(previous) == 3721
+                  && LivePolicy.positionLabel(previous) == "−0:14", "Manifest tolerance hid actual time-shifted playback")
+        try check(LivePolicy.positionLabel(previous, position: 3731) == "−0:04",
+                  "Manifest tolerance hid an explicit four-second seek target")
+        previous.state = .paused; previous.liveOffset = 19
+        try check(!LivePolicy.isAtLive(previous), "Paused playback was hidden by manifest tolerance")
+        var reset = previous; reset.isLive = false
+        try check(LivePolicy.edgeUpdateInterval(previous: previous, current: reset) == nil,
+                  "A replacement retained the previous source's live cadence")
+        reset = previous; reset.seekableRanges = [SeekRange(start: 0, end: 100)]
+        try check(LivePolicy.edgeUpdateInterval(previous: previous, current: reset) == nil,
+                  "A reset live clock retained its old cadence")
+    }),
+    ("manual HLS rendition selection preserves groups and automatic mode", {
+        let master = """
+        #EXTM3U
+        #EXT-X-VERSION:6
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",URI="audio.m3u8"
+        #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",URI="subs.m3u8"
+        #EXT-X-STREAM-INF:BANDWIDTH=600000,RESOLUTION=426x240,FRAME-RATE=30,CODECS="avc1.64001f,mp4a.40.2",AUDIO="audio",SUBTITLES="subs"
+        low.m3u8?token=fixture
+        #EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=426x240,FRAME-RATE=30,CODECS="avc1.64001f,mp4a.40.2",AUDIO="audio",SUBTITLES="subs"
+        medium.m3u8
+        #EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,FRAME-RATE=30,CODECS="avc1.64001f,mp4a.40.2",AUDIO="audio",SUBTITLES="subs"
+        high.m3u8
+        """
+        let data = Data(master.utf8)
+        let variants = HLSRenditions.variants(data)
+        try check(variants.count == 3 && Set(variants.map(\.id)).count == 3, "Same-resolution bitrate variants collapsed")
+        let pinned = String(decoding: try HLSRenditions.selecting(variants[0], in: data), as: UTF8.self)
+        try check(pinned.contains("low.m3u8") && !pinned.contains("medium.m3u8") && !pinned.contains("high.m3u8")
+                  && pinned.contains("audio.m3u8") && pinned.contains("subs.m3u8"), "Manual master lost its selected video, audio or subtitles")
+        let renewed = HLSRenditions.variants(Data(master.replacingOccurrences(of: "token=fixture", with: "token=renewed").utf8))
+        try check(renewed.map(\.id) == variants.map(\.id), "Manual rendition identity depended on expiring addresses")
+        try check(HLSRenditions.variants(Data(repeating: 65, count: 1_048_577)).isEmpty, "Unbounded master metadata accepted")
+        try check(HLSRenditions.variants(Data("#EXTM3U\n#EXTINF:5,\nsegment.ts".utf8)).isEmpty, "Media playlist became a quality menu")
+        do {
+            _ = try HLSRenditions.selecting(variants[0], in: Data((master + "\n" + master).utf8))
+            throw CheckFailure(message: "Ambiguous rendition was silently pinned")
+        } catch is HTTPLoginFailure {}
+        let url = URL(string: "https://cdn.example/master.m3u8")!
+        let automatic = MediaCandidate(source: ResolvedSource(url: url, delivery: .hls), id: "adaptive", height: 1080)
+        var fixed = automatic.source; fixed.hlsVariant = variants[0]
+        let manual = MediaCandidate(source: fixed, id: variants[0].id, height: 240, bitrate: 600)
+        try check(try MediaSelector.select([manual, automatic]).hlsVariant == nil, "Automatic unexpectedly pinned a rendition")
+        let selected = try MediaSelector.select([automatic, manual], sourceID: manual.id)
+        try check(selected.hlsVariant == variants[0] && selected.withLivePresentation().hlsVariant == variants[0]
+                  && selected.withTransportRemux(isLive: true).hlsVariant == variants[0], "Explicit quality was lost during selection or fallback")
+    }),
     ("live controls follow actual seek targets", {
         var live = PlaybackSnapshot()
         live.isLive = true; live.state = .playing; live.externalPlaybackActive = true

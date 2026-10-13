@@ -47,7 +47,7 @@ struct VideoMenuView: View {
     }
 
     private func presentationKey(_ source: SourceOptionSnapshot) -> String {
-        "\(source.quality)#\(source.playbackPath.rawValue)"
+        "\(source.quality)#\(source.playbackPath.rawValue)#\(source.isAdaptive == false ? source.bitrate ?? 0 : 0)"
     }
 
     /// The chosen presentation's representative, or "automatic" when nothing
@@ -85,7 +85,7 @@ struct VideoMenuView: View {
         if isLive { return "Enhancement is available only for on-demand video." }
         if draftAction == .original { return "Choose an enhancement to change the output resolution." }
         if requires4K { return "This source is above 1080p, so enhancement uses 4K." }
-        return "Choose the output resolution before closing this menu."
+        return "Choose the output resolution."
     }
 
     private var outputExplanation: String {
@@ -135,7 +135,7 @@ struct VideoMenuView: View {
         .buttonStyle(.borderless)
         .fixedSize()
         .controlSize(.small)
-        .disabled(!mediaReady && videoOptions.count < 2)
+        .disabled(showingOptions || (!mediaReady && videoOptions.count < 2))
         .help(helpText)
         .accessibilityLabel("Video options")
         .accessibilityValue(menuLabel)
@@ -199,6 +199,11 @@ struct VideoMenuView: View {
                     }
                     Divider()
                 }
+                if let height = status.reportedVideoHeight {
+                    Text("Player reports \(height)p").font(.caption).foregroundStyle(.secondary)
+                } else if videoOptions.count > 1 {
+                    Text("Playing resolution unavailable").font(.caption).foregroundStyle(.secondary)
+                }
                 HStack {
                     Text("Enhancement").font(.subheadline.weight(.medium))
                     Spacer(minLength: 4)
@@ -230,11 +235,6 @@ struct VideoMenuView: View {
                 Text(outputExplanation)
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Text(isLive
-                     ? "Closing this menu reloads the stream and keeps play/pause."
-                     : "Closing this menu applies changes at the current position and keeps play/pause.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(12)
             .frame(width: 210, alignment: .leading)
@@ -256,7 +256,8 @@ struct VideoMenuView: View {
     }
 
     private func videoRow(_ source: SourceOptionSnapshot) -> String {
-        [source.quality.replacingOccurrences(of: " maximum (adaptive)", with: " max"),
+        [source.quality.replacingOccurrences(of: " maximum (adaptive)", with: " max (adaptive)"),
+         source.isAdaptive == false ? source.bitrate.map { String(format: "%.2f Mbps", $0 / 1000) } : nil,
          source.playbackPath.label, source.unavailableReason]
             .compactMap { $0 }.joined(separator: " · ")
     }

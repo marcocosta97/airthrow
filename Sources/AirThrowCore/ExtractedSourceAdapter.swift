@@ -31,13 +31,15 @@ enum ExtractedSourceAdapter {
                 let manifest = try await fetch(master)
                 try Task.checkCancellation()
                 if let quality = HLSMaster.quality(manifest, at: master) {
-                    candidates.append(MediaCandidate(
+                    let adaptive = MediaCandidate(
                         source: ResolvedSource(url: master, title: cleanTitle(info.title),
                                                hlsAudioOptions: HLSMaster.audioOptions(manifest, at: master), delivery: .hls,
                                                videoKnownPresent: true, isLive: info.isIndefiniteLive),
                         id: formatIdentifier(format, role: "hls"),
                         height: quality.height, bitrate: quality.bitrate,
-                        audioDescription: audioDescription(format)))
+                        audioDescription: audioDescription(format))
+                    candidates.append(adaptive)
+                    candidates += HLSRenditions.candidates(manifest, for: adaptive)
                 }
             } catch {
                 try Task.checkCancellation()
@@ -51,7 +53,19 @@ enum ExtractedSourceAdapter {
            !candidates.contains(where: { $0.unavailableReason(for: .allowVideo) == nil }) {
             throw ResolutionFailure.liveUnsupported
         }
-        return candidates
+        let adaptive = Array(candidates.filter { $0.source.hlsVariant == nil }.sorted(by: costFirst).prefix(maximumCandidates))
+        let manual = candidates.filter { $0.source.hlsVariant != nil }.sorted(by: costFirst)
+            .prefix(max(0, maximumCandidates - adaptive.count))
+        return (adaptive + manual).map { candidate in
+            var result = candidate; result.discovery = discovery(info); return result
+        }
+    }
+
+    private static func discovery(_ info: Info) -> SourceDiscoverySummary {
+        let formats = info.formats ?? []
+        let height = formats.filter { $0.vcodec != "none" }.compactMap { $0.height }
+            .filter { $0.isFinite && $0 > 0 && $0 <= 100_000 }.max().map { Int($0) }
+        return SourceDiscoverySummary(formatCount: formats.count, maximumAdvertisedVideoHeight: height)
     }
 
     // yt-dlp reports these defaults even for public URLs that need no custom headers.
@@ -204,7 +218,9 @@ enum ExtractedSourceAdapter {
             guard presentations.insert(sourceKey(candidate)).inserted else { continue }
             result.append(candidate)
         }
-        return result
+        return result.map { candidate in
+            var value = candidate; value.discovery = discovery(info); return value
+        }
     }
 
     /// Lower processing tiers rank first, then resolution and bitrate. The

@@ -23,6 +23,7 @@ public struct MediaCandidate: Sendable {
     /// or request headers, so it is safe to expose in status and preferences.
     public let id: String
     public let source: ResolvedSource
+    public var discovery: SourceDiscoverySummary?
     public let height: Double?
     public let bitrate: Double?
     /// Frame rate when the adapter knows it, used to tell same-height
@@ -137,7 +138,7 @@ public enum MediaSelector {
             return match.source.withConversionPolicy(policy)
         }
         guard let best = candidates
-            .filter({ $0.unavailableReason(for: policy) == nil })
+            .filter({ $0.unavailableReason(for: policy) == nil && $0.source.hlsVariant == nil })
             .max(by: { rankedBelow($0, $1, preferQuality: preferQuality) }) else { throw ResolutionFailure.preparationRequired }
         return best.source.withConversionPolicy(policy)
     }

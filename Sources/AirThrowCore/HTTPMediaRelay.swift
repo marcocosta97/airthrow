@@ -7,6 +7,7 @@ public final class HTTPMediaRelay {
     public let source: URL
     public private(set) var url: URL?
     private var credentials: HTTPLoginCredentials?
+    private var variant: HLSVariantSelection?
     private var server: MediaHTTPServer?
     private var routes: [String: URL] = [:]
     private var reverseRoutes: [URL: String] = [:]
@@ -27,9 +28,10 @@ public final class HTTPMediaRelay {
         self.source = source; self.credentials = credentials
     }
 
-    public static func start(source: URL, credentials: HTTPLoginCredentials? = nil, host: String? = nil) async throws -> HTTPMediaRelay {
+    public static func start(source: URL, credentials: HTTPLoginCredentials? = nil, host: String? = nil, variant: HLSVariantSelection? = nil) async throws -> HTTPMediaRelay {
         let source = try MediaInput.url(source.absoluteString)
         let relay = HTTPMediaRelay(source: source, credentials: credentials)
+        relay.variant = variant
         let server = try await MediaHTTPServer.start(file: source, host: host, hls: source.pathExtension.lowercased() == "m3u8", relay: relay)
         relay.server = server; relay.url = server.url
         if let url = server.url {
@@ -94,6 +96,11 @@ public final class HTTPMediaRelay {
     private func rewrite(_ data: Data, base: URL) throws -> Data {
         guard data.count <= 1_048_576, let text = String(data: data, encoding: .utf8),
               text.hasPrefix("#EXTM3U") else { throw HTTPLoginFailure.invalidPlaylist }
+        let filtered: Data
+        if let variant, text.contains("#EXT-X-STREAM-INF:") {
+            filtered = try HLSRenditions.selecting(variant, in: data)
+        } else { filtered = data }
+        guard let text = String(data: filtered, encoding: .utf8) else { throw HTTPLoginFailure.invalidPlaylist }
         var output: [String] = []
         finishedDiagnostics.relayManifestResponses += 1
         let lines = text.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }

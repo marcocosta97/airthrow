@@ -134,6 +134,19 @@ struct HTTPAuthenticationChecks {
         let hlsVideo = try await hlsAsset.loadTracks(withMediaType: .video)
         let hlsEvidence = await HLSVideoEvidence.hasVideo(at: hlsRelay.url!)
         try check(hlsPlayable && (!hlsVideo.isEmpty || hlsEvidence), "Native HLS reads protected segments")
+        let qualityData = Data("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=320x180,CODECS=\"avc1.64000c,mp4a.40.2\"\nstream.m3u8\n".utf8)
+        let qualityRelay = try await HTTPMediaRelay.start(source: source("/basic/qualities.m3u8"), credentials: basic, host: "127.0.0.1",
+                                                        variant: HLSRenditions.variants(qualityData)[0])
+        let (fixedData, _) = try await fetch(qualityRelay.url!)
+        let fixedMaster = String(decoding: fixedData, as: UTF8.self)
+        try check(fixedMaster.components(separatedBy: "#EXT-X-STREAM-INF:").count == 2
+                  && fixedMaster.contains("320x180") && !fixedMaster.contains("640x360")
+                  && fixedMaster.contains("#EXT-X-MEDIA:") && !fixedMaster.contains("/basic/"), "Manual quality retains one rendition and rewrites its audio group")
+        let fixedAsset = AVURLAsset(url: qualityRelay.url!)
+        let fixedVariants = try await fixedAsset.load(.variants)
+        try check(fixedVariants.count == 1 && fixedVariants[0].videoAttributes?.presentationSize.height == 180,
+                  "AVFoundation sees only the requested quality through the authenticated relay")
+        qualityRelay.stop()
         let attributes = try await HTTPMediaRelay.start(source: source("/basic/attributes.m3u8"), credentials: basic, host: "127.0.0.1")
         let (attributeBytes, _) = try await fetch(attributes.url!)
         let attributeText = String(decoding: attributeBytes, as: UTF8.self)
@@ -207,6 +220,26 @@ struct HTTPAuthenticationChecks {
         try controller.selectSource("automatic")
         try await wait { controller.snapshot.state != .loading }
         try check(controller.player === persistent && controller.httpLoginRequest == nil && controller.snapshot.state != .failed, "Source change reuses authenticated session and player")
+        let hlsController = PlaybackController(showReceiverWaitingScreen: false, resolveCandidates: { url in
+            try await HLSRenditions.expand(DirectSourceAdapter.candidates(url))
+        }, checkHTTPAuthentication: { try await HTTPAuthentication.challenge(for: $0, credentials: $1) })
+        try hlsController.load(source("/basic/controller-qualities.m3u8").absoluteString)
+        try await wait { hlsController.httpLoginRequest != nil }
+        hlsController.submitHTTPLogin(id: hlsController.httpLoginRequest!.id, username: "fixture-user", password: "fixture-pass")
+        try await wait { hlsController.snapshot.state != .loading }
+        let manualChoice = hlsController.snapshot.sources?.first { $0.isAdaptive == false && $0.quality == "180p" }?.id
+        try check(manualChoice != nil && hlsController.snapshot.state != .failed, "Authenticated direct HLS exposes manual qualities")
+        let hlsPlayer = hlsController.player
+        try hlsController.selectSource(manualChoice!)
+        try await wait { hlsController.snapshot.state != .loading }
+        try check(hlsController.player === hlsPlayer && hlsController.httpLoginRequest == nil
+                  && hlsController.snapshot.state != .failed && hlsController.snapshot.quality == "180p",
+                  "Manual HLS selection reuses player/authentication and reports the chosen quality")
+        try hlsController.selectSource("automatic")
+        try await wait { hlsController.snapshot.state != .loading }
+        try check(hlsController.snapshot.selectedSourceID == nil && hlsController.snapshot.state != .failed,
+                  "Automatic restores adaptive HLS after a manual selection")
+        hlsController.shutdown()
         controller.stop()
         try controller.load(basicURL.absoluteString)
         try await wait { controller.httpLoginRequest != nil }

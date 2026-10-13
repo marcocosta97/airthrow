@@ -6,6 +6,23 @@ import AirThrowCore
 
 /// Expose only fixed messages/codes. NSError descriptions and userInfo can contain signed URLs.
 enum MediaDiagnostics {
+    static func hlsVariants(_ variants: [AVAssetVariant]) -> [HLSVariantSummary] {
+        func positive(_ value: Double?) -> Double? {
+            value.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+        }
+        func dimension(_ value: CGFloat?) -> Int? {
+            guard let value, value.isFinite, (1...16384).contains(value) else { return nil }
+            return Int(value.rounded())
+        }
+        return variants.prefix(128).map { variant in
+            let video = variant.videoAttributes
+            return HLSVariantSummary(width: dimension(video?.presentationSize.width),
+                height: dimension(video?.presentationSize.height), frameRate: positive(video?.nominalFrameRate),
+                peakBitrate: positive(variant.peakBitRate), averageBitrate: positive(variant.averageBitRate),
+                videoCodecs: video?.codecTypes ?? [])
+        }
+    }
+
     static func numericErrors(for error: Error?) -> [MediaErrorCode] {
         var current = error as NSError?
         var result: [MediaErrorCode] = []

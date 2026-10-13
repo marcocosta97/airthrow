@@ -312,7 +312,12 @@ struct ResolverChecks {
         let remuxLocal = try await absent.resolve(localMKV)
         try check(remuxLocal.needsDelivery && remuxLocal.needsPreparation && remuxLocal.playbackPath == .remux,
                   "Unsupported local container did not select remuxing")
-        try await expect(.preparationRequired) { _ = try await absent.resolve(localHLS) }
+        do {
+            _ = try await absent.resolve(localHLS)
+            try check(false, "Local HLS was incorrectly offered as a playable file")
+        } catch let error as AppFailure {
+            try check(error.code == .unsupportedOperation, "Local HLS lost its actionable unsupported-operation result")
+        }
         let direct = URL(string: "https://cdn.example/no-extension?x=1")!
         let unknownVideo = try await absent.resolve(direct)
         try check(!unknownVideo.videoKnownPresent, "A direct URL invented video evidence")
@@ -522,8 +527,8 @@ struct ResolverChecks {
         let fallbackPolicy = MediaSelector.remuxFallback(
             for: ResolvedSource(url: URL(string: "https://media.example/native")!).withConversionPolicy(.allowVideo),
             reason: .unreadableMedia)
-        try check(fallbackPolicy?.playbackPath == .remux && fallbackPolicy?.conversionPolicy == .allowVideo,
-                  "Remux fallback lost the conversion policy")
+        try check(fallbackPolicy?.playbackPath == .remux && fallbackPolicy?.conversionPolicy == .avoidVideo,
+                  "Automatic remux fallback unexpectedly allowed video re-encoding")
 
         // Review follow-up: order-independent identities, collision handling,
         // high-resolution remux, bounded labels and candidate caps.
@@ -736,8 +741,9 @@ struct ResolverChecks {
             try check(false, "Cancelled master fetch started preparation")
         } catch is CancellationError {}
         let discovered = try await ExtractedSourceAdapter.candidatesWithHLS(metadata([adaptiveVideo, combined, separateVideo, separateAudio])) { _ in masterData }
-        try check(discovered.count == 3 && discovered.contains(where: { $0.source.needsPreparation }),
+        try check(discovered.filter({ $0.source.hlsVariant == nil }).count == 3 && discovered.contains(where: { $0.source.needsPreparation }),
                   "Adapter discarded alternatives before shared selection")
+        try check(discovered.allSatisfy { $0.discovery?.formatCount == 4 }, "Extractor inventory did not survive HLS expansion")
         try check(try MediaSelector.select(discovered).url == masterURL, "Higher-quality native HLS was not considered alongside MP4")
         let lowMaster = Data(master.replacingOccurrences(of: "1920x1080", with: "640x360").utf8)
         let higherMP4 = try await SourceResolver.selectWithHLS(metadata([adaptiveVideo, combined])) { _ in lowMaster }
@@ -780,7 +786,7 @@ struct ResolverChecks {
         let masterA = adaptiveVideo.merging(["manifest_url": "https://media.example/masterA.m3u8"]) { _, rhs in rhs }
         let masterB = adaptiveVideo.merging(["manifest_url": "https://media.example/masterB.m3u8"]) { _, rhs in rhs }
         let twinCandidates = try await ExtractedSourceAdapter.candidatesWithHLS(metadata([masterA, masterB])) { _ in masterData }
-        let twinMasters = twinCandidates.filter { $0.source.delivery == .hls }
+        let twinMasters = twinCandidates.filter { $0.source.delivery == .hls && $0.source.hlsVariant == nil }
         try check(twinMasters.count == 2 && Set(twinMasters.map(\.id)).count == 1,
                   "Identical-quality masters silently collapsed or got distinct identities")
         try await expect(.failed) {

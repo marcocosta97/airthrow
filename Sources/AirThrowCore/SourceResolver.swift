@@ -48,6 +48,7 @@ public struct ResolvedSource: Sendable {
     public let headers: [String: String]
     public let audio: MediaTrack?
     public let hlsAudioOptions: [HLSAudioOption]
+    public var hlsVariant: HLSVariantSelection?
     public let needsPreparation: Bool
     /// The source must be exposed through AirThrow's LAN server before AVPlayer
     /// can hand it to a receiver. This is independent of whether tracks are remuxed.
@@ -69,7 +70,7 @@ public struct ResolvedSource: Sendable {
     public var playbackPath: PlaybackPath { plannedPath ?? (needsPreparation ? .remux : .direct) }
     public var needsPreparationPipeline: Bool { needsPreparation || needsDelivery }
     public init(url: URL, title: String? = nil, headers: [String: String] = [:], audio: MediaTrack? = nil,
-                hlsAudioOptions: [HLSAudioOption] = [],
+                hlsAudioOptions: [HLSAudioOption] = [], hlsVariant: HLSVariantSelection? = nil,
                 needsPreparation: Bool = false, needsDelivery: Bool = false, delivery: MediaDelivery = .unknown,
                 videoKnownPresent: Bool = false, isLive: Bool = false,
                 conversionPolicy: ConversionPolicy = .avoidVideo,
@@ -77,6 +78,7 @@ public struct ResolvedSource: Sendable {
                 enhancement: VideoEnhancement = .original) {
         self.url = url; self.title = title; self.headers = headers; self.audio = audio
         self.hlsAudioOptions = hlsAudioOptions
+        self.hlsVariant = hlsVariant
         self.needsPreparation = needsPreparation || audio != nil || (plannedPath.map { $0 != .direct } ?? false)
         self.needsDelivery = needsDelivery
         self.delivery = delivery
@@ -91,7 +93,7 @@ public struct ResolvedSource: Sendable {
     /// planned path and every delivery flag are preserved.
     public func withConversionPolicy(_ policy: ConversionPolicy) -> ResolvedSource {
         var result = ResolvedSource(url: url, title: title, headers: headers, audio: audio,
-                       hlsAudioOptions: hlsAudioOptions,
+                       hlsAudioOptions: hlsAudioOptions, hlsVariant: hlsVariant,
                        needsPreparation: needsPreparation, needsDelivery: needsDelivery,
                        delivery: delivery, videoKnownPresent: videoKnownPresent, isLive: isLive,
                        conversionPolicy: policy, plannedPath: plannedPath, enhancement: enhancement)
@@ -101,7 +103,7 @@ public struct ResolvedSource: Sendable {
 
     public func withEnhancement(_ choice: VideoEnhancement) -> ResolvedSource {
         var result = ResolvedSource(url: url, title: title, headers: headers, audio: audio,
-                       hlsAudioOptions: hlsAudioOptions,
+                       hlsAudioOptions: hlsAudioOptions, hlsVariant: hlsVariant,
                        needsPreparation: needsPreparation || choice != .original,
                        needsDelivery: needsDelivery, delivery: delivery,
                        videoKnownPresent: videoKnownPresent, isLive: isLive,
@@ -113,7 +115,7 @@ public struct ResolvedSource: Sendable {
     }
 
     public func withTransportRemux(isLive: Bool) -> ResolvedSource {
-        var result = ResolvedSource(url: url, title: title, headers: headers, audio: audio, hlsAudioOptions: hlsAudioOptions,
+        var result = ResolvedSource(url: url, title: title, headers: headers, audio: audio, hlsAudioOptions: hlsAudioOptions, hlsVariant: hlsVariant,
             needsPreparation: true, needsDelivery: needsDelivery, delivery: delivery, videoKnownPresent: true, isLive: isLive,
             conversionPolicy: conversionPolicy, plannedPath: .remux, enhancement: enhancement)
         result.preparationPosition = preparationPosition
@@ -124,7 +126,7 @@ public struct ResolvedSource: Sendable {
     /// before native inspection exposes the moving seek window.
     public func withLivePresentation() -> ResolvedSource {
         var result = ResolvedSource(url: url, title: title, headers: headers, audio: audio,
-            hlsAudioOptions: hlsAudioOptions, needsPreparation: needsPreparation,
+            hlsAudioOptions: hlsAudioOptions, hlsVariant: hlsVariant, needsPreparation: needsPreparation,
             needsDelivery: needsDelivery, delivery: delivery, videoKnownPresent: videoKnownPresent,
             isLive: true, conversionPolicy: conversionPolicy, plannedPath: plannedPath, enhancement: enhancement)
         result.preparationPosition = preparationPosition
@@ -132,7 +134,7 @@ public struct ResolvedSource: Sendable {
     }
 
     public func withPreparationInput(_ url: URL) -> ResolvedSource {
-        var result = ResolvedSource(url: url, title: title, headers: headers, audio: audio, hlsAudioOptions: hlsAudioOptions,
+        var result = ResolvedSource(url: url, title: title, headers: headers, audio: audio, hlsAudioOptions: hlsAudioOptions, hlsVariant: hlsVariant,
             needsPreparation: needsPreparation, needsDelivery: needsDelivery, delivery: delivery,
             videoKnownPresent: videoKnownPresent, isLive: isLive, conversionPolicy: conversionPolicy,
             plannedPath: plannedPath, enhancement: enhancement)
@@ -191,7 +193,7 @@ public struct SourceResolver: Sendable {
             throw ResolutionFailure.failed
         }
         if let adapter = sources.adapter(for: url) { return try await adapter.candidates(for: url) }
-        return DirectSourceAdapter.candidates(url)
+        return try await HLSRenditions.expand(DirectSourceAdapter.candidates(url))
     }
 
     /// Backwards compatible: the default policy is `.avoidVideo` and no explicit
@@ -381,7 +383,7 @@ enum HLSMaster {
 
     // Attribute lists contain commas inside quoted CODECS and URI values.
     // Reject duplicate keys and unbalanced quotes rather than guessing.
-    private static func attributes(_ text: String) -> [String: String]? {
+    static func attributes(_ text: String) -> [String: String]? {
         var fields: [String] = []
         var current = ""
         var quoted = false

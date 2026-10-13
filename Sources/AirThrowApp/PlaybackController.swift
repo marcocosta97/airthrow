@@ -69,6 +69,8 @@ final class PlaybackController: ObservableObject {
     private let loadIPTVCatalog: @Sendable (URL) async throws -> IPTVCatalog
     private var httpLoginContinuation: CheckedContinuation<HTTPLoginCredentials, Error>?
     private var authenticatedMedia: HTTPMediaRelay?
+    private var variantMediaRelay: HTTPMediaRelay?
+    private var retiredVariantMediaRelay: HTTPMediaRelay?
     private var retiredAuthenticatedMedia: HTTPMediaRelay?
     private let checkHTTPAuthentication: (@MainActor @Sendable (URL, HTTPLoginCredentials?) async throws -> HTTPLoginChallenge?)?
     private var observations: [NSKeyValueObservation] = []
@@ -77,6 +79,8 @@ final class PlaybackController: ObservableObject {
     private var timeObserver: Any?
     private var loadTask: Task<Void, Never>?
     private var sampledVideo: StreamingVideoCharacteristics?
+    private var hlsVariants: [HLSVariantSummary]?
+    private var hlsVariantCount: Int?
     private var sampleInspectionStatus: PlaybackDiagnostics.SampleInspectionStatus?
     private var preparationInputRelay: HTTPMediaRelay?
     private var lastLivePipeline: LivePipelineDiagnostics?
@@ -784,6 +788,7 @@ final class PlaybackController: ObservableObject {
 
     /// Match the selected source back to its candidate to recover its quality.
     private static func qualityLabel(for source: ResolvedSource, in candidates: [MediaCandidate]) -> String? {
+        if let variant = source.hlsVariant { return qualityLabel(height: variant.height, frameRate: variant.frameRate) }
         guard let candidate = candidates.first(where: {
             $0.source.url == source.url && $0.source.audio?.url == source.audio?.url
         }) else { return nil }
@@ -791,7 +796,8 @@ final class PlaybackController: ObservableObject {
     }
 
     private static func candidatesHeight(for source: ResolvedSource, in candidates: [MediaCandidate]) -> Double? {
-        candidates.first {
+        if let variant = source.hlsVariant { return Double(variant.height) }
+        return candidates.first {
             $0.source.url == source.url && $0.source.audio?.url == source.audio?.url
         }?.height
     }
@@ -806,14 +812,15 @@ final class PlaybackController: ObservableObject {
             } ?? index
             let quality: String
             if let base = Self.qualityLabel(candidate) {
-                quality = base + (candidate.source.delivery == .hls ? " maximum (adaptive)" : "")
+                quality = base + (candidate.source.delivery == .hls && candidate.source.hlsVariant == nil ? " maximum (adaptive)" : "")
             } else { quality = "Quality unknown" }
             return SourceOptionSnapshot(id: sourceOptionID(index), quality: quality,
                 audio: candidate.audioDescription, playbackPath: candidate.source.playbackPath,
                 unavailableReason: sourceCandidates.filter({ $0.id == candidate.id }).count > 1
                     ? "This source cannot be identified uniquely. Choose Automatic."
                     : candidate.unavailableReason(for: effectiveConversionPolicy),
-                videoGroupID: "\(sourceOptionsGeneration.uuidString)-video-\(videoIndex)")
+                videoGroupID: "\(sourceOptionsGeneration.uuidString)-video-\(videoIndex)",
+                bitrate: candidate.bitrate, isAdaptive: candidate.source.delivery == .hls && candidate.source.hlsVariant == nil)
         }
     }
 
@@ -980,6 +987,11 @@ final class PlaybackController: ObservableObject {
                 self.videoEnhancement = appliedEnhancement
                 if (sourceHeight ?? 0) > 1080 { self.enhancementOutput4K = true }
                 source.preparationPosition = preferences.resumePosition
+                if let variant = source.hlsVariant {
+                    let relay = try await HTTPMediaRelay.start(source: source.url, variant: variant)
+                    guard !Task.isCancelled, self.generation == id else { relay.stop(); return }
+                    self.variantMediaRelay = relay
+                }
                 // Inspect before mounting an unknown streaming item, not while it is
                 // playing. Unknown metadata stays native; only a positively
                 // identified HEVC-in-TS HLS presentation changes its plan.
@@ -992,7 +1004,7 @@ final class PlaybackController: ObservableObject {
                     self.inspectFirstLiveInput = false
                     self.sampleInspectionStatus = .pending
                     self.refresh()
-                    let sample = await self.inspectStreamingVideo(source.url)
+                    let sample = await self.inspectStreamingVideo(self.variantMediaRelay?.url ?? source.url)
                     guard !Task.isCancelled, self.generation == id else { return }
                     self.sampledVideo = sample
                     self.sampleInspectionStatus = sample == nil ? .unavailable : .complete
@@ -1008,16 +1020,16 @@ final class PlaybackController: ObservableObject {
                 self.selectedQuality = Self.qualityLabel(for: source, in: self.sourceCandidates)
                 if let sourceTitle = source.title, self.selectedIPTVChannelID == nil { self.title = sourceTitle }
                 self.resolving = false
-                var playbackURL = source.url
+                var playbackURL = self.variantMediaRelay?.url ?? source.url
                 if source.needsPreparationPipeline {
                     guard let prepareSource = self.prepareSource else { throw PreparationFailure.unsupported }
                     self.preparing = true
                     self.timeoutTask?.cancel()
                     self.refresh()
-                    var preparationInput = source
+                    var preparationInput = self.variantMediaRelay?.url.map { source.withPreparationInput($0) } ?? source
                     // Keep protected origins out of helper arguments. The
                     // app owns upstream requests; helpers see an opaque loopback route.
-                    if source.plannedPath == .remux, source.videoKnownPresent,
+                    if self.variantMediaRelay == nil, source.plannedPath == .remux, source.videoKnownPresent,
                        !source.url.isFileURL, source.headers.isEmpty, source.audio == nil {
                         let relay = try await HTTPMediaRelay.start(source: source.url, host: "127.0.0.1")
                         guard !Task.isCancelled, self.generation == id, let local = relay.url else {
@@ -1054,6 +1066,15 @@ final class PlaybackController: ObservableObject {
                 let asset = AVURLAsset(url: playbackURL)
                 self.loadingAsset = asset
                 let playable = try await asset.load(.isPlayable)
+                if ProcessInfo.processInfo.environment["AIRTHROW_DIAGNOSE_HLS_VARIANTS"] == "1",
+                   source.playbackPath == .direct, source.delivery == .hls {
+                    // Ask the installed asset for advertised attributes; never
+                    // access a variant URL or export manifest/provider text.
+                    let variants = try? await asset.load(.variants)
+                    guard !Task.isCancelled, self.generation == id else { return }
+                    self.hlsVariantCount = variants?.count
+                    self.hlsVariants = variants.map(MediaDiagnostics.hlsVariants)
+                }
                 let video = try await asset.loadTracks(withMediaType: .video)
                 // HLS may expose alternate audio as media-selection options.
                 // An inspection error is unknown, not proof of a silent source.
@@ -1817,6 +1838,12 @@ final class PlaybackController: ObservableObject {
         waitingScreen.stop(keepingItemForReplacement: keepPlayerItem)
         clearHTTPLogin()
         selectedIPTVChannelID = nil
+        if let relay = variantMediaRelay {
+            if keepPlayerItem, mediaItem != nil, player.currentItem === mediaItem {
+                retiredVariantMediaRelay?.stop(); retiredVariantMediaRelay = relay
+            } else { relay.stop() }
+            variantMediaRelay = nil
+        }
         if let authenticatedMedia {
             if keepPlayerItem, mediaItem != nil, player.currentItem === mediaItem {
                 retiredAuthenticatedMedia?.stop(); retiredAuthenticatedMedia = authenticatedMedia
@@ -1828,6 +1855,7 @@ final class PlaybackController: ObservableObject {
         loadTask?.cancel(); loadTask = nil
         sampledVideo = nil
         sampleInspectionStatus = nil
+        hlsVariants = nil; hlsVariantCount = nil
         preparationInputRelay?.stop(); preparationInputRelay = nil
         lastLivePipeline = nil
         lastFailureDiagnostics = nil
@@ -1863,6 +1891,7 @@ final class PlaybackController: ObservableObject {
             stopPreparedMedia()
             stopRetiredPreparedMedia()
             retiredAuthenticatedMedia?.stop(); retiredAuthenticatedMedia = nil
+            retiredVariantMediaRelay?.stop(); retiredVariantMediaRelay = nil
         }
         loading = false; resolving = false; preparing = false; websiteURL = nil; retriedResolution = false
         selectedSource = nil
@@ -1958,6 +1987,7 @@ final class PlaybackController: ObservableObject {
         loading = false
         clearHTTPLogin()
         authenticatedMedia?.stop(); authenticatedMedia = nil
+        variantMediaRelay?.stop(); variantMediaRelay = nil
         failureReason = reason
         failure = message ?? reason.message
         loadTask?.cancel(); loadTask = nil
@@ -1976,6 +2006,7 @@ final class PlaybackController: ObservableObject {
         timeoutTask?.cancel()
         if !restoreWaitingScreen { player.replaceCurrentItem(with: nil) }
         retiredAuthenticatedMedia?.stop(); retiredAuthenticatedMedia = nil
+        retiredVariantMediaRelay?.stop(); retiredVariantMediaRelay = nil
         stopRetiredPreparedMedia()
         loadingAsset?.cancelLoading(); loadingAsset = nil
         mediaItem = nil
@@ -2174,10 +2205,11 @@ final class PlaybackController: ObservableObject {
                 restoreProbePosition()
             }
         }
-        if (retiredPreparedMedia != nil || retiredAuthenticatedMedia != nil), !loading, item?.status == .readyToPlay,
+        if (retiredPreparedMedia != nil || retiredAuthenticatedMedia != nil || retiredVariantMediaRelay != nil), !loading, item?.status == .readyToPlay,
            !probing && !probeRestoring && !probeWhenReady {
             stopRetiredPreparedMedia()
             retiredAuthenticatedMedia?.stop(); retiredAuthenticatedMedia = nil
+            retiredVariantMediaRelay?.stop(); retiredVariantMediaRelay = nil
         }
         if playWhenReady, pendingResumePosition == nil, !loading, item?.status == .readyToPlay, !probeRestoring && !probeRestoreFailed {
             if external && !probing {
@@ -2278,6 +2310,10 @@ final class PlaybackController: ObservableObject {
         // A new video hides the retained old item's clock; probes keep it stable.
         next.position = pendingSeek ?? pendingResumePosition ?? ((item == nil || loading || resolving || preparing) ? nil
             : ((probing || probeRestoring) ? probePosition : finite(player.currentTime().seconds)))
+        if let size = item?.presentationSize, size.width.isFinite, size.height.isFinite,
+           (1...16384).contains(size.width), (1...16384).contains(size.height) {
+            next.reportedVideoWidth = Int(size.width.rounded()); next.reportedVideoHeight = Int(size.height.rounded())
+        }
         next.seekableRanges = (item?.seekableTimeRanges ?? []).compactMap {
             let range = $0.timeRangeValue
             guard let start = finite(range.start.seconds), let end = finite(CMTimeRangeGetEnd(range).seconds), end > start else { return nil }
@@ -2290,6 +2326,7 @@ final class PlaybackController: ObservableObject {
             next.liveOffset = max(0, edge - position)
             next.recommendedLiveOffset = item.flatMap { finite($0.recommendedTimeOffsetFromLive.seconds) }
         }
+        next.liveEdgeUpdateInterval = LivePolicy.edgeUpdateInterval(previous: snapshot, current: next)
         if let item {
             var diagnostics = PlaybackDiagnostics()
             diagnostics.itemStatus = switch item.status {
@@ -2312,6 +2349,9 @@ final class PlaybackController: ObservableObject {
             }
             diagnostics.videoConfirmed = hasVideo
             diagnostics.sampledVideo = sampledVideo
+            diagnostics.sourceDiscovery = sourceCandidates.compactMap(\.discovery).first
+            diagnostics.hlsVariantCount = hlsVariantCount
+            diagnostics.hlsVariants = hlsVariants
             diagnostics.sampleInspectionStatus = sampleInspectionStatus
             diagnostics.livePipeline = lastLivePipeline
             diagnostics.waitingReason = waitingReason(player.reasonForWaitingToPlay)
