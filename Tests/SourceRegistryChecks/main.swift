@@ -141,6 +141,12 @@ private struct SourceRegistryChecks {
         let direct = try await resolver.resolve(directURL)
         try check(direct.url == directURL, "Recognizable media stopped bypassing helper")
         try check(!FileManager.default.fileExists(atPath: arguments.path), "Direct media invoked the website extractor")
+        let secret = URL(string: "https://provider.example/user/fixture-pass/123")!
+        let secretResult = try await resolver.resolve(secret)
+        try check(secretResult.url == secret && !secretResult.videoKnownPresent,
+                  "Credential-shaped stream was not kept as the original direct input")
+        try check(!FileManager.default.fileExists(atPath: arguments.path),
+                  "Credential-shaped stream was passed to yt-dlp")
 
         let absent = SourceResolver(environment: ["AIRTHROW_YTDLP": "/missing/helper"])
         let native = try await absent.resolve(url)

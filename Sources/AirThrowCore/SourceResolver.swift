@@ -134,6 +134,12 @@ public struct ResolvedSource: Sendable {
     }
 
     public func withPreparationInput(_ url: URL) -> ResolvedSource {
+        withHelperInputs(url: url, headers: headers, audio: audio)
+    }
+
+    /// Replacement inputs for a helper process. Headers are whatever the helper
+    /// may see; callers clearing them have already moved the origin behind a relay.
+    func withHelperInputs(url: URL, headers: [String: String], audio: MediaTrack?) -> ResolvedSource {
         var result = ResolvedSource(url: url, title: title, headers: headers, audio: audio, hlsAudioOptions: hlsAudioOptions, hlsVariant: hlsVariant,
             needsPreparation: needsPreparation, needsDelivery: needsDelivery, delivery: delivery,
             videoKnownPresent: videoKnownPresent, isLive: isLive, conversionPolicy: conversionPolicy,

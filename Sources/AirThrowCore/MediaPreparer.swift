@@ -54,13 +54,22 @@ public final class PreparedMedia {
     private var workspace: PreparationWorkspace?
     private var cache: CachedHLS?
     private var drainingCache: CachedHLS?
+    /// Loopback relays standing in for secret origin URLs. Helpers only see these.
+    private var upstream: PreparationUpstream?
     fileprivate init(server: MediaHTTPServer, workspace: PreparationWorkspace? = nil,
                      sourceDuration: Double? = nil, playbackPath: PlaybackPath = .remux,
                      videoHeight: Int? = nil, videoFrameRate: Double? = nil) {
         self.server = server; self.workspace = workspace; self.sourceDuration = sourceDuration
         self.playbackPath = playbackPath
         self.videoHeight = videoHeight; self.videoFrameRate = videoFrameRate
+        self.upstream = PreparationPrivacy.upstream
         url = server.url!
+    }
+
+    /// The preparing task owns the relays until this item does. Init also reads
+    /// the task value; this covers a hop where that value is no longer visible.
+    fileprivate func retain(_ upstream: PreparationUpstream) {
+        if self.upstream == nil { self.upstream = upstream }
     }
 
     fileprivate func produce(executable: String, arguments: [String], workspace: PreparationWorkspace,
@@ -211,6 +220,7 @@ public final class PreparedMedia {
         onFailure = nil
         onReadyRangesChanged = nil
         progressNotification?.cancel(); progressNotification = nil
+        upstream?.stop()
         server.stop()
         cancelProduction()
         cache?.stop()
@@ -362,6 +372,42 @@ public enum PreparationMode: Sendable {
     case progressiveHLS, completeFile
 }
 
+/// Keeps secret origin URLs inside this process while ffmpeg and ffprobe read a loopback copy.
+@MainActor
+final class PreparationUpstream {
+    private var relays: [HTTPMediaRelay] = []
+
+    func localized(_ source: ResolvedSource) async throws -> ResolvedSource {
+        let url = try await loopback(source.url)
+        var audio = source.audio
+        if let track = source.audio {
+            let audioURL = try await loopback(track.url)
+            if audioURL != track.url { audio = MediaTrack(url: audioURL) }
+        }
+        guard url != source.url || audio?.url != source.audio?.url else { return source }
+        let headers = url == source.url ? source.headers : [:]
+        return source.withHelperInputs(url: url, headers: headers, audio: audio)
+    }
+
+    func stop() {
+        for relay in relays { relay.stop() }
+        relays.removeAll()
+    }
+
+    private func loopback(_ url: URL) async throws -> URL {
+        guard MediaURLSecrets.contains(url), !url.isFileURL else { return url }
+        let relay = try await HTTPMediaRelay.start(source: url, host: "127.0.0.1")
+        guard let local = relay.url else { relay.stop(); throw PreparationFailure.unavailable }
+        relays.append(relay)
+        try Task.checkCancellation()
+        return local
+    }
+}
+
+private enum PreparationPrivacy {
+    @TaskLocal static var upstream: PreparationUpstream?
+}
+
 public struct MediaPreparer: Sendable {
     private let environment: [String: String]
     private let maximumBytes: Int64
@@ -385,6 +431,21 @@ public struct MediaPreparer: Sendable {
     /// a control surface can label a job that has not produced media yet.
     public func prepare(_ source: ResolvedSource, mode: PreparationMode? = nil,
                         onPlan: (@Sendable (PlaybackPath) async -> Void)? = nil) async throws -> PreparedMedia {
+        let upstream = PreparationUpstream()
+        do {
+            let prepared = try await PreparationPrivacy.$upstream.withValue(upstream) {
+                try await self.prepareBody(source, mode: mode, onPlan: onPlan)
+            }
+            await prepared.retain(upstream)
+            return prepared
+        } catch {
+            await upstream.stop()
+            throw error
+        }
+    }
+
+    private func prepareBody(_ source: ResolvedSource, mode: PreparationMode? = nil,
+                             onPlan: (@Sendable (PlaybackPath) async -> Void)? = nil) async throws -> PreparedMedia {
         // Publish a small verified buffer, then keep producing on the same
         // session. Explicit complete-file delivery remains available for callers
         // that need the finalized file before handoff.
@@ -416,6 +477,11 @@ public struct MediaPreparer: Sendable {
             // network inputs as either a file or HLS; protocol restrictions
             // remain the same for every remote input.
             let allowHLSInput = source.delivery != .file
+            var source = source
+            if let upstream = PreparationPrivacy.upstream,
+               MediaURLSecrets.contains(source.url) || source.audio.map({ MediaURLSecrets.contains($0.url) }) == true {
+                source = try await upstream.localized(source)
+            }
             let videoInput = try await probe(source.url, headers: source.headers, executable: ffprobe,
                                              hls: allowHLSInput)
             let audioInput: Probe

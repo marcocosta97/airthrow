@@ -26,6 +26,12 @@ public struct YTDLPSourceAdapter: SourceAdapter {
 
     public func candidates(for url: URL) async throws -> [MediaCandidate] {
         try Task.checkCancellation()
+        // Extensionless IPTV and Xtream addresses often carry the account in the
+        // path. Probing them natively is fine; passing them to yt-dlp would put
+        // the account on the helper's command line.
+        if MediaURLSecrets.contains(url) {
+            return DirectSourceAdapter.candidates(url)
+        }
         let finder = HelperExecutables(environment: environment)
         guard let helper = finder.executable("yt-dlp", override: "AIRTHROW_YTDLP") else {
             return DirectSourceAdapter.candidates(url)
