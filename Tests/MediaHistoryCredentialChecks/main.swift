@@ -72,6 +72,26 @@ private struct Failure: Error { let message: String }
         for n in 0..<MediaHistoryStore.maximumEntries { store.record(URL(string: "https://public.example/\(n).mp4")!, title: "Video \(n)", kind: .video) }
         do { _ = try backend.source(reference: evicted); throw Failure(message: "Evicted secret retained") }
         catch MediaHistoryCredentialFailure.unavailable { try check(true, "History eviction deletes unreferenced credentials") }
+        store.clearIncludingPinned()
+        let stream = URL(string: "https://provider.example/live/private%2Buser/fixture-pass/11.m3u8")!
+        store.record(stream, title: "Channel", kind: .video)
+        let streamEntry = store.entries[0]
+        let streamSaved = String(decoding: defaults.data(forKey: "mediaHistory.v1")!, as: UTF8.self)
+        try check(streamEntry.credentialReference != nil && streamEntry.url.path == "/live/11.m3u8"
+                  && !streamSaved.contains("private") && !streamSaved.contains("fixture-pass"),
+                  "Stream path credentials stay out of preferences")
+        let reopenedStream = MediaHistoryStore(defaults: defaults, credentials: backend)
+        try check(try reopenedStream.source(for: reopenedStream.entries[0]) == stream,
+                  "Stream path credentials reload from the secure store")
+        store.record(URL(string: "https://provider.example/live/other-user/other-pass/11.m3u8")!, title: "Other account", kind: .video)
+        try check(store.entries.count == 2, "Same channel id on different accounts stays distinct")
+        store.record(URL(string: "https://provider.example/user/fixture-pass/123")!, title: "Extensionless", kind: .video)
+        try check(store.entries[0].credentialReference != nil && store.entries[0].url.path == "/123",
+                  "Extensionless credential paths are stored without their secrets")
+        defaults.set(try JSONEncoder().encode([MediaHistoryEntry(id: UUID(), url: stream, title: "Old stream", kind: .video, openedAt: Date())]), forKey: "mediaHistory.v1")
+        let droppedStream = MediaHistoryStore(defaults: defaults, credentials: backend)
+        try check(droppedStream.entries.isEmpty && defaults.data(forKey: "mediaHistory.v1") == nil,
+                  "Legacy plaintext stream credentials are discarded without migration")
         if CommandLine.arguments.contains("--keychain") {
         let keychain = KeychainMediaHistoryCredentials(service: suite, allowInteraction: false)
         let testReference = UUID().uuidString

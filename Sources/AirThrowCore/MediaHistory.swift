@@ -63,6 +63,8 @@ public final class MediaHistoryStore {
         credentialError = nil
         let protected = Self.containsCredentials(url)
         let storedURL = protected ? Self.sanitized(url) : url
+        // A failed redaction must not fall back to the original secret URL.
+        if protected && Self.containsCredentials(storedURL) { return }
         let previous = entries.first { entry in
             guard entry.url == storedURL else { return false }
             if !protected { return entry.credentialReference == nil }
@@ -140,22 +142,8 @@ public final class MediaHistoryStore {
     }
     private static func identity(_ url: URL, reference: String?) -> String { reference ?? url.absoluteString }
     private static func validReference(_ value: String) -> Bool { UUID(uuidString: value) != nil }
-    private static func containsCredentials(_ url: URL) -> Bool {
-        URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.contains {
-            ["username", "password"].contains($0.name.lowercased())
-        } == true
-    }
-    private static func sanitized(_ url: URL) -> URL {
-        var parts = URLComponents(url: url, resolvingAgainstBaseURL: false)!
-        // Preserve the exact noncredential query encoding (including literal plus).
-        parts.percentEncodedQuery = parts.percentEncodedQuery?.split(separator: "&", omittingEmptySubsequences: false)
-            .filter { field in
-                let name = field.split(separator: "=", maxSplits: 1).first.map(String.init) ?? ""
-                return !["username", "password"].contains((name.removingPercentEncoding ?? name).lowercased())
-            }.joined(separator: "&")
-        if parts.percentEncodedQuery?.isEmpty == true { parts.percentEncodedQuery = nil }
-        return parts.url!
-    }
+    private static func containsCredentials(_ url: URL) -> Bool { MediaURLSecrets.contains(url) }
+    private static func sanitized(_ url: URL) -> URL { MediaURLSecrets.sanitized(url) }
     private static func precedes(_ lhs: MediaHistoryEntry, _ rhs: MediaHistoryEntry) -> Bool {
         if lhs.isPinned != rhs.isPinned { return lhs.isPinned }
         return lhs.openedAt > rhs.openedAt
