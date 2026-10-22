@@ -4,16 +4,28 @@ import AppKit
 import AirThrowCore
 #endif
 
-struct XtreamPanel: View {
+struct XtreamPanel: View, Equatable {
     @ObservedObject var library: XtreamLibrary
-    @ObservedObject var controller: PlaybackController
+    /// Not observed. Playback snapshots update several times a second and must
+    /// not rebuild this catalog; the parent compares the fields below instead.
+    let controller: PlaybackController
+    /// Same library instance means a playback snapshot can skip rebuilding this panel.
+    /// Library publishes its own changes through the observed object.
+    let libraryIdentity: ObjectIdentifier
+
+    init(library: XtreamLibrary, controller: PlaybackController) {
+        self.library = library
+        self.controller = controller
+        self.libraryIdentity = ObjectIdentifier(library)
+    }
     @SwiftUI.State private var season: Int?
     @SwiftUI.State private var accountVisible = false
     @FocusState private var searchFocused: Bool
 
-    private var items: [XtreamItem] {
-        let terms = library.search.split(whereSeparator: \.isWhitespace)
-        return library.listing.items.filter { item in terms.allSatisfy { item.name.localizedStandardContains($0) } }
+    private var items: [XtreamItem] { library.visibleItems }
+
+    nonisolated static func == (lhs: XtreamPanel, rhs: XtreamPanel) -> Bool {
+        lhs.libraryIdentity == rhs.libraryIdentity
     }
 
     var body: some View {
@@ -64,34 +76,11 @@ struct XtreamPanel: View {
                 }.padding(12)
             } else {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(items) { item in
-                            HStack(spacing: 0) {
-                            Button {
-                                searchFocused = false
-                                if library.section == .live { play(item) } else { library.select(item) }
-                            } label: {
-                                HStack(spacing: 8) {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(item.name).lineLimit(2)
-                                        if let category = library.categories.first(where: { $0.id == item.categoryID }) {
-                                            Text(category.name).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                                        }
-                                    }
-                                    Spacer(minLength: 0)
-                                    Image(systemName: library.isPlaying(item.id) ? "checkmark" : library.section == .live ? "play.fill" : "chevron.right")
-                                        .font(.caption).foregroundStyle(.secondary).accessibilityHidden(true)
-                                }.frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(.horizontal, 8).padding(.vertical, 6).contentShape(Rectangle())
-                            }.buttonStyle(.plain).help(library.section == .live ? "Load \(item.name)" : "Show details for \(item.name)")
-                            if library.section == .live {
-                                Button { searchFocused = false; library.select(item) } label: { Image(systemName: "info.circle") }
-                                    .buttonStyle(.plain).padding(.trailing, 8).help("Programme guide for \(item.name)")
-                                    .accessibilityLabel("Programme guide for \(item.name)")
-                            }
-                            }
-                        }
-                    }.scrollTargetLayout()
+                    XtreamTitleList(revision: library.visibleRevision, items: items,
+                                    categoryNames: library.categoryNames, playingID: library.playingID,
+                                    section: library.section, resignSearch: { searchFocused = false },
+                                    play: play, select: { library.select($0) })
+                        .equatable()
                 }
                 .scrollPosition(id: Binding(get: { library.scrollID }, set: { library.updateScroll($0, for: key) }), anchor: .top)
                 .id(key)
@@ -227,6 +216,52 @@ struct XtreamPanel: View {
             try controller.selectXtreamMedia(library.playbackURL(item), title: item.name, isLive: library.section == .live)
             library.didPlay(item.id)
         } catch { controller.displayError(error) }
+    }
+}
+
+private struct XtreamTitleList: View, Equatable {
+    let revision: Int
+    let items: [XtreamItem]
+    let categoryNames: [String: String]
+    let playingID: String?
+    let section: XtreamSection
+    let resignSearch: () -> Void
+    let play: (XtreamItem) -> Void
+    let select: (XtreamItem) -> Void
+
+    nonisolated static func == (lhs: XtreamTitleList, rhs: XtreamTitleList) -> Bool {
+        lhs.revision == rhs.revision && lhs.playingID == rhs.playingID && lhs.section == rhs.section
+    }
+
+    var body: some View {
+        LazyVStack(alignment: .leading, spacing: 0) {
+            ForEach(items) { item in
+                HStack(spacing: 0) {
+                    Button {
+                        resignSearch()
+                        if section == .live { play(item) } else { select(item) }
+                    } label: {
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.name).lineLimit(2)
+                                if let categoryID = item.categoryID, let category = categoryNames[categoryID] {
+                                    Text(category).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                }
+                            }
+                            Spacer(minLength: 0)
+                            Image(systemName: playingID == section.rawValue + "/" + item.id ? "checkmark" : section == .live ? "play.fill" : "chevron.right")
+                                .font(.caption).foregroundStyle(.secondary).accessibilityHidden(true)
+                        }.frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 8).padding(.vertical, 6).contentShape(Rectangle())
+                    }.buttonStyle(.plain).help(section == .live ? "Load \(item.name)" : "Show details for \(item.name)")
+                    if section == .live {
+                        Button { resignSearch(); select(item) } label: { Image(systemName: "info.circle") }
+                            .buttonStyle(.plain).padding(.trailing, 8).help("Programme guide for \(item.name)")
+                            .accessibilityLabel("Programme guide for \(item.name)")
+                    }
+                }
+            }
+        }.scrollTargetLayout()
     }
 }
 

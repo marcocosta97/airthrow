@@ -27,7 +27,12 @@ final class XtreamLibrary: ObservableObject {
     }
     var catalogKey: CatalogKey { CatalogKey(section: section, categoryID: categoryID) }
     @Published private(set) var search = ""
-    @Published private(set) var scrollID: String?
+    /// Scroll restoration only. Publishing it made every scroll event refilter the catalog.
+    private(set) var scrollID: String?
+    private(set) var visibleItems: [XtreamItem] = []
+    @Published private(set) var visibleRevision = 0
+    private(set) var categoryNames: [String: String] = [:]
+    private var visibleRefresh: Task<Void, Never>?
     private var categoryCache: [XtreamSection: [XtreamCategory]] = [:]
     private var listingCache: [CatalogKey: XtreamListing] = [:]
     private var rememberedCategories: [XtreamSection: String] = [:]
@@ -44,7 +49,7 @@ final class XtreamLibrary: ObservableObject {
         self.client = XtreamClient(account: client.account, timeZoneIdentifier: accountInfo.timeZoneIdentifier)
         self.accountInfo = accountInfo
     }
-    deinit { task?.cancel(); detailTask?.cancel() }
+    deinit { task?.cancel(); detailTask?.cancel(); visibleRefresh?.cancel() }
 
     func switchSection(_ section: XtreamSection) {
         browse(section, categoryID: rememberedCategories[section])
@@ -52,6 +57,14 @@ final class XtreamLibrary: ObservableObject {
     func setSearch(_ value: String) {
         search = value; searches[section] = value
         scrollID = nil; positions[catalogKey] = nil
+        visibleRefresh?.cancel()
+        let terms = value.split(whereSeparator: \.isWhitespace)
+        guard !terms.isEmpty else { rebuildVisible(); return }
+        visibleRefresh = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled, let self else { return }
+            self.rebuildVisible()
+        }
     }
     func updateScroll(_ value: String?, for key: CatalogKey) {
         // A removed scroll view can publish a final update after changing tabs.
@@ -63,7 +76,7 @@ final class XtreamLibrary: ObservableObject {
     }
     func browse(_ section: XtreamSection, categoryID: String? = nil, forceRefresh: Bool = false) {
         let changed = self.section != section
-        task?.cancel(); generation = UUID()
+        task?.cancel(); visibleRefresh?.cancel(); generation = UUID()
         let id = generation
         self.section = section; self.categoryID = categoryID
         rememberedCategories[section] = categoryID
@@ -74,10 +87,11 @@ final class XtreamLibrary: ObservableObject {
             categoryCache[section] = nil
             listingCache = listingCache.filter { $0.key.section != section }
         }
-        if let cachedCategories = categoryCache[section] { categories = cachedCategories }
-        else if changed { categories = [] }
+        if let cachedCategories = categoryCache[section] { storeCategories(cachedCategories) }
+        else if changed { storeCategories([]) }
         if let cached = listingCache[catalogKey] {
             listing = cached; loading = false; task = nil
+            rebuildVisible()
             return
         }
         // An all-titles response can also answer subsequent category requests locally.
@@ -85,10 +99,12 @@ final class XtreamLibrary: ObservableObject {
         if let categoryID, let all = listingCache[allKey] {
             listing = XtreamListing(items: all.items.filter { $0.categoryID == categoryID }, skipped: 0, truncated: false)
             loading = false; task = nil
+            rebuildVisible()
             return
         }
         loading = true
         listing = XtreamListing(items: [], skipped: 0, truncated: false)
+        rebuildVisible()
         let client = client, key = catalogKey, cachedCategories = categoryCache[section]
         task = Task { [weak self] in
             do {
@@ -103,9 +119,10 @@ final class XtreamLibrary: ObservableObject {
                         }
                         guard !Task.isCancelled, let self, self.generation == id else { return }
                         if let saved {
-                            self.categories = saved.categories; self.categoryCache[section] = saved.categories
+                            self.storeCategories(saved.categories); self.categoryCache[section] = saved.categories
                             self.listingCache[savedKey] = saved.listing
                             self.listing = savedKey == key ? saved.listing : XtreamListing(items: saved.listing.items.filter { $0.categoryID == categoryID }, skipped: 0, truncated: false)
+                            self.rebuildVisible()
                             self.loading = false; self.task = nil
                             return
                         }
@@ -117,11 +134,12 @@ final class XtreamLibrary: ObservableObject {
                 else { categories = try await client.categories(section) }
                 guard !Task.isCancelled, let self, self.generation == id else { return }
                 // Keep categories usable even if the all-titles response is too large.
-                self.categories = categories; self.categoryCache[section] = categories
+                self.storeCategories(categories); self.categoryCache[section] = categories
                 let result = try await listing
                 guard !Task.isCancelled, self.generation == id else { return }
                 self.listingCache[key] = result
                 self.listing = result
+                self.rebuildVisible()
                 if let store = self.catalogStore {
                     await store.save(.init(categories: categories, listing: result), account: client.account, section: section, categoryID: categoryID)
                 }
@@ -175,6 +193,22 @@ final class XtreamLibrary: ObservableObject {
         detailTask?.cancel(); detailTask = nil; detailGeneration = UUID()
         selected = nil; details = nil; guide = []; detailError = nil; detailLoading = false
     }
+    private func storeCategories(_ categories: [XtreamCategory]) {
+        self.categories = categories
+        var names: [String: String] = [:]
+        names.reserveCapacity(categories.count)
+        for category in categories { names[category.id] = category.name }
+        categoryNames = names
+    }
+
+    private func rebuildVisible() {
+        let terms = search.split(whereSeparator: \.isWhitespace)
+        visibleItems = terms.isEmpty ? listing.items : listing.items.filter { item in
+            terms.allSatisfy { item.name.localizedStandardContains($0) }
+        }
+        visibleRevision &+= 1
+    }
+
     func playbackURL(_ item: XtreamItem) throws -> URL {
         guard section != .series else { throw XtreamFailure.invalidResponse }
         let format = client.account.format.rawValue

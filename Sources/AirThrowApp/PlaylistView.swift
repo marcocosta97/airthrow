@@ -14,9 +14,10 @@ struct PlaylistPanel: View {
                 InspectorHeader(title: "Playlist", back: { controller.inspectorPage = .history })
                 PlaylistView(queue: queue)
             } else if controller.inspectorPage == .xtream, let library = controller.xtreamLibrary {
-                XtreamPanel(library: library, controller: controller)
+                XtreamPanel(library: library, controller: controller).equatable()
             } else if controller.inspectorPage == .channels, controller.iptvCatalog != nil {
-                IPTVPanel(controller: controller)
+                IPTVPanel(controller: controller, catalogID: controller.iptvCatalog?.id,
+                          selectedID: controller.selectedIPTVChannelID).equatable()
             } else {
                 HistoryPanel(controller: controller)
             }
