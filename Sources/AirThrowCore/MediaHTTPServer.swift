@@ -35,6 +35,7 @@ public final class MediaHTTPServer {
         var loading: Task<Void, Never>?
         var loadedResource: URL?
         var stream: HTTPRelayStream?
+        var peer = ""
         init(_ connection: NWConnection) { self.connection = connection }
         deinit { try? file?.close(); timeout?.cancel(); loading?.cancel() }
     }
@@ -157,13 +158,36 @@ public final class MediaHTTPServer {
         for client in clients.values { client.connection.cancel(); client.timeout?.cancel() }
     }
 
+    static let maximumConnections = 8
+    static let maximumConnectionsPerPeer = 4
+    static let silentRequestSeconds = 2.0
+
+    static func allowsConnection(total: Int, fromSamePeer: Int) -> Bool {
+        total < maximumConnections && fromSamePeer < maximumConnectionsPerPeer
+    }
+
     private func accept(_ connection: NWConnection) {
-        guard !stopped, clients.count < 8 else { connection.cancel(); return }
+        let peer = Self.peerAddress(connection)
+        let fromPeer = clients.values.filter { $0.peer == peer }.count
+        guard !stopped, Self.allowsConnection(total: clients.count, fromSamePeer: fromPeer) else {
+            connection.cancel(); return
+        }
         let client = Client(connection)
+        client.peer = peer
         clients[ObjectIdentifier(client)] = client
         connection.start(queue: .main)
-        armTimeout(client)
+        armTimeout(client, seconds: Self.silentRequestSeconds)
         receive(client)
+    }
+
+    private static func peerAddress(_ connection: NWConnection) -> String {
+        guard case .hostPort(let host, _) = connection.endpoint else { return "" }
+        switch host {
+        case .ipv4(let address): return "\(address)"
+        case .ipv6(let address): return "\(address)"
+        case .name(let name, _): return name
+        @unknown default: return ""
+        }
     }
 
     private func armTimeout(_ client: Client, seconds: Double = 15) {
@@ -188,7 +212,10 @@ public final class MediaHTTPServer {
         client.connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, complete, error in
             MainActor.assumeIsolated {
                 guard let self, !self.stopped, self.clients[ObjectIdentifier(client)] != nil else { return }
-                if let data { client.request.append(data) }
+                if let data {
+                    client.request.append(data)
+                    if !data.isEmpty { self.armTimeout(client) }
+                }
                 guard client.request.count <= 8192 else { self.reply(client, code: "431 Request Header Fields Too Large"); return }
                 if let end = client.request.range(of: Data("\r\n\r\n".utf8)) {
                     self.respond(client, header: client.request[..<end.lowerBound])

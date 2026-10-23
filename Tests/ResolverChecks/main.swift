@@ -368,6 +368,11 @@ struct ResolverChecks {
                   && RelayAddress.allows(URL(string: "http://127.0.0.8/a.ts")!, from: loopbackPage)
                   && !RelayAddress.allows(URL(string: "http://192.168.1.9/a.ts")!, from: loopbackPage),
                   "Relay accepted a private or loopback target from another network class")
+        try check(MediaHTTPServer.silentRequestSeconds == 2
+                  && MediaHTTPServer.allowsConnection(total: 7, fromSamePeer: 3)
+                  && !MediaHTTPServer.allowsConnection(total: 8, fromSamePeer: 0)
+                  && !MediaHTTPServer.allowsConnection(total: 2, fromSamePeer: 4),
+                  "Media server admission still allows a silent peer to hold every slot")
         try await expect(.unsupportedPage) { _ = try await absent.resolve(URL(string: "https://youtube.com/playlist?list=x")!) }
         try await expect(.unavailable) { _ = try await absent.resolve(page) }
         print("PASS local delivery selection, direct bypass, exact hosts, video-only normalization and missing helpers")
