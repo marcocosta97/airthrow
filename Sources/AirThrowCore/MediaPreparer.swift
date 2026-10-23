@@ -256,9 +256,9 @@ final class PreparationWorkspace: @unchecked Sendable {
         directory = Self.root.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                attributes: [.posixPermissions: 0o700])
-        lease = open(directory.appendingPathComponent("lease").path, O_CREAT | O_RDWR | O_NOFOLLOW, 0o600)
-        guard lease >= 0, flock(lease, LOCK_EX | LOCK_NB) == 0 else {
-            if lease >= 0 { close(lease) }
+        lease = open(directory.appendingPathComponent("lease").path,
+                     O_CREAT | O_RDWR | O_EXLOCK | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW, 0o600)
+        guard lease >= 0 else {
             try? FileManager.default.removeItem(at: directory)
             throw PreparationFailure.failed
         }
@@ -325,11 +325,15 @@ final class PreparationWorkspace: @unchecked Sendable {
 
     static func cleanAbandoned() {
         let fm = FileManager.default
-        guard let entries = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isSymbolicLinkKey]) else { return }
+        guard let entries = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isSymbolicLinkKey, .contentModificationDateKey]) else { return }
         for entry in entries where UUID(uuidString: entry.lastPathComponent) != nil {
             guard (try? entry.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == false else { continue }
             let fd = open(entry.appendingPathComponent("lease").path, O_RDWR | O_NOFOLLOW)
-            guard fd >= 0 else { continue }
+            if fd < 0 {
+                let modified = (try? entry.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                if Date().timeIntervalSince(modified) > 60 { try? fm.removeItem(at: entry) }
+                continue
+            }
             if flock(fd, LOCK_EX | LOCK_NB) == 0 { try? fm.removeItem(at: entry) }
             close(fd)
         }
