@@ -16,6 +16,19 @@ struct HTTPLoginRequest: Identifiable {
 
 enum InspectorPage { case history, channels, playlist, xtream }
 
+private final class ShutdownResume: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Never>?
+    init(_ continuation: CheckedContinuation<Void, Never>) { self.continuation = continuation }
+    func finish() {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume()
+    }
+}
+
 @MainActor
 final class PlaybackController: ObservableObject {
     private struct LoadPreferences {
@@ -2430,10 +2443,21 @@ final class PlaybackController: ObservableObject {
     func clearNotice() { notice = nil }
 
     /// Quit waits for cancelled jobs to reap their helpers and release temporary files.
+    /// The wait is bounded so a stuck helper cannot keep the process open.
     func shutdownAndWait() async {
         shutdown()
         let pending = Array(drainingLoads.values)
-        for job in pending { await job.value }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let once = ShutdownResume(continuation)
+            Task {
+                for job in pending { await job.value }
+                once.finish()
+            }
+            Task {
+                try? await Task.sleep(for: .seconds(5))
+                once.finish()
+            }
+        }
     }
 
     func shutdown() {
