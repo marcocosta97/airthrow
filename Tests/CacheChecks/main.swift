@@ -349,7 +349,11 @@ struct CacheChecks {
         try check(prepared.usesBoundedCache && prepared.sourceDuration! > 119 && !prepared.isProducing,
                   "Large input did not use idle finite cached preparation")
         try check(prepared.readyRanges == [SeekRange(start: 0, end: 6)], "Prepared media advertised its whole VOD as ready")
-        let session = URLSession(configuration: .ephemeral)
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        // Six logical requests still exercise job coalescing, within the
+        // server's deliberate per-peer connection budget.
+        sessionConfiguration.httpMaximumConnectionsPerHost = MediaHTTPServer.maximumConnectionsPerPeer
+        let session = URLSession(configuration: sessionConfiguration)
         defer { session.invalidateAndCancel() }
         try await lateResourceRelease(directory: directory, session: session)
         func fetch(_ name: String? = nil, method: String = "GET", range: String? = nil) async throws -> (Data, HTTPURLResponse) {
