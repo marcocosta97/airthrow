@@ -150,6 +150,16 @@ struct CookieScratch {
 }
 
 extension YouTubeCookies {
+    /// Leftover Netscape scratch directories from a crashed extraction. Called
+    /// at launch, before any new scratch directory exists.
+    public static func removeAbandonedScratch() {
+        let root = FileManager.default.temporaryDirectory
+        guard let entries = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return }
+        for entry in entries where entry.lastPathComponent.hasPrefix("athrow-cookies-") {
+            try? FileManager.default.removeItem(at: entry)
+        }
+    }
+
     /// Reduce the configured source to the service's cookies and expose them
     /// through a private temporary file. An empty result means yt-dlp runs
     /// without cookies, matching the pre-cookie behavior.

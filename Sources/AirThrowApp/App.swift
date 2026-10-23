@@ -45,6 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var pendingOpenURLs: [URL] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        YouTubeCookies.removeAbandonedScratch()
         makeMenu()
         do {
             try server.start { [weak self] request, reply in
