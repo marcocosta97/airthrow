@@ -373,6 +373,11 @@ struct ResolverChecks {
                   && !MediaHTTPServer.allowsConnection(total: 8, fromSamePeer: 0)
                   && !MediaHTTPServer.allowsConnection(total: 2, fromSamePeer: 4),
                   "Media server admission still allows a silent peer to hold every slot")
+        try check(ChunkOutputCheck.accepts(produced: 6, requested: 6, final: false)
+                  && !ChunkOutputCheck.accepts(produced: 5.7, requested: 6, final: false)
+                  && ChunkOutputCheck.accepts(produced: 5.4, requested: 6, final: true)
+                  && !ChunkOutputCheck.accepts(produced: 6.2, requested: 6, final: true),
+                  "Final remux chunk still rejects an audio tail")
         try await expect(.unsupportedPage) { _ = try await absent.resolve(URL(string: "https://youtube.com/playlist?list=x")!) }
         try await expect(.unavailable) { _ = try await absent.resolve(page) }
         print("PASS local delivery selection, direct bypass, exact hosts, video-only normalization and missing helpers")

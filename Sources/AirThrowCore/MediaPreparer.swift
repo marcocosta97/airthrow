@@ -9,6 +9,18 @@ private func completionTolerance(for duration: Double) -> Double {
     max(0.5, min(2, duration * 0.05))
 }
 
+/// A non-final chunk must match the requested length. The final chunk may be
+/// shorter: container duration can include an audio tail, and ffmpeg stops at
+/// the video.
+enum ChunkOutputCheck {
+    static func accepts(produced: Double, requested: Double, final: Bool) -> Bool {
+        guard produced.isFinite, requested.isFinite, produced > 0, requested > 0,
+              produced <= requested + 0.15 else { return false }
+        if final { return true }
+        return requested - produced < 0.15
+    }
+}
+
 /// A deterministic codec error returns immediately and would fail the same way
 /// on every retry. A dropped connection also returns immediately; allow two
 /// more attempts only for that quick case, never for a failure that already
@@ -810,7 +822,8 @@ public struct MediaPreparer: Sendable {
             } catch ResolutionFailure.timedOut { throw PreparationFailure.stalled }
             let manifest = try HLSPlaylist(directory: directory, name: "part.m3u8", initialization: initialization)
             guard manifest.complete, manifest.count == 1,
-                  abs(manifest.duration - length) < 0.15,
+                  ChunkOutputCheck.accepts(produced: manifest.duration, requested: length,
+                                           final: start + length >= duration - 0.001),
                   let segment = manifest.segments.first else { throw PreparationFailure.failed }
             let inspected = try await probeSegment(segment, directory: directory,
                                                    fragmented: fragmented, executable: ffprobe,
