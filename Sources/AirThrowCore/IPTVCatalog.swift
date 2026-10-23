@@ -135,14 +135,27 @@ public enum IPTVPlaylist {
                 if name != nil { skipped += 1 }
                 name = ""; category = nil; unsupported = false
                 guard line.utf8.count <= 16_384 else { unsupported = true; continue }
-                var quoted = false
+                var quote: Character?
                 let comma = line.indices.first { index in
-                    if line[index] == "\"" { quoted.toggle() }
-                    return line[index] == "," && !quoted
+                    let character = line[index]
+                    if character == "\"" || character == "'" {
+                        if quote == nil { quote = character }
+                        else if quote == character { quote = nil }
+                        return false
+                    }
+                    return character == "," && quote == nil
                 }
-                guard let comma, !quoted else { unsupported = true; continue }
-                let attributes = String(line[..<comma])
-                name = label(String(line[line.index(after: comma)...])) ?? attribute("tvg-name", in: attributes) ?? ""
+                guard quote == nil else { unsupported = true; continue }
+                let attributes: String
+                let display: String?
+                if let comma {
+                    attributes = String(line[..<comma])
+                    display = label(String(line[line.index(after: comma)...]))
+                } else {
+                    attributes = line
+                    display = nil
+                }
+                name = display ?? attribute("tvg-name", in: attributes) ?? ""
                 category = attribute("group-title", in: attributes)
             } else if line.hasPrefix("#EXTGRP:") {
                 inheritedCategory = label(String(line.dropFirst(8)))
@@ -153,10 +166,13 @@ public enum IPTVPlaylist {
                 unsupported = true
             } else if !line.hasPrefix("#") {
                 defer { name = nil; category = nil; unsupported = false }
+                let relativeToFile = baseURL?.isFileURL == true && !line.contains(":") && !line.hasPrefix("/")
+                let resolved = URL(string: line, relativeTo: baseURL)?.absoluteURL
+                let url = relativeToFile ? resolved.flatMap { try? MediaInput.localFile($0) }
+                    : resolved.flatMap { try? MediaInput.url($0.absoluteString) }
                 guard !unsupported, line.utf8.count <= 16_384, !line.contains("|"),
                       !line.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
-                      let resolved = URL(string: line, relativeTo: baseURL)?.absoluteURL,
-                      let url = try? MediaInput.url(resolved.absoluteString) else { skipped += 1; continue }
+                      let url else { skipped += 1; continue }
                 guard channels.count < maximumChannels else { truncated = true; break }
                 channels.append(IPTVChannel(number: channels.count + 1, name: name.flatMap(label) ?? "Channel \(channels.count + 1)",
                                             category: category ?? inheritedCategory, url: url))
@@ -168,10 +184,14 @@ public enum IPTVPlaylist {
     }
 
     private static func attribute(_ key: String, in line: String) -> String? {
-        guard let pattern = try? NSRegularExpression(pattern: "(?:^|\\s)" + key + #"="([^"]*)""#, options: .caseInsensitive),
-              let match = pattern.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
-              let range = Range(match.range(at: 1), in: line) else { return nil }
-        return label(String(line[range]))
+        let pattern = "(?:^|\\s)" + NSRegularExpression.escapedPattern(for: key) + #"=(?:"([^"]*)"|'([^']*)')"#
+        guard let expression = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
+              let match = expression.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) else { return nil }
+        for index in 1...2 {
+            guard let range = Range(match.range(at: index), in: line) else { continue }
+            return label(String(line[range]))
+        }
+        return nil
     }
     private static func label(_ value: String) -> String? {
         let text = String(String.UnicodeScalarView(value.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }))
@@ -189,7 +209,8 @@ public enum IPTVCatalogLoader {
             defer { try? handle.close() }
             let data = try handle.read(upToCount: IPTVPlaylist.maximumBytes + 1) ?? Data()
             try Task.checkCancellation()
-            return try IPTVPlaylist.parse(data, title: file.deletingPathExtension().lastPathComponent)
+            return try IPTVPlaylist.parse(data, baseURL: file.deletingLastPathComponent(),
+                                          title: file.deletingPathExtension().lastPathComponent)
         }
         let source = try MediaInput.url(source.absoluteString)
         let config = URLSessionConfiguration.ephemeral

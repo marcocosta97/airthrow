@@ -125,6 +125,12 @@ struct IPTVChecks {
         try check(catalog.channels(category: "", search: "").count == 1 && catalog.channels(search: "cafe").count == 1, "Uncategorized and accent-insensitive search")
         try check(catalog.channels(search: "NEWS HD").count == 1 && catalog.channels(search: "not found").isEmpty, "Multi-word and empty-result search")
         try check(catalog.channels[1].name == "Channel 2", "Unnamed channel has a safe numbered label")
+        let named = try parse("#EXTM3U\n#EXTINF:-1 tvg-name=\"Headline\" group-title=\"News\"\n/video.mp4\n")
+        try check(named.channels.count == 1 && named.channels[0].name == "Headline" && named.channels[0].category == "News",
+                  "EXTINF without a comma uses tvg-name")
+        let quoted = try parse("#EXTM3U\n#EXTINF:-1 tvg-name='Evening' group-title='News, local'\n/video.mp4\n")
+        try check(quoted.channels.count == 1 && quoted.channels[0].name == "Evening" && quoted.channels[0].category == "News, local",
+                  "Single-quoted M3U attributes are read")
         let duplicates = try parse("#EXTM3U\n#EXTINF:-1,First\n/video.mp4\n#EXTINF:-1,Second\n/video.mp4\n")
         try check(duplicates.channels.count == 2 && duplicates.channels[0].id != duplicates.channels[1].id, "Duplicate stream URLs retain distinct channel identities")
         let replaced = try parse(text)
@@ -145,6 +151,13 @@ struct IPTVChecks {
         try check(bounded.truncated && bounded.channels.count == IPTVPlaylist.maximumChannels, "Large catalogs truncate with an explicit signal")
         let fromFile = try await IPTVCatalogLoader.load(URL(fileURLWithPath: local))
         try check(fromFile.channels.count == 3, "Local file import")
+        let relativeDirectory = URL(fileURLWithPath: local).deletingLastPathComponent()
+        let relativeFile = relativeDirectory.appendingPathComponent("relative-catalog.m3u")
+        try Data([0]).write(to: relativeDirectory.appendingPathComponent("channel.mp4"))
+        try "#EXTM3U\n#EXTINF:-1,Local\nchannel.mp4\n".write(to: relativeFile, atomically: true, encoding: .utf8)
+        let relative = try await IPTVCatalogLoader.load(relativeFile)
+        try check(relative.channels.count == 1 && relative.channels[0].url.isFileURL && relative.channels[0].url.lastPathComponent == "channel.mp4",
+                  "A local catalog resolves entries beside the file")
         let suite = "it.mcosta.airthrow.history-checks.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
