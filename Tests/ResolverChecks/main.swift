@@ -960,6 +960,14 @@ struct ResolverChecks {
         try await expect(.signInRequired) { _ = try await signInResolver.resolve(page) }
         print("PASS sign-in challenge classification")
         let bad = try helper("bad", "echo 'secret signed URL' >&2; exit 1\n")
+        try check(RemoteFailureRetry.allows(error: ResolutionFailure.failed, elapsed: .milliseconds(200), attempt: 0),
+                  "Immediate remote failure was not retried")
+        try check(!RemoteFailureRetry.allows(error: ResolutionFailure.failed, elapsed: .seconds(5), attempt: 0),
+                  "Slow ffmpeg failure was retried in full")
+        try check(!RemoteFailureRetry.allows(error: ResolutionFailure.timedOut, elapsed: .milliseconds(10), attempt: 0),
+                  "Timeout was retried")
+        try check(!RemoteFailureRetry.allows(error: ResolutionFailure.failed, elapsed: .milliseconds(10), attempt: 2),
+                  "A third retry was allowed")
         try await expect(.failed) { _ = try await HelperProcess.run(executable: bad, arguments: []) }
         let noisy = try helper("noisy", "while :; do echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done\n")
         try await expect(.tooMuchOutput) { _ = try await HelperProcess.run(executable: noisy, arguments: [], outputLimit: 1000) }

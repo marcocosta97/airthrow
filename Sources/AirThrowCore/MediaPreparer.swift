@@ -9,6 +9,17 @@ private func completionTolerance(for duration: Double) -> Double {
     max(0.5, min(2, duration * 0.05))
 }
 
+/// A deterministic codec error returns immediately and would fail the same way
+/// on every retry. A dropped connection also returns immediately; allow two
+/// more attempts only for that quick case, never for a failure that already
+/// used a large part of the helper timeout.
+enum RemoteFailureRetry {
+    static func allows(error: Error, elapsed: Duration, attempt: Int) -> Bool {
+        guard case ResolutionFailure.failed = error, attempt < 2 else { return false }
+        return elapsed < .seconds(5)
+    }
+}
+
 public enum PreparationFailure: Error, Sendable, Equatable {
     case unavailable, unsupported, videoConversionRequired(height: Int?, frameRate: Double?), conversionWouldDownscale, failed, limit, storageLimit, diskSpace, stalled, delivery
     public var reason: MediaFailureReason {
@@ -673,6 +684,7 @@ public struct MediaPreparer: Sendable {
                 var attempt = 0
                 while true {
                     try? FileManager.default.removeItem(at: output)
+                    let started = ContinuousClock.now
                     do {
                         _ = try await HelperProcess.run(executable: ffmpeg,
                                                         arguments: arguments + ["-movflags", "+faststart", "-fs",
@@ -680,9 +692,10 @@ public struct MediaPreparer: Sendable {
                                                         timeout: timeout, outputLimit: 64 * 1024,
                                                         monitor: { try workspace.checkSize(maximumBytes) })
                         break
-                    } catch let error as ResolutionFailure {
-                        // Retry a transient remote failure, not a rejected source.
-                        guard case .failed = error, attempt < 2 else { throw error }
+                    } catch {
+                        // A codec rejection fails immediately and would fail again.
+                        // Retry only a remote failure that returns at once.
+                        guard RemoteFailureRetry.allows(error: error, elapsed: started.duration(to: .now), attempt: attempt) else { throw error }
                         attempt += 1
                         try await Task.sleep(for: .milliseconds(600 * attempt))
                     }
@@ -1224,10 +1237,11 @@ public struct MediaPreparer: Sendable {
                           retry: Bool) async throws -> Data {
         var attempt = 0
         while true {
+            let started = ContinuousClock.now
             do {
                 return try await HelperProcess.run(executable: executable, arguments: arguments, timeout: timeout)
-            } catch let error as ResolutionFailure {
-                guard retry, case .failed = error, attempt < 2 else { throw error }
+            } catch {
+                guard retry, RemoteFailureRetry.allows(error: error, elapsed: started.duration(to: .now), attempt: attempt) else { throw error }
                 attempt += 1
                 try await Task.sleep(for: .milliseconds(600 * attempt))
             }
