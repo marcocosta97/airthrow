@@ -183,9 +183,16 @@ public enum IPTVPlaylist {
         return IPTVCatalog(title: catalogTitle, channels: channels, skippedEntries: skipped, truncated: truncated)
     }
 
+    private static let attributeExpressions: [String: NSRegularExpression] = {
+        Dictionary(uniqueKeysWithValues: ["tvg-name", "group-title"].compactMap { key in
+            let pattern = "(?:^|\\s)" + NSRegularExpression.escapedPattern(for: key) + #"=(?:"([^"]*)"|'([^']*)')"#
+            guard let expression = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { return nil }
+            return (key, expression)
+        })
+    }()
+
     private static func attribute(_ key: String, in line: String) -> String? {
-        let pattern = "(?:^|\\s)" + NSRegularExpression.escapedPattern(for: key) + #"=(?:"([^"]*)"|'([^']*)')"#
-        guard let expression = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
+        guard let expression = attributeExpressions[key],
               let match = expression.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) else { return nil }
         for index in 1...2 {
             guard let range = Range(match.range(at: index), in: line) else { continue }
