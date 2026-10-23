@@ -241,6 +241,51 @@ enum BrowserCookieOutcome {
     case failed
 }
 
+/// Remembers a derived Chromium key for the rest of the process, and a scoped
+/// browser read for a few minutes, so a playback session does not repeat the
+/// key derivation or the database copy. A changed cookie file is read again.
+private enum BrowserCookieCache {
+    private struct Snapshot {
+        let modified: Date
+        let outcome: BrowserCookieOutcome
+        let expires: ContinuousClock.Instant
+    }
+    private final class Store: @unchecked Sendable {
+        let lock = NSLock()
+        var keys: [String: [UInt8]] = [:]
+        var snapshots: [String: Snapshot] = [:]
+    }
+    private static let store = Store()
+
+    static func derivedKey(keyring: String) -> [UInt8]? {
+        store.lock.lock(); defer { store.lock.unlock() }
+        return store.keys[keyring]
+    }
+
+    static func storeDerivedKey(keyring: String, key: [UInt8]) {
+        store.lock.lock(); store.keys[keyring] = key; store.lock.unlock()
+    }
+
+    static func fresh(path: String, service: WebsiteService) -> BrowserCookieOutcome? {
+        let modified = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date ?? .distantPast
+        store.lock.lock(); defer { store.lock.unlock() }
+        guard let snapshot = store.snapshots[path + "\n" + service.rawValue],
+              snapshot.modified == modified, snapshot.expires > ContinuousClock.now else { return nil }
+        return snapshot.outcome
+    }
+
+    static func store(path: String, service: WebsiteService, outcome: BrowserCookieOutcome) {
+        guard case .cookies = outcome else { return }
+        let modified = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date ?? .distantPast
+        let now = ContinuousClock.now
+        store.lock.lock()
+        store.snapshots[path + "\n" + service.rawValue] = Snapshot(modified: modified, outcome: outcome,
+                                                                   expires: now.advanced(by: .seconds(180)))
+        if store.snapshots.count > 32 { store.snapshots = store.snapshots.filter { $0.value.expires > now } }
+        store.lock.unlock()
+    }
+}
+
 /// Reads scoped cookies directly out of a browser's own store, filtering in the
 /// data source where possible so unrelated cookies are never loaded.
 enum BrowserCookieReader {
@@ -310,10 +355,13 @@ enum BrowserCookieReader {
         var permissionDenied = false
         for url in candidates {
             do {
+                if let cached = BrowserCookieCache.fresh(path: url.path, service: service) { return cached }
                 let data = try Data(contentsOf: url)
                 guard let parsed = SafariCookies.parse(data) else { return .failed }
                 let scoped = NetscapeCookies.scoped(parsed, service: service)
-                return scoped.isEmpty ? .noSession : .cookies(scoped)
+                let outcome: BrowserCookieOutcome = scoped.isEmpty ? .noSession : .cookies(scoped)
+                BrowserCookieCache.store(path: url.path, service: service, outcome: outcome)
+                return outcome
             } catch {
                 if isPermissionDenied(error) { permissionDenied = true }
             }
@@ -348,7 +396,14 @@ enum BrowserCookieReader {
         databases.append(profiles.appendingPathComponent("cookies.sqlite"))
         let existing = databases.filter { FileManager.default.fileExists(atPath: $0.path) }
         guard let newest = existing.max(by: { modificationDate($0) < modificationDate($1) }) else { return .noSession }
+        if let cached = BrowserCookieCache.fresh(path: newest.path, service: service) { return cached }
         guard let database = SQLiteDatabase(path: newest.path) else { return .failed }
+        let outcome = firefoxCookies(database, service: service)
+        BrowserCookieCache.store(path: newest.path, service: service, outcome: outcome)
+        return outcome
+    }
+
+    private static func firefoxCookies(_ database: SQLiteDatabase, service: WebsiteService) -> BrowserCookieOutcome {
         let schema = database.scalarInt("PRAGMA user_version;") ?? 0
         let rows = database.query("""
             SELECT host, name, value, path, expiry, isSecure FROM moz_cookies
@@ -404,7 +459,15 @@ enum BrowserCookieReader {
         let root = chromiumRoot(home, configuration)
         guard FileManager.default.fileExists(atPath: root.path) else { return .notInstalled }
         guard let file = newestCookiesFile(root: root, depth: 0) else { return .noSession }
+        if let cached = BrowserCookieCache.fresh(path: file.path, service: service) { return cached }
         guard let database = SQLiteDatabase(path: file.path) else { return .failed }
+        let outcome = chromiumCookies(database, configuration: configuration, service: service)
+        BrowserCookieCache.store(path: file.path, service: service, outcome: outcome)
+        return outcome
+    }
+
+    private static func chromiumCookies(_ database: SQLiteDatabase, configuration: ChromiumConfiguration,
+                                        service: WebsiteService) -> BrowserCookieOutcome {
         let metaVersion = database.scalarInt("SELECT value FROM meta WHERE key = 'version'") ?? 0
         let columns = database.query("PRAGMA table_info(cookies)").compactMap { $0.count >= 2 ? $0[1].string : nil }
         let secureColumn = columns.contains("is_secure") ? "is_secure" : "secure"
@@ -474,9 +537,11 @@ enum BrowserCookieReader {
     }
 
     private static func chromiumKey(keyring: String) -> KeychainResult {
+        if let key = BrowserCookieCache.derivedKey(keyring: keyring) { return .key(key) }
         switch keychainPassword(service: "\(keyring) Safe Storage", account: keyring) {
         case .key(let password):
             guard let key = ChromiumCookies.deriveKey(password: password) else { return .missing }
+            BrowserCookieCache.storeDerivedKey(keyring: keyring, key: key)
             return .key(key)
         case .denied: return .denied
         case .missing: return .missing
