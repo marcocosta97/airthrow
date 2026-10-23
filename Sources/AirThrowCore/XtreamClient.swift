@@ -56,15 +56,30 @@ public struct XtreamClient: Sendable {
         guard section != .live else { throw XtreamFailure.invalidResponse }
         let data = try await request(section == .movies ? "get_vod_info" : "get_series_info",
                                      parameters: [URLQueryItem(name: section == .movies ? "vod_id" : "series_id", value: item.id)])
-        guard let root = try json(data) as? [String: Any],
-              let info = root["info"] as? [String: Any] else { throw XtreamFailure.invalidResponse }
+        guard let root = try json(data) as? [String: Any] else { throw XtreamFailure.invalidResponse }
+        let info: [String: Any]
+        if let object = root["info"] as? [String: Any] { info = object }
+        else if let array = root["info"] as? [Any], array.isEmpty { info = [:] }
+        else { throw XtreamFailure.invalidResponse }
         var episodes = [XtreamEpisode](), seen = Set<String>(), skipped = 0
         if section == .series {
-            // Some servers return [] rather than {} for series with no episodes.
+            // Servers disagree: episodes may be a season dictionary, an empty
+            // array, or an array of season arrays. An empty info array is the
+            // same as an empty object.
             let groups: [String: Any]
             if let value = root["episodes"] as? [String: Any] { groups = value }
-            else if let value = root["episodes"] as? [Any], value.isEmpty { groups = [:] }
-            else { throw XtreamFailure.invalidResponse }
+            else if let value = root["episodes"] as? [Any] {
+                if value.isEmpty { groups = [:] }
+                else {
+                    var built: [String: Any] = [:]
+                    for (index, element) in value.enumerated() {
+                        if let rows = element as? [Any] { built[String(index + 1)] = rows }
+                        else if let row = element as? [String: Any] { built[String(index + 1)] = [row] }
+                        else { throw XtreamFailure.invalidResponse }
+                    }
+                    groups = built
+                }
+            } else { throw XtreamFailure.invalidResponse }
             for key in groups.keys.sorted(by: { (Int($0) ?? 0) < (Int($1) ?? 0) }) {
                 let rows = try XtreamParsing.rows(groups[key]!)
                 for row in rows {

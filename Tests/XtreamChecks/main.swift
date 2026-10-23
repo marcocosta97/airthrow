@@ -80,6 +80,12 @@ private struct CheckFailure: Error { let message: String }
         let show = try await client.listing(.series).items[0]
         let series = try await client.details(show, section: .series)
         try check(series.episodes.map(\.id) == ["101", "102", "202"] && series.skippedEpisodes == 2, "Series details sort seasons/episodes and deduplicate IDs")
+        let arrayClient = XtreamClient(account: try account("/array"))
+        let arrayShow = try await arrayClient.listing(.series).items[0]
+        let arraySeries = try await arrayClient.details(arrayShow, section: .series)
+        try check(arraySeries.episodes.map(\.id) == ["301", "302"] && arraySeries.episodes[0].season == 1
+                  && arraySeries.episodes[0].summary == "Opens" && arraySeries.episodes[1].season == 2,
+                  "Series details accept an empty info array and episode arrays")
         try check(series.episodes[0].summary == "Episode plot" && series.episodes[0].duration == "00:30:00", "Episode metadata is retained")
         try check(try credentials.streamURL(kind: .series, id: series.episodes[2].id, extension: series.episodes[2].container).lastPathComponent == "202.mkv", "Episode playback uses provider container")
         let guideClient = XtreamClient(account: credentials, timeZoneIdentifier: info.timeZoneIdentifier)

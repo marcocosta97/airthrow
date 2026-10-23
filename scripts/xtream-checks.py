@@ -100,6 +100,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if action == 'get_vod_info':
             if query.get('vod_id') != ['11']: self.reply({'error': 'Not found'}, status=404); return
             self.reply({'info': {'plot': 'Film plot', 'genre': 'Drama', 'cast': 'Actor', 'director': 'Director', 'duration': '01:02:03', 'rating': '8.4'}, 'movie_data': {'stream_id': 11}}); return
+        if action == 'get_series_info' and prefix == 'array':
+            self.reply({'info': [], 'episodes': [
+                [{'id': 301, 'episode_num': 1, 'title': 'Pilot', 'container_extension': 'mp4', 'info': {'plot': 'Opens'}}],
+                [{'id': 302, 'season': 2, 'episode_num': 1, 'title': 'Later'}]
+            ]}); return
         if action == 'get_series_info':
             self.reply({'info': {'plot': 'Series plot'}, 'episodes': {
                 '2': [{'id': 202, 'season': '2', 'episode_num': 2, 'title': 'Second season', 'container_extension': 'mkv'}],
