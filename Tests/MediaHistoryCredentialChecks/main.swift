@@ -92,6 +92,16 @@ private struct Failure: Error { let message: String }
         let droppedStream = MediaHistoryStore(defaults: defaults, credentials: backend)
         try check(droppedStream.entries.isEmpty && defaults.data(forKey: "mediaHistory.v1") == nil,
                   "Legacy plaintext stream credentials are discarded without migration")
+        let orphanReference = UUID().uuidString
+        try backend.save(stream, reference: orphanReference)
+        defaults.set(try JSONEncoder().encode([MediaHistoryEntry(id: UUID(), url: stream, title: "Old stream", kind: .video,
+                                                                  openedAt: Date(), credentialReference: orphanReference)]), forKey: "mediaHistory.v1")
+        let droppedReference = MediaHistoryStore(defaults: defaults, credentials: backend)
+        try check(droppedReference.entries.isEmpty, "Rejected credential history is not loaded")
+        do { _ = try backend.source(reference: orphanReference); throw Failure(message: "Dropped history left a Keychain item") }
+        catch MediaHistoryCredentialFailure.unavailable {
+            try check(true, "Loading history deletes Keychain items for entries it drops")
+        }
         if CommandLine.arguments.contains("--keychain") {
         let keychain = KeychainMediaHistoryCredentials(service: suite, allowInteraction: false)
         let testReference = UUID().uuidString
@@ -104,8 +114,8 @@ private struct Failure: Error { let message: String }
         try reopenedKeychain.remove(reference: testReference)
         try check(try keychain.source(reference: testReference) == url, "Active session reuses credentials without another Keychain read")
         try keychain.save(url, reference: testReference)
-        do { _ = try reopenedKeychain.source(reference: testReference); throw Failure(message: "Unchanged account was rewritten") }
-        catch MediaHistoryCredentialFailure.unavailable { try check(true, "Reopening an unchanged account does not request another Keychain write") }
+        try check(try reopenedKeychain.source(reference: testReference) == url,
+                  "Saving an unchanged account restores a missing Keychain item")
         let changed = URL(string: url.absoluteString.replacingOccurrences(of: "private%26pass", with: "new-pass"))!
         try keychain.save(changed, reference: testReference)
         try check(try keychain.source(reference: testReference) == changed, "Real Keychain updates existing item")

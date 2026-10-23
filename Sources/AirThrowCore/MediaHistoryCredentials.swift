@@ -10,7 +10,13 @@ public protocol MediaHistoryCredentials: AnyObject {
 
 public enum MediaHistoryCredentialFailure: Error {
     case unavailable
-    public var message: String { "The saved credentials are unavailable in Keychain. Add the server again." }
+    case locked
+    public var message: String {
+        switch self {
+        case .unavailable: "The saved credentials are unavailable in Keychain. Add the server again."
+        case .locked: "Keychain is locked. Unlock it and add the server again."
+        }
+    }
 }
 
 /// Keychain stores the original URL; preferences contain only a sanitized URL and opaque reference.
@@ -32,25 +38,37 @@ public final class KeychainMediaHistoryCredentials: MediaHistoryCredentials {
         return result
     }
     public func save(_ source: URL, reference: String) throws {
-        if sessionSources[reference] == source { return }
         let query = query(reference)
+        if sessionSources[reference] == source {
+            let status = SecItemCopyMatching(query as CFDictionary, nil)
+            if status == errSecSuccess { return }
+            if status == errSecInteractionNotAllowed { throw MediaHistoryCredentialFailure.locked }
+            sessionSources.removeValue(forKey: reference)
+        }
         let value = [kSecValueData as String: Data(source.absoluteString.utf8)]
         let status = SecItemUpdate(query as CFDictionary, value as CFDictionary)
         if status == errSecItemNotFound {
             var item = query
             item[kSecValueData as String] = value[kSecValueData as String]
             item[kSecAttrLabel as String] = "AirThrow saved server"
-            guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { throw MediaHistoryCredentialFailure.unavailable }
-        } else if status != errSecSuccess { throw MediaHistoryCredentialFailure.unavailable }
+            try add(item)
+        } else if status == errSecInteractionNotAllowed { throw MediaHistoryCredentialFailure.locked }
+        else if status != errSecSuccess { throw MediaHistoryCredentialFailure.unavailable }
         sessionSources[reference] = source
+    }
+    private func add(_ item: [String: Any]) throws {
+        let status = SecItemAdd(item as CFDictionary, nil)
+        if status == errSecInteractionNotAllowed { throw MediaHistoryCredentialFailure.locked }
+        guard status == errSecSuccess else { throw MediaHistoryCredentialFailure.unavailable }
     }
     public func source(reference: String) throws -> URL {
         if let source = sessionSources[reference] { return source }
         var query = query(reference)
         query[kSecReturnData as String] = true; query[kSecMatchLimit as String] = kSecMatchLimitOne
         var value: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &value) == errSecSuccess,
-              let data = value as? Data, let text = String(data: data, encoding: .utf8),
+        let status = SecItemCopyMatching(query as CFDictionary, &value)
+        if status == errSecInteractionNotAllowed { throw MediaHistoryCredentialFailure.locked }
+        guard status == errSecSuccess, let data = value as? Data, let text = String(data: data, encoding: .utf8),
               let url = try? MediaInput.url(text) else { throw MediaHistoryCredentialFailure.unavailable }
         sessionSources[reference] = url
         return url

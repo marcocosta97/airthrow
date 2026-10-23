@@ -47,11 +47,17 @@ public final class MediaHistoryStore {
         var seen = Set<String>()
         if let data = defaults?.data(forKey: Self.key), data.count <= 4 * 1024 * 1024,
            let decoded = try? JSONDecoder().decode([MediaHistoryEntry].self, from: data) {
-            entries = Array(decoded.sorted(by: Self.precedes).filter {
+            let accepted = decoded.sorted(by: Self.precedes).filter {
                 Self.validURL($0.url) && !Self.containsCredentials($0.url) && $0.url.absoluteString.utf8.count <= 16_384
                     && ($0.credentialReference == nil || Self.validReference($0.credentialReference!))
                     && !$0.title.isEmpty && $0.title.count <= 200 && seen.insert(Self.identity($0.url, reference: $0.credentialReference)).inserted
-            }.prefix(Self.maximumEntries))
+            }
+            entries = Array(accepted.prefix(Self.maximumEntries))
+            let kept = Set(entries.compactMap(\.credentialReference))
+            let dropped = Set(decoded.compactMap(\.credentialReference)).subtracting(kept)
+            for reference in dropped where Self.validReference(reference) {
+                try? self.credentials.remove(reference: reference)
+            }
         } else { entries = [] }
         // Drop legacy plaintext credential entries; never migrate their secrets.
         persist()
@@ -77,7 +83,8 @@ public final class MediaHistoryStore {
         let reference = protected ? (previous?.credentialReference ?? UUID().uuidString) : nil
         if let reference {
             do { try credentials.save(url, reference: reference); resolvedSources[reference] = url }
-            catch { credentialError = "Could not save credentials in Keychain. Add the server again next time."; return }
+            catch let error as MediaHistoryCredentialFailure { credentialError = error.message; return }
+            catch { credentialError = MediaHistoryCredentialFailure.unavailable.message; return }
         }
         let id = previous?.id ?? UUID()
         let cleanTitle = String(title.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }.prefix(200))
