@@ -352,7 +352,7 @@ final class PlaybackController: ObservableObject {
         } else {
             let preferences = SourceResolver.youtubeStartSeconds(url).map { seconds in
                 LoadPreferences(conversion: conversionPolicy, preferQuality: preferQuality,
-                                enhancement: .original, enhancementOutput4K: enhancementOutput4K,
+                                enhancement: .original, upscaler: videoUpscaler, enhancementOutput4K: enhancementOutput4K,
                                 pinnedSourceID: nil, subtitle: nil, resumePosition: seconds)
             }
             startLoad(url, autoplay: shouldPlay, preferences: preferences, recordHistory: true)
