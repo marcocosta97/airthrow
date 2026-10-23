@@ -100,6 +100,10 @@ enum HelperProcess {
         var errorBytes = 0
         var buffer = [UInt8](repeating: 0, count: 16_384)
         var status: Int32 = 0
+        var polls = [
+            pollfd(fd: output[0], events: Int16(POLLIN), revents: 0),
+            pollfd(fd: errors[0], events: Int16(POLLIN), revents: 0),
+        ]
         while true {
             try Task.checkCancellation()
             if let deadline, clock.now >= deadline { throw ResolutionFailure.timedOut }
@@ -107,34 +111,49 @@ enum HelperProcess {
                 try monitor?()
                 nextMonitor = clock.now.advanced(by: .milliseconds(250))
             }
-            for fd in [output[0], errors[0]] {
-                // Bound each pass so a noisy process cannot starve cancellation or stderr.
-                for _ in 0..<32 {
-                    let count = read(fd, &buffer, buffer.count)
-                    if count <= 0 {
-                        if count < 0 && errno != EAGAIN && errno != EINTR { throw ResolutionFailure.failed }
-                        break
-                    }
-                    if fd == output[0] {
-                        guard data.count + count <= outputLimit else { throw ResolutionFailure.tooMuchOutput }
-                        data.append(contentsOf: buffer.prefix(count))
-                    } else {
-                        errorBytes += count
-                        if stderrData.count < 8192 {
-                            stderrData.append(contentsOf: buffer.prefix(min(count, 8192 - stderrData.count)))
+            polls[0].revents = 0
+            polls[1].revents = 0
+            let ready = polls.withUnsafeMutableBufferPointer { buffer in
+                poll(buffer.baseAddress, nfds_t(buffer.count), reaped ? 0 : 20)
+            }
+            if ready < 0 && errno != EINTR { throw ResolutionFailure.failed }
+            var readBytes = 0
+            if ready > 0 {
+                for (index, fd) in [output[0], errors[0]].enumerated() where (polls[index].revents & Int16(POLLIN | POLLHUP)) != 0 {
+                    // Bound each pass so a noisy process cannot starve cancellation.
+                    for _ in 0..<32 {
+                        let count = read(fd, &buffer, buffer.count)
+                        if count <= 0 {
+                            if count < 0 && errno != EAGAIN && errno != EINTR { throw ResolutionFailure.failed }
+                            break
                         }
-                        guard errorBytes <= 256 * 1024 else { throw ResolutionFailure.tooMuchOutput }
+                        readBytes += count
+                        if fd == output[0] {
+                            guard data.count + count <= outputLimit else { throw ResolutionFailure.tooMuchOutput }
+                            data.append(contentsOf: buffer.prefix(count))
+                        } else {
+                            errorBytes += count
+                            if stderrData.count < 8192 {
+                                stderrData.append(contentsOf: buffer.prefix(min(count, 8192 - stderrData.count)))
+                            }
+                            guard errorBytes <= 256 * 1024 else { throw ResolutionFailure.tooMuchOutput }
+                        }
                     }
                 }
             }
             // One more drain after exit collects bytes written immediately before termination.
-            if reaped {
+            if reaped && readBytes == 0 {
                 return Result(output: data, stderr: stderrData, succeeded: status == 0)
             }
-            let result = waitpid(pid, &status, WNOHANG)
-            if result == pid { reaped = true }
-            else if result < 0 && errno != EINTR { throw ResolutionFailure.failed }
-            if !reaped { try await Task.sleep(for: .milliseconds(20)) }
+            if !reaped {
+                let result = waitpid(pid, &status, WNOHANG)
+                if result == pid { reaped = true }
+                else if result < 0 && errno != EINTR { throw ResolutionFailure.failed }
+            }
+            // A closed pipe stays readable and returns nothing. Don't spin on it.
+            if ready > 0 && readBytes == 0 && !reaped {
+                try await Task.sleep(for: .milliseconds(20))
+            }
         }
     }
 }
