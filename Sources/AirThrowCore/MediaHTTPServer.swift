@@ -24,20 +24,24 @@ public final class MediaHTTPServer {
     private weak var relay: HTTPMediaRelay?
     private var loadResource: (@MainActor @Sendable (String) async throws -> URL)?
     private var releaseResource: (@MainActor @Sendable (URL) -> Void)?
+    nonisolated private let fileIO = DispatchQueue(label: "airthrow.media-file", qos: .userInitiated)
+    private static let chunkBytes = 1024 * 1024
 
     // Mutable client state is used exclusively on the main queue, like the listener callbacks.
     private final class Client: @unchecked Sendable {
         let connection: NWConnection
         var request = Data()
-        var file: FileHandle?
-        var remaining: Int64 = 0
+        var transfer: DispatchIO?
+        var readOffset: off_t = 0
+        var readRemaining: Int64 = 0
+        var keepAlive = false
         var timeout: Task<Void, Never>?
         var loading: Task<Void, Never>?
         var loadedResource: URL?
         var stream: HTTPRelayStream?
         var peer = ""
         init(_ connection: NWConnection) { self.connection = connection }
-        deinit { try? file?.close(); timeout?.cancel(); loading?.cancel() }
+        deinit { transfer?.close(flags: .stop); timeout?.cancel(); loading?.cancel() }
     }
 
     public static func start(file: URL, host: String? = nil, hls: Bool = false,
@@ -203,7 +207,7 @@ public final class MediaHTTPServer {
         client.loading?.cancel()
         client.connection.cancel()
         let stream = client.stream; client.stream = nil; stream?.cancel()
-        try? client.file?.close(); client.file = nil
+        client.transfer?.close(flags: .stop); client.transfer = nil
         if let resource = client.loadedResource { releaseResource?(resource); client.loadedResource = nil }
         clients.removeValue(forKey: ObjectIdentifier(client))
     }
@@ -217,12 +221,19 @@ public final class MediaHTTPServer {
                     if !data.isEmpty { self.armTimeout(client) }
                 }
                 guard client.request.count <= 8192 else { self.reply(client, code: "431 Request Header Fields Too Large"); return }
-                if let end = client.request.range(of: Data("\r\n\r\n".utf8)) {
-                    self.respond(client, header: client.request[..<end.lowerBound])
+                if client.request.range(of: Data("\r\n\r\n".utf8)) != nil {
+                    self.nextRequest(client)
                 } else if complete || error != nil { self.finish(client) }
                 else { self.receive(client) }
             }
         }
+    }
+
+    private func nextRequest(_ client: Client) {
+        guard let end = client.request.range(of: Data("\r\n\r\n".utf8)) else { receive(client); return }
+        let header = Data(client.request[..<end.lowerBound])
+        client.request.removeSubrange(..<end.upperBound)
+        respond(client, header: header)
     }
 
     private func respond(_ client: Client, header: Data) {
@@ -255,6 +266,7 @@ public final class MediaHTTPServer {
         guard headers["transfer-encoding"] == nil, headers["content-length"] == nil || headers["content-length"] == "0" else {
             reply(client, code: "400 Bad Request"); return
         }
+        client.keepAlive = request[2] == "HTTP/1.1" && headers["connection"]?.lowercased() != "close"
         if let relay {
             client.stream = relay.serve(path: requested, method: String(request[0]), headers: headers,
                 send: { [weak self, weak client] data, completed in
@@ -288,7 +300,8 @@ public final class MediaHTTPServer {
                                  method: String(request[0]), headers: headers)
                 } catch {
                     if !Task.isCancelled, self.clients[ObjectIdentifier(client)] != nil {
-                        self.reply(client, code: error is MediaResourceFailure ? "404 Not Found" : "503 Service Unavailable")
+                        let code = error is MediaResourceFailure ? "404 Not Found" : "503 Service Unavailable"
+                        self.reply(client, code: code)
                     }
                 }
             }
@@ -300,35 +313,107 @@ public final class MediaHTTPServer {
 
     private func deliver(_ client: Client, resource: URL, contentType: String,
                          method: String, headers: [String: String]) {
-        // Open once, then stat that descriptor: an atomic playlist replacement must
-        // not mix the previous Content-Length with the new playlist body.
-        let fd = open(resource.path, O_RDONLY | O_NOFOLLOW)
-        guard fd >= 0 else { reply(client, code: "404 Not Found"); return }
-        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
-        var info = stat()
-        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_size > 0 else {
-            try? handle.close(); reply(client, code: "404 Not Found"); return
+        // Open and stat off the main thread, on one descriptor, so a playlist
+        // replaced during the request cannot mix the old length with the new body.
+        let path = resource.path
+        fileIO.async { [weak self, weak client] in
+            let fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+            var info = stat()
+            let readable = fd >= 0 && fstat(fd, &info) == 0 && (info.st_mode & S_IFMT) == S_IFREG && info.st_size > 0
+            let size = readable ? Int64(info.st_size) : 0
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, let client, self.clients[ObjectIdentifier(client)] != nil else {
+                        if fd >= 0 { close(fd) }
+                        return
+                    }
+                    guard readable else {
+                        if fd >= 0 { close(fd) }
+                        self.reply(client, code: "404 Not Found")
+                        return
+                    }
+                    self.startTransfer(client, fd: fd, size: size, contentType: contentType,
+                                       method: method, headers: headers)
+                }
+            }
         }
-        client.file = handle
-        let size = Int64(info.st_size)
+    }
+
+    private func startTransfer(_ client: Client, fd: Int32, size: Int64, contentType: String,
+                               method: String, headers: [String: String]) {
         var start: Int64 = 0, end = size - 1
         var partial = false
         if method == "GET", let range = headers["range"], headers["if-range"] == nil {
             guard let interval = Self.byteRange(range, size: size) else {
-                reply(client, code: "416 Range Not Satisfiable", extra: "Content-Range: bytes */\(size)\r\n"); return
+                close(fd)
+                reply(client, code: "416 Range Not Satisfiable", extra: "Content-Range: bytes */\(size)\r\n")
+                return
             }
             (start, end) = interval; partial = true
         }
-        do {
-            if method == "GET" {
-                try client.file?.seek(toOffset: UInt64(start))
-                client.remaining = end - start + 1
+        let count = end - start + 1
+        if method == "GET" {
+            // Random access honors the read offset. A stream channel ignores it,
+            // so a range request would return the start of the file.
+            client.transfer = DispatchIO(type: .random, fileDescriptor: fd, queue: fileIO,
+                                          cleanupHandler: Self.discardDescriptor)
+            client.readOffset = off_t(start)
+            client.readRemaining = count
+        } else {
+            close(fd)
+        }
+        let code = partial ? "206 Partial Content" : "200 OK"
+        let rangeHeader = partial ? "Content-Range: bytes \(start)-\(end)/\(size)\r\n" : ""
+        let connection = client.keepAlive ? "keep-alive" : "close"
+        let response = "HTTP/1.1 \(code)\r\nContent-Type: \(contentType)\r\nAccept-Ranges: bytes\r\nContent-Length: \(count)\r\nCache-Control: no-store\r\nConnection: \(connection)\r\n\(rangeHeader)\r\n"
+        write(client, data: Data(response.utf8)) {
+            if method == "GET" { self.pump(client) } else { self.completeTransfer(client) }
+        }
+    }
+
+    private func pump(_ client: Client) {
+        guard client.readRemaining > 0, let transfer = client.transfer else { completeTransfer(client); return }
+        let length = Int(min(client.readRemaining, Int64(Self.chunkBytes)))
+        readChunk(client, transfer: transfer, offset: client.readOffset, length: length)
+    }
+
+    nonisolated private static func discardDescriptor(_ error: Int32) {}
+
+    /// The read handler must stay off the main actor. DispatchIO calls it on its own queue.
+    nonisolated private func readChunk(_ client: Client, transfer: DispatchIO, offset: off_t, length: Int) {
+        let accumulated = TransferBytes()
+        transfer.read(offset: offset, length: length, queue: fileIO) { [weak self] done, data, error in
+            if let data { accumulated.append(data) }
+            guard done else { return }
+            let payload = accumulated.copied()
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, self.clients[ObjectIdentifier(client)] != nil else { return }
+                    guard error == 0, !payload.isEmpty else { self.finish(client); return }
+                    client.readOffset += off_t(payload.count)
+                    client.readRemaining -= Int64(payload.count)
+                    self.write(client, data: payload) {
+                        if client.readRemaining > 0 { self.pump(client) } else { self.completeTransfer(client) }
+                    }
+                }
             }
-            let code = partial ? "206 Partial Content" : "200 OK"
-            let rangeHeader = partial ? "Content-Range: bytes \(start)-\(end)/\(size)\r\n" : ""
-            let response = "HTTP/1.1 \(code)\r\nContent-Type: \(contentType)\r\nAccept-Ranges: bytes\r\nContent-Length: \(end - start + 1)\r\nCache-Control: no-store\r\nConnection: close\r\n\(rangeHeader)\r\n"
-            send(client, data: Data(response.utf8))
-        } catch { reply(client, code: "500 Internal Server Error") }
+        }
+    }
+
+    private func completeTransfer(_ client: Client) {
+        client.transfer?.close(flags: .stop)
+        client.transfer = nil
+        client.readRemaining = 0
+        // The pin lasts only while this response is reading the file. A kept-alive
+        // connection serves the next segment, and that segment must be free to
+        // replace the one just sent.
+        if let resource = client.loadedResource {
+            releaseResource?(resource)
+            client.loadedResource = nil
+        }
+        guard client.keepAlive, !stopped, clients[ObjectIdentifier(client)] != nil else { finish(client); return }
+        armTimeout(client, seconds: Self.silentRequestSeconds)
+        nextRequest(client)
     }
 
     nonisolated static func isSegmentName(_ name: String) -> Bool {
@@ -371,25 +456,37 @@ public final class MediaHTTPServer {
     }
 
     private func reply(_ client: Client, code: String, extra: String = "") {
-        client.remaining = 0
-        send(client, data: Data("HTTP/1.1 \(code)\r\nContent-Length: 0\r\nConnection: close\r\n\(extra)\r\n".utf8))
+        client.keepAlive = false
+        client.transfer?.close(flags: .stop)
+        client.transfer = nil
+        write(client, data: Data("HTTP/1.1 \(code)\r\nContent-Length: 0\r\nConnection: close\r\n\(extra)\r\n".utf8)) {
+            self.finish(client)
+        }
     }
 
-    private func send(_ client: Client, data: Data) {
+    private func write(_ client: Client, data: Data, then: @escaping @MainActor () -> Void) {
         guard !stopped, clients[ObjectIdentifier(client)] != nil else { return }
         armTimeout(client)
         client.connection.send(content: data, completion: .contentProcessed { [weak self] error in
             MainActor.assumeIsolated {
                 guard let self, self.clients[ObjectIdentifier(client)] != nil else { return }
-                guard error == nil, client.remaining > 0 else { self.finish(client); return }
-                do {
-                    guard let chunk = try client.file?.read(upToCount: Int(min(client.remaining, 64 * 1024))), !chunk.isEmpty else {
-                        self.finish(client); return
-                    }
-                    client.remaining -= Int64(chunk.count)
-                    self.send(client, data: chunk)
-                } catch { self.finish(client) }
+                if error != nil { self.finish(client); return }
+                then()
             }
         })
     }
+}
+
+/// Accumulates one DispatchIO read. The handler may deliver the requested
+/// length as several pieces before `done` is true.
+private final class TransferBytes: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+    func append(_ chunk: DispatchData) {
+        var piece = Data()
+        piece.reserveCapacity(chunk.count)
+        chunk.enumerateBytes { buffer, _, _ in piece.append(contentsOf: buffer) }
+        lock.lock(); data.append(piece); lock.unlock()
+    }
+    func copied() -> Data { lock.lock(); defer { lock.unlock() }; return data }
 }
