@@ -8,8 +8,7 @@ enum ExtractedSourceAdapter {
         allowAuthenticated: Bool = false,
         fetch: @Sendable (URL) async throws -> Data = HLSMaster.fetch) async throws -> [MediaCandidate] {
         let info = try validatedInfo(data, allowAuthenticated: allowAuthenticated)
-        var candidates = try candidates(data, allowUnverifiedWholeSources: allowUnverifiedWholeSources,
-                                        allowAuthenticated: allowAuthenticated)
+        var candidates = try candidates(from: info, allowUnverifiedWholeSources: allowUnverifiedWholeSources)
 
         // A master is a repeat only when its URL and headers both match, so two
         // masters that share a format signature but differ in request headers are
@@ -95,7 +94,11 @@ enum ExtractedSourceAdapter {
 
     static func candidates(_ data: Data, allowUnverifiedWholeSources: Bool = false,
                            allowAuthenticated: Bool = false) throws -> [MediaCandidate] {
-        let info = try validatedInfo(data, allowAuthenticated: allowAuthenticated)
+        try candidates(from: try validatedInfo(data, allowAuthenticated: allowAuthenticated),
+                       allowUnverifiedWholeSources: allowUnverifiedWholeSources)
+    }
+
+    private static func candidates(from info: Info, allowUnverifiedWholeSources: Bool = false) throws -> [MediaCandidate] {
         guard let formats = info.formats, !formats.isEmpty else { throw ResolutionFailure.failed }
         let title = cleanTitle(info.title)
         let infoHeaders = info.http_headers ?? [:]
