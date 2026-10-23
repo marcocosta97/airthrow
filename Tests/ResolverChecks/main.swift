@@ -1,6 +1,7 @@
 import Foundation
 import Darwin
 import CommonCrypto
+import SQLite3
 
 @main
 @MainActor
@@ -903,6 +904,19 @@ struct ResolverChecks {
         let scopedSafari = NetscapeCookies.youtube(parsedSafari ?? [])
         try check(scopedSafari.count == 1 && scopedSafari[0].name == "SID" && scopedSafari[0].secure,
                   "Safari scope filter was not applied")
+        let cookieDB = temp.appendingPathComponent("Cookies")
+        var rawDatabase: OpaquePointer?
+        guard sqlite3_open(cookieDB.path, &rawDatabase) == SQLITE_OK else {
+            throw NSError(domain: "ResolverChecks", code: 1, userInfo: [NSLocalizedDescriptionKey: "Cookie fixture database was not created"])
+        }
+        sqlite3_exec(rawDatabase, "CREATE TABLE sample(v INTEGER); INSERT INTO sample VALUES (7);", nil, nil, nil)
+        sqlite3_close(rawDatabase)
+        try Data("wal".utf8).write(to: URL(fileURLWithPath: cookieDB.path + "-wal"))
+        guard let openedCookies = SQLiteDatabase(path: cookieDB.path) else {
+            throw NSError(domain: "ResolverChecks", code: 1, userInfo: [NSLocalizedDescriptionKey: "Cookie fixture database did not open"])
+        }
+        try check(openedCookies.scalarInt("SELECT v FROM sample") == 7 && openedCookies.copiedWriteAheadLog,
+                  "Browser cookie database was not copied with its write-ahead log")
         guard let chromiumKey = ChromiumCookies.deriveKey(password: Array("test-password".utf8)) else {
             throw NSError(domain: "ResolverChecks", code: 1, userInfo: [NSLocalizedDescriptionKey: "Key derivation failed"])
         }

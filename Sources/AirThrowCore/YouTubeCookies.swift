@@ -620,16 +620,20 @@ enum SafariCookies {
 /// statement binding is intentionally absent.
 final class SQLiteDatabase {
     private var handle: OpaquePointer?
+    private var scratch: URL?
+    /// True when the private copy includes the browser's `-wal` sidecar.
+    private(set) var copiedWriteAheadLog = false
 
     init?(path: String) {
-        var database: OpaquePointer?
-        if sqlite3_open_v2(path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK {
-            handle = database
-            return
+        if let copy = Self.snapshot(path) {
+            scratch = copy.deletingLastPathComponent()
+            copiedWriteAheadLog = FileManager.default.fileExists(atPath: copy.path + "-wal")
+            if openReadOnly(copy.path) { return }
+            removeScratch()
         }
-        sqlite3_close(database)
-        // A live browser may hold a WAL lock; an immutable read still sees the
-        // committed store without copying it.
+        if openReadOnly(path) { return }
+        // Copying can fail while the browser holds the file. An immutable open
+        // still sees the last checkpoint, without the uncheckpointed `-wal`.
         var immutable: OpaquePointer?
         let escaped = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
         if sqlite3_open_v2("file:\(escaped)?mode=ro&immutable=1", &immutable,
@@ -641,7 +645,50 @@ final class SQLiteDatabase {
         return nil
     }
 
-    deinit { sqlite3_close(handle) }
+    deinit {
+        sqlite3_close(handle)
+        removeScratch()
+    }
+
+    private func openReadOnly(_ path: String) -> Bool {
+        var database: OpaquePointer?
+        if sqlite3_open_v2(path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK {
+            handle = database
+            return true
+        }
+        sqlite3_close(database)
+        return false
+    }
+
+    /// Copy the database and its WAL into a private directory. Opening the
+    /// live file can succeed while hiding the `-wal`, or fail while the
+    /// browser holds a lock and never reach a fallback.
+    private static func snapshot(_ path: String) -> URL? {
+        let source = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("athrow-cookies-" + UUID().uuidString, isDirectory: true)
+        let destination = directory.appendingPathComponent(source.lastPathComponent)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                                    attributes: [.posixPermissions: 0o700])
+            try FileManager.default.copyItem(at: source, to: destination)
+            for suffix in ["-wal", "-shm"] {
+                let extra = URL(fileURLWithPath: source.path + suffix)
+                guard FileManager.default.fileExists(atPath: extra.path) else { continue }
+                try FileManager.default.copyItem(at: extra, to: directory.appendingPathComponent(source.lastPathComponent + suffix))
+            }
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+            return destination
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            return nil
+        }
+    }
+
+    private func removeScratch() {
+        if let scratch { try? FileManager.default.removeItem(at: scratch) }
+        scratch = nil
+    }
 
     func query(_ sql: String) -> [SQLiteRow] {
         guard let handle else { return [] }
