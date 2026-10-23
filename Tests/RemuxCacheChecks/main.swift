@@ -84,6 +84,7 @@ struct RemuxCacheChecks {
                           "Eviction changed remux payload on regeneration")
             }
             let player = AVPlayer(url: media.url)
+            player.volume = 0
             let item = player.currentItem!
             var deadline = Date().addingTimeInterval(20)
             while item.status == .unknown, Date() < deadline { try await Task.sleep(for: .milliseconds(50)) }

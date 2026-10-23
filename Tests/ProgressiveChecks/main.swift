@@ -237,11 +237,12 @@ struct ProgressiveChecks {
         try check(recoveredHEVC.url.pathExtension == "m3u8" && recoveredHEVC.videoHeight == 2160,
                   "HEVC hardware startup failure did not recover through software HLS")
         let hevcAttempts = try String(contentsOf: directory.appendingPathComponent("encoder-attempts.txt"), encoding: .utf8)
-        try check(hevcAttempts.split(separator: "\n") == ["hardware-preflight", "hardware-job", "software-job"],
-                  "HEVC hardware was retried before software fallback: \(hevcAttempts)")
+        try check(hevcAttempts.split(separator: "\n") == ["hardware-preflight", "hardware-frames-preflight",
+                    "hardware-frames-job", "hardware-job", "software-job"],
+                   "HEVC fallback did not try hardware surfaces, CPU filters, then software once each: \(hevcAttempts)")
         recoveredHEVC.stop()
         await recoveredHEVC.waitForProducer()
-        print("PASS HEVC hardware startup failure switches directly to software fragmented MP4")
+        print("PASS failed HEVC surfaces retain hardware encoding before bounded software fallback")
 
         let timedPreparer = MediaPreparer(environment: environment, maximumBytes: 2 * 1024 * 1024 * 1024,
                                           startupTimeout: .milliseconds(200))

@@ -634,12 +634,14 @@ public struct MediaPreparer: Sendable {
                                 codec: plan.video.codec_name!, videoTimeBase: plan.video.time_base,
                                 audioTimeBase: plan.audio.time_base,
                                 sourceStart: Double(videoInput.format.start_time ?? "") ?? 0,
-                                duration: videoDuration!, matroska: videoInput.format.format_name == "matroska,webm")
+                                duration: videoDuration!, matroska: videoInput.format.format_name == "matroska,webm",
+                                reorderDelay: (plan.video.has_b_frames ?? 0) > 0)
                         } else {
                             remuxTimeline = try await RemoteRemuxIndex.timeline(url: source.url, headers: source.headers,
                                 stream: plan.video.index, codec: plan.video.codec_name!, videoTimeBase: plan.video.time_base,
                                 audioTimeBase: plan.audio.time_base, sourceStart: Double(videoInput.format.start_time ?? "") ?? 0,
-                                duration: videoDuration!, matroska: videoInput.format.format_name == "matroska,webm")
+                                duration: videoDuration!, matroska: videoInput.format.format_name == "matroska,webm",
+                                reorderDelay: (plan.video.has_b_frames ?? 0) > 0)
                         }
                         let audioOffset = (Double(videoInput.format.start_time ?? "") ?? 0)
                             - (Double(audioInput.format.start_time ?? "") ?? 0)
@@ -863,8 +865,9 @@ public struct MediaPreparer: Sendable {
                     } catch ResolutionFailure.timedOut { throw PreparationFailure.stalled }
                 }
                 let trim = remuxTimeline.arguments(index: index, length: length, boundaries: boundaries)
-                for offset in chunk.indices.reversed() where chunk[offset] == "-i" {
-                    chunk.insert(contentsOf: trim.input, at: offset)
+                let inputs = chunk.indices.filter { chunk[$0] == "-i" }
+                for (nth, offset) in inputs.enumerated().reversed() {
+                    chunk.insert(contentsOf: nth == 0 ? trim.input : trim.audio, at: offset)
                 }
                 chunk += trim.output
             } else {
@@ -1308,7 +1311,7 @@ public struct MediaPreparer: Sendable {
             options = try Self.inputOptions(headers: headers, hls: hls)
         }
         let arguments = ["-v", "error"] + options + ["-show_entries",
-            "format=duration,size,format_name,start_time:stream=time_base,index,codec_type,codec_name,codec_tag_string,pix_fmt,width,height,profile,channels,sample_rate,color_range,color_transfer,color_primaries,color_space,avg_frame_rate,r_frame_rate:stream_disposition=attached_pic:stream_side_data:stream_tags=language,title",
+            "format=duration,size,format_name,start_time:stream=time_base,index,codec_type,codec_name,has_b_frames,codec_tag_string,pix_fmt,width,height,profile,channels,sample_rate,color_range,color_transfer,color_primaries,color_space,avg_frame_rate,r_frame_rate:stream_disposition=attached_pic:stream_side_data:stream_tags=language,title",
             "-of", "json", "-i", isLocal ? url.path : url.absoluteString]
         let data = try await runProbe(executable: executable, arguments: arguments,
                                       timeout: .seconds(mpegts ? 8 : 40), retry: !isLocal)
@@ -1351,6 +1354,7 @@ public struct MediaPreparer: Sendable {
         let time_base: String?
         let codec_type: String?
         let codec_name: String?
+        let has_b_frames: Int?
         let codec_tag_string: String?
         let pix_fmt: String?
         let width: Int?

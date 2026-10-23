@@ -379,6 +379,16 @@ struct ResolverChecks {
                   && ChunkOutputCheck.accepts(produced: 5.4, requested: 6, final: true)
                   && !ChunkOutputCheck.accepts(produced: 6.2, requested: 6, final: true),
                   "Final remux chunk still rejects an audio tail")
+        let plain = HardwareScale.outputSize(width: 640, height: 360, enhancement: .upscale1080)
+        let odd = HardwareScale.outputSize(width: 1919, height: 1079, enhancement: .original)
+        try check(HardwareDecode.enabled(encoder: "h264_videotoolbox", enhancement: .upscale1080, frameRate: 24, colorRange: "tv")
+                  && !HardwareDecode.enabled(encoder: "h264_videotoolbox", enhancement: .cleanup1080, frameRate: 24, colorRange: "tv")
+                  && !HardwareDecode.enabled(encoder: "h264_videotoolbox", enhancement: .upscale1080, frameRate: 120, colorRange: "tv")
+                  && !HardwareDecode.enabled(encoder: "h264_videotoolbox", enhancement: .upscale1080, frameRate: 24, colorRange: "pc")
+                  && !HardwareDecode.enabled(encoder: "libx264", enhancement: .upscale1080, frameRate: 24, colorRange: "tv")
+                  && plain.width == 1920 && plain.height == 1080
+                  && odd.width == 1918 && odd.height == 1078,
+                  "Hardware frames were selected for a cleanup, full-range, or high-frame-rate source")
         try await expect(.unsupportedPage) { _ = try await absent.resolve(URL(string: "https://youtube.com/playlist?list=x")!) }
         try await expect(.unavailable) { _ = try await absent.resolve(page) }
         print("PASS local delivery selection, direct bypass, exact hosts, video-only normalization and missing helpers")

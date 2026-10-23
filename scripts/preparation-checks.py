@@ -2,6 +2,7 @@
 """Synthetic stream-copy and delivery checks; does not launch/control the desktop app."""
 import http.server
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -19,10 +20,15 @@ reuse = next((arg.split('=', 1)[1] for arg in sys.argv if arg.startswith('--reus
 OUT = Path(reuse).resolve() if reuse else Path(tempfile.mkdtemp(prefix='preparation-', dir=ROOT / 'build'))
 FFMPEG = shutil.which('ffmpeg') or '/opt/homebrew/bin/ffmpeg'
 FFPROBE = shutil.which('ffprobe') or '/opt/homebrew/bin/ffprobe'
+# The cleanup checks inspect their entire preparation root. Give this run its
+# own root so other fixture checks or a running app cannot affect that assertion.
+(OUT / 'tmp').mkdir(exist_ok=True)
+TEST_ENV = dict(os.environ, TMPDIR=str(OUT / 'tmp') + '/')
 
 
 def run(arguments, live=False, **options):
     try:
+        options.setdefault('env', TEST_ENV)
         return subprocess.run([str(arg) for arg in arguments], check=True,
                               capture_output=not live, text=True, **options)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
@@ -112,10 +118,10 @@ if not reuse:
     no_encoder = OUT / 'no-encoder-ffmpeg'
     no_encoder.write_text('#!/usr/bin/python3\nimport sys\nsys.exit(1)\n')
     no_encoder.chmod(0o700)
-    # Pass the hardware preflight but fail the real job. Log encoder attempts so a
-    # hardware HLS failure cannot silently retry hardware MP4 before software.
+    # Pass preflights but fail real hardware jobs. Distinguish hardware surfaces
+    # from CPU filters, and prohibit container retries of either failed path.
     hardware_failure = OUT / 'hardware-failure-ffmpeg'
-    hardware_failure.write_text('#!/usr/bin/python3\nimport os, pathlib, sys\na = sys.argv[1:]\nhardware = "h264_videotoolbox" in a or "hevc_videotoolbox" in a\npreflight = "lavfi" in a\nwith pathlib.Path(' + repr(str(OUT / 'encoder-attempts.txt')) + ').open("a") as log:\n log.write(("hardware" if hardware else "software") + ("-preflight" if preflight else "-job") + "\\n")\nif hardware: sys.exit(0 if preflight else 1)\nos.execv(' + repr(FFMPEG) + ', [' + repr(FFMPEG) + '] + a)\n')
+    hardware_failure.write_text('#!/usr/bin/python3\nimport os, pathlib, sys\na = sys.argv[1:]\nhardware = "h264_videotoolbox" in a or "hevc_videotoolbox" in a\npreflight = "lavfi" in a\nframes = any("scale_vt=" in v for v in a)\nwith pathlib.Path(' + repr(str(OUT / 'encoder-attempts.txt')) + ').open("a") as log:\n log.write(("hardware-frames" if frames else "hardware" if hardware else "software") + ("-preflight" if preflight else "-job") + "\\n")\nif hardware: sys.exit(0 if preflight else 1)\nos.execv(' + repr(FFMPEG) + ', [' + repr(FFMPEG) + '] + a)\n')
     hardware_failure.chmod(0o700)
     # A finite, seekable source larger than the rolling-cache budget.
     ffmpeg('-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',

@@ -10,6 +10,10 @@ actor RemuxRangeReader {
     private let deadline = ContinuousClock().now.advanced(by: .seconds(25))
     private var used = 0
     private var blocks: [Int64: Data] = [:]
+    private var loads: [Int64: BlockLoad] = [:]
+    private final class BlockLoad {
+        var waiters: [CheckedContinuation<Data, Error>] = []
+    }
     private init(url: URL, headers: [String: String], size: Int64) {
         self.url = url; self.headers = headers; self.size = size
     }
@@ -33,12 +37,30 @@ actor RemuxRangeReader {
               ContinuousClock().now < deadline else { throw PreparationFailure.unsupported }
         let block = offset / 4096 * 4096
         if count <= 4096, offset + Int64(count) <= block + 4096 {
-            if let data = blocks[block] { return data.subdata(in: Int(offset - block)..<Int(offset - block) + count) }
-            let data = try await fetch(block, Int(min(4096, size - block)))
-            if blocks.count < 256 { blocks[block] = data }
+            let data = try await blockBytes(block)
             return data.subdata(in: Int(offset - block)..<Int(offset - block) + count)
         }
         return try await fetch(offset, count)
+    }
+    /// Concurrent reads of one 4 KB block share a single range request.
+    private func blockBytes(_ block: Int64) async throws -> Data {
+        if let data = blocks[block] { return data }
+        if let load = loads[block] {
+            return try await withCheckedThrowingContinuation { load.waiters.append($0) }
+        }
+        let load = BlockLoad()
+        loads[block] = load
+        do {
+            let data = try await fetch(block, Int(min(4096, size - block)))
+            if blocks.count < 256 { blocks[block] = data }
+            loads[block] = nil
+            load.waiters.forEach { $0.resume(returning: data) }
+            return data
+        } catch {
+            loads[block] = nil
+            load.waiters.forEach { $0.resume(throwing: error) }
+            throw error
+        }
     }
     private func fetch(_ offset: Int64, _ count: Int) async throws -> Data {
         used += count
@@ -67,48 +89,77 @@ enum RemoteRemuxIndex {
         let pts: Int64; let dts: Int64?; let offset: Int64; let size: Int; let block: Bool
         var track: UInt64? = nil
         var relative: Int64? = nil
+        var followingPTS: Int64? = nil
     }
     static func timeline(url: URL, headers: [String: String], stream: Int, codec: String,
                          videoTimeBase: String?, audioTimeBase: String?, sourceStart: Double,
-                         duration: Double, matroska: Bool) async throws -> RemuxTimeline {
+                         duration: Double, matroska: Bool, reorderDelay: Bool) async throws -> RemuxTimeline {
         let reader = try await RemuxRangeReader.open(url, headers: headers)
         let vtb = try RemuxTimeline.timeBase(videoTimeBase)
         let atb = try RemuxTimeline.timeBase(audioTimeBase)
         let points = matroska ? try await mkv(reader, stream: stream, timeBase: vtb)
                              : try await mp4(reader, stream: stream, timeBase: vtb)
-        var selected: [Point] = []
-        for point in points {
-            if let last = selected.last, Double(point.pts - last.pts) * vtb < 6 { continue }
-            selected.append(point)
-        }
-        guard !selected.isEmpty, selected.count <= 2401 else { throw PreparationFailure.unsupported }
-        // Limit parallel network reads. Joining the group also closes every
-        // pending range operation when validation or cancellation fails.
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            var next = 0
-            func enqueue(_ point: Point) {
-                group.addTask {
-                    let location = point.block ? try await blockLocation(reader, point: point) : (point.offset, point.size)
-                    var data = try await reader.read(location.0, min(location.1, 4096))
-                    if point.block {
-                        guard let first = data.first, first != 0 else { throw PreparationFailure.unsupported }
-                        let width = first.leadingZeroBitCount + 1
-                        guard width <= 8, data.count > width + 3, data[width + 2] & 0x06 == 0 else {
-                            throw PreparationFailure.unsupported
-                        }
-                        data = Data(data.dropFirst(width + 3))
-                    }
-                    guard RemuxTimeline.isRefreshPoint(data, codec: codec) else { throw PreparationFailure.unsupported }
-                }
+        guard !points.isEmpty else { throw PreparationFailure.unsupported }
+        // A non-IDR sync sample is skipped, as the local packet scan does.
+        // The next sample is still eligible, so one open GOP does not abandon
+        // the cache. Reads stay in small parallel batches.
+        var accepted: [Point] = []
+        var index = 0
+        while index < points.count, accepted.count <= 2401 {
+            var batch: [(offset: Int, point: Point)] = []
+            var scan = index
+            var lastPTS = accepted.last?.pts
+            while scan < points.count, batch.count < 16 {
+                let point = points[scan]
+                scan += 1
+                if let lastPTS, Double(point.pts - lastPTS) * vtb < 6 { continue }
+                batch.append((offset: scan - 1, point: point))
+                lastPTS = point.pts
             }
-            while next < min(16, selected.count) { enqueue(selected[next]); next += 1 }
-            while try await group.next() != nil {
-                if next < selected.count { enqueue(selected[next]); next += 1 }
+            if batch.isEmpty { break }
+            let flags = try await refreshFlags(reader, points: batch.map(\.point), codec: codec)
+            guard let failed = flags.firstIndex(of: false) else {
+                accepted.append(contentsOf: batch.map(\.point))
+                index = scan
+                continue
             }
+            accepted.append(contentsOf: batch.prefix(failed).map(\.point))
+            index = batch[failed].offset + 1
         }
-        return try RemuxTimeline(cuts: selected.map { .init(pts: $0.pts, dts: $0.dts) },
+        guard !accepted.isEmpty, accepted.count <= 2401 else { throw PreparationFailure.unsupported }
+        return try RemuxTimeline(cuts: accepted.map {
+                                     var cut = RemuxTimeline.Cut(pts: $0.pts, dts: $0.dts)
+                                     cut.followingKeyframe = $0.followingPTS
+                                     return cut
+                                 },
                                  videoTimeBase: vtb, audioTimeBase: atb, sourceStart: sourceStart,
-                                 duration: duration, inspectBoundaries: matroska)
+                                 duration: duration, inspectBoundaries: matroska,
+                                 containerSeekSlop: matroska && reorderDelay)
+    }
+
+    private static func refreshFlags(_ reader: RemuxRangeReader, points: [Point], codec: String) async throws -> [Bool] {
+        try await withThrowingTaskGroup(of: (Int, Bool).self) { group in
+            for (index, point) in points.enumerated() {
+                group.addTask { (index, try await isDecoderRefresh(reader, point: point, codec: codec)) }
+            }
+            var flags = [Bool](repeating: false, count: points.count)
+            for try await (index, flag) in group { flags[index] = flag }
+            return flags
+        }
+    }
+
+    private static func isDecoderRefresh(_ reader: RemuxRangeReader, point: Point, codec: String) async throws -> Bool {
+        let location = point.block ? try await blockLocation(reader, point: point) : (point.offset, point.size)
+        var data = try await reader.read(location.0, min(location.1, 4096))
+        if point.block {
+            guard let first = data.first, first != 0 else { throw PreparationFailure.unsupported }
+            let width = first.leadingZeroBitCount + 1
+            guard width <= 8, data.count > width + 3, data[width + 2] & 0x06 == 0 else {
+                throw PreparationFailure.unsupported
+            }
+            data = Data(data.dropFirst(width + 3))
+        }
+        return RemuxTimeline.isRefreshPoint(data, codec: codec)
     }
 
     private struct Box { let type: String; let payload: Data }
@@ -351,7 +402,14 @@ enum RemoteRemuxIndex {
         for cue in cues where cue.id == 0xbb {
             let fields = try elements(cue.data)
             let seconds = Double(try integer(fields, 0xb3)) * scale / 1e9
-            if let last, seconds - last < 6 { continue }
+            if let last, seconds - last < 6 {
+                // The cue is too close to keep, but it is still the next keyframe
+                // the demuxer can land on.
+                if let index = result.indices.last, result[index].followingPTS == nil {
+                    result[index].followingPTS = Int64((seconds / timeBase).rounded())
+                }
+                continue
+            }
             for position in fields where position.id == 0xb7 {
                 let values = try elements(position.data)
                 guard try integer(values, 0xf7) == number else { continue }
