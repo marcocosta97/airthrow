@@ -66,10 +66,10 @@ public enum CLIArguments {
             guard (2...3).contains(arguments.count),
                   let enhancement = VideoEnhancement(rawValue: arguments[1]),
                   arguments.count == 2 || VideoUpscaler(rawValue: arguments[2]) != nil else {
-                throw AppFailure(.invalidRequest, "Usage: athrow enhance original|upscale_1080|cleanup_1080|upscale_4k|cleanup_4k [lanczos|ai_low_latency|ai_standard]")
+                throw AppFailure(.invalidRequest, "Usage: athrow enhance original|upscale_1080|cleanup_1080|upscale_4k|cleanup_4k [automatic|lanczos|ai_low_latency|ai_standard]")
             }
             request.enhancement = enhancement
-            request.upscaler = arguments.count == 3 ? VideoUpscaler(rawValue: arguments[2]) : .lanczos
+            request.upscaler = arguments.count == 3 ? VideoUpscaler(rawValue: arguments[2]) : .automatic
         default:
             guard arguments.count == 1 else { throw AppFailure(.invalidRequest, "Unexpected arguments. Run athrow --help.") }
         }

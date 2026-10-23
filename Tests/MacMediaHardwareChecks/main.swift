@@ -15,6 +15,7 @@ struct MacMediaHardwareChecks {
             ("h264", "input.mkv", .upscale1080, .videoConversion),
             ("hevc", "input.mkv", .upscale4K, .videoConversion),
             ("cleanup", "input.mkv", .cleanup1080, .videoConversion),
+            ("lanczos", "input.mkv", .upscale1080, .videoConversion),
             ("no-scale", "input.mkv", .upscale1080, .videoConversion),
             ("failed-frames", "input.mkv", .upscale1080, .videoConversion),
             ("software", "input.mkv", .upscale1080, .videoConversion),
@@ -33,7 +34,7 @@ struct MacMediaHardwareChecks {
             let source = ResolvedSource(url: root.appendingPathComponent(file),
                 audio: name == "separate" ? MediaTrack(url: root.appendingPathComponent("flac.mkv")) : nil,
                 needsPreparation: true)
-                .withConversionPolicy(.allowVideo).withEnhancement(enhancement)
+                .withConversionPolicy(.allowVideo).withEnhancement(enhancement, upscaler: name == "lanczos" ? .lanczos : .automatic)
             let progressive = name == "progressive" || name == "cached"
             let prepared = try await preparer.prepare(source, mode: progressive ? .progressiveHLS : .completeFile)
             do {

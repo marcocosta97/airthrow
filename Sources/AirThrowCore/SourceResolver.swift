@@ -76,7 +76,7 @@ public struct ResolvedSource: Sendable {
                 videoKnownPresent: Bool = false, isLive: Bool = false,
                 conversionPolicy: ConversionPolicy = .avoidVideo,
                 plannedPath: PlaybackPath? = nil,
-                enhancement: VideoEnhancement = .original, upscaler: VideoUpscaler = .lanczos) {
+                enhancement: VideoEnhancement = .original, upscaler: VideoUpscaler = .automatic) {
         self.url = url; self.title = title; self.headers = headers; self.audio = audio
         self.hlsAudioOptions = hlsAudioOptions
         self.hlsVariant = hlsVariant
@@ -99,7 +99,7 @@ public struct ResolvedSource: Sendable {
         return result
     }
 
-    public func withEnhancement(_ choice: VideoEnhancement, upscaler: VideoUpscaler = .lanczos) -> ResolvedSource {
+    public func withEnhancement(_ choice: VideoEnhancement, upscaler: VideoUpscaler = .automatic) -> ResolvedSource {
         var result = self
         result.enhancement = choice
         result.upscaler = upscaler

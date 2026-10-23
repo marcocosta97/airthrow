@@ -109,20 +109,22 @@ public enum VideoEnhancement: String, Codable, Sendable, CaseIterable {
 
 /// An explicit processing backend, independent of output size and cleanup.
 public enum VideoUpscaler: String, Codable, Sendable, CaseIterable {
+    case automatic
     case lanczos
     case lowLatency = "ai_low_latency"
     case standard = "ai_standard"
     public var label: String {
         switch self {
+        case .automatic: "Automatic"
         case .lanczos: "Lanczos"
         case .lowLatency: "AI Super Resolution · Low Latency"
         case .standard: "AI Super Resolution · Standard"
         }
     }
-    public var isAI: Bool { self != .lanczos }
+    public var isAI: Bool { self == .lowLatency || self == .standard }
     public static let preferenceKey = "videoUpscaler"
     public static func preferred(_ defaults: UserDefaults = .standard) -> Self {
-        Self(rawValue: defaults.string(forKey: preferenceKey) ?? "") ?? .lanczos
+        Self(rawValue: defaults.string(forKey: preferenceKey) ?? "") ?? .automatic
     }
 }
 

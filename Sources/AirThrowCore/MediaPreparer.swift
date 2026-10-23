@@ -730,7 +730,7 @@ public struct MediaPreparer: Sendable {
             if (source.upscaler.isAI && source.enhancement != .original) || temporalCleanup {
                 let normalization = try AppleInputNormalization(stream: plan.video)
                 let layout = try await SuperResolutionLayout.make(width: normalization.width, height: normalization.height,
-                    targetHeight: source.enhancement.targetHeight!, backend: source.upscaler)
+                    targetHeight: source.enhancement.targetHeight!, backend: source.upscaler.isAI ? source.upscaler : .lanczos)
                 if source.upscaler == .standard, await !SuperResolutionSupport.standardModelReady {
                     throw AppFailure(.unsupportedOperation, "Download the AI Standard model in Settings or Video options before using it.")
                 }
@@ -881,7 +881,8 @@ public struct MediaPreparer: Sendable {
             let encoder = plan.videoAction == .convert
                 ? try await Self.selectEncoder(stream: plan.video, enhancement: plan.enhancement, executable: ffmpeg)
                 : "copy"
-            if Self.hardwareFrames(stream: plan.video, encoder: encoder, enhancement: plan.enhancement),
+            if source.upscaler == .automatic,
+               Self.hardwareFrames(stream: plan.video, encoder: encoder, enhancement: plan.enhancement),
                try await Self.canEncode(stream: plan.video, enhancement: plan.enhancement,
                                         encoder: encoder, executable: ffmpeg, hardwareFrames: true) {
                 do { return try await deliver(encoder: encoder, hardwareFrames: true) }

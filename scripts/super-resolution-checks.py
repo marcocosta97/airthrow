@@ -4,6 +4,7 @@ import argparse
 import functools
 import http.server
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -22,6 +23,7 @@ def main():
     args = parser.parse_args()
     (ROOT / "build").mkdir(exist_ok=True)
     folder = Path(tempfile.mkdtemp(prefix="super-resolution-checks-", dir=ROOT / "build"))
+    (folder / "tmp").mkdir()
     for name, duration, tagged in [("short", 0.5, True), ("long", 6.5, True), ("unknown", 0.5, False)]:
         arguments = ["ffmpeg", "-v", "error", "-nostdin", "-n", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24",
             "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", duration]
@@ -94,7 +96,8 @@ def main():
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         result = subprocess.run([str(args.binary.resolve()), str(folder), f"http://127.0.0.1:{server.server_port}"],
-            capture_output=True, text=True, timeout=600)
+            capture_output=True, text=True, timeout=600,
+            env=dict(os.environ, TMPDIR=str(folder / "tmp") + "/"))
         (folder / "checks.log").write_text(result.stdout + result.stderr)
         print(result.stdout, end="")
         if result.returncode:

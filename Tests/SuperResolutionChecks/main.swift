@@ -25,9 +25,23 @@ struct SuperResolutionChecks {
             throw AppFailure(.playbackFailed, "Unknown backend accepted")
         } catch let error as AppFailure { try check(error.code == .invalidRequest, "Unknown backend not rejected") }
         let defaults = UserDefaults(suiteName: "app.airthrow.checks.\(UUID().uuidString)")!
-        try check(VideoUpscaler.preferred(defaults) == .lanczos && !PreparationPreferences.current(defaults).aiBeforePlayback
+        try check(VideoUpscaler.preferred(defaults) == .automatic && !PreparationPreferences.current(defaults).aiBeforePlayback
                   && PreparationPreferences.current(defaults).noiseReduction == .ffmpeg,
                   "Fresh defaults changed native/direct behavior")
+        try check(!VideoUpscaler.automatic.isAI && !VideoUpscaler.lanczos.isAI,
+                  "Traditional processing unexpectedly selects an AI backend")
+        defaults.set(VideoUpscaler.lanczos.rawValue, forKey: VideoUpscaler.preferenceKey)
+        try check(VideoUpscaler.preferred(defaults) == .lanczos, "Saved Lanczos selection was replaced by Automatic")
+        let fixture = URL(fileURLWithPath: "/tmp/airthrow-synthetic-backend.mp4")
+        for backend in VideoUpscaler.allCases {
+            var source = ResolvedSource(url: fixture).withEnhancement(.upscale1080, upscaler: backend)
+            source.preparationPosition = 12
+            for transformed in [source.withConversionPolicy(.allowVideo), source.withTransportRemux(isLive: false),
+                                source.withLivePresentation(), source.withPreparationInput(fixture)] {
+                try check(transformed.upscaler == backend && transformed.preparationPosition == 12,
+                          "Source replacement lost the selected processing backend or preparation position")
+            }
+        }
         defaults.set(VideoUpscaler.standard.rawValue, forKey: VideoUpscaler.preferenceKey)
         defaults.set(true, forKey: PreparationPreferences.aiBeforePlaybackKey)
         try check(VideoUpscaler.preferred(defaults) == .standard && PreparationPreferences.current(defaults).aiBeforePlayback,

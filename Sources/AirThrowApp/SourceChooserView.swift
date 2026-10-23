@@ -16,14 +16,14 @@ struct VideoMenuView: View {
     @SwiftUI.State private var draftVideo = "automatic"
     @SwiftUI.State private var draftAction: EnhancementAction = .original
     @SwiftUI.State private var draftOutput4K = false
-    @SwiftUI.State private var draftUpscaler: VideoUpscaler = .lanczos
+    @SwiftUI.State private var draftUpscaler: VideoUpscaler = .automatic
     @SwiftUI.State private var draftSourceIDs: [String] = []
     private var status: PlaybackSnapshot { controller.snapshot }
     private var sources: [SourceOptionSnapshot] { status.sources ?? [] }
     private var audioOptions: [AudioOptionSnapshot] { status.audioOptions ?? [] }
     private var subtitleOptions: [SubtitleOptionSnapshot] { status.subtitleOptions ?? [] }
     private var enhancement: VideoEnhancement { status.videoEnhancement ?? .original }
-    private var upscaler: VideoUpscaler { status.videoUpscaler ?? .lanczos }
+    private var upscaler: VideoUpscaler { status.videoUpscaler ?? .automatic }
     private var enhancementAction: EnhancementAction { .from(enhancement) }
     private var audioSelection: String { status.selectedAudioID ?? "" }
     private var subtitleSelection: String { status.selectedSubtitleID ?? "" }

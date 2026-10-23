@@ -102,7 +102,7 @@ struct SettingsView: View {
     @AppStorage(PreparationPreferences.retainAllKey) private var retainAll = false
     @AppStorage(PreparationPreferences.remuxCacheKey) private var remuxCache = false
     @AppStorage(PreparationPreferences.windowSecondsKey) private var windowSeconds = 60
-    @AppStorage(VideoUpscaler.preferenceKey) private var upscaler = VideoUpscaler.lanczos.rawValue
+    @AppStorage(VideoUpscaler.preferenceKey) private var upscaler = VideoUpscaler.automatic.rawValue
     @AppStorage(PreparationPreferences.aiBeforePlaybackKey) private var aiBeforePlayback = false
     @AppStorage(PreparationPreferences.noiseReductionKey) private var noiseReduction = CleanupNoiseReduction.ffmpeg.rawValue
 

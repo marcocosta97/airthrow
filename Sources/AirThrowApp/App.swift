@@ -511,7 +511,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 guard let enhancement = request.enhancement else {
                     throw AppFailure(.invalidRequest, "Choose an enhancement preset.")
                 }
-                try controller.selectEnhancement(enhancement, upscaler: request.upscaler ?? .lanczos)
+                try controller.selectEnhancement(enhancement, upscaler: request.upscaler ?? .automatic)
                 return Response(message: "Changing enhancement at the current position, preserving play/pause.", pending: true, status: controller.snapshot)
             }
             return Response(message: request.command == .status ? controller.snapshot.state.rawValue : "Done.", status: controller.snapshot)

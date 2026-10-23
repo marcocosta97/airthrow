@@ -138,7 +138,7 @@ final class PlaybackController: ObservableObject {
     /// Per-item enhancement preference captured for the current item. Reset to
     /// `.original` for every new item; a source-quality change keeps it.
     private var videoEnhancement: VideoEnhancement = .original
-    private var videoUpscaler: VideoUpscaler = .lanczos
+    private var videoUpscaler: VideoUpscaler = .automatic
     @Published private(set) var superResolutionModelReady = SuperResolutionSupport.standardModelReady
     @Published private(set) var downloadingSuperResolutionModel = false
 
