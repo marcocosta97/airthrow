@@ -537,6 +537,14 @@ let tests: [(String, () throws -> Void)] = [
             let response = try JSONDecoder().decode(Response.self, from: Data(buffer.prefix(count)))
             try check(response.error?.code == .invalidRequest, "Malformed input was accepted")
         }
+        let wideDirectory = directory.appendingPathComponent("wide-replies")
+        let widePath = wideDirectory.appendingPathComponent("control.sock").path
+        let body = String(repeating: "q", count: LocalSocket.maxBytes + 4096)
+        let wide = CommandServer(path: widePath)
+        try wide.start { _, reply in reply(Response(message: body)) }
+        defer { wide.stop() }
+        try check(LocalSocket.send(Request(.status), path: widePath).message.count == body.count,
+                  "Status reply over 32 KB was rejected")
     }),
     ("socket restart releases ownership", {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ap-restart-\(UUID().uuidString.prefix(8))")

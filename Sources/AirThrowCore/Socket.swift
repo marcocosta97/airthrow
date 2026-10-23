@@ -3,6 +3,9 @@ import Darwin
 
 public enum LocalSocket {
     public static let maxBytes = 32_768
+    /// Status replies include the queue and diagnostics, which can pass the
+    /// request cap. Requests stay at `maxBytes`.
+    public static let maxReplyBytes = 256 * 1024
     public static var directory: String {
         // Darwin's per-user temporary directory is short enough for sockaddr_un.
         let root = FileManager.default.temporaryDirectory.path
@@ -65,17 +68,17 @@ public enum LocalSocket {
         } catch { Darwin.close(fd); throw error }
     }
 
-    static func readLine(_ fd: Int32) throws -> Data {
+    static func readLine(_ fd: Int32, limit: Int = maxBytes) throws -> Data {
         var data = Data()
         var buffer = [UInt8](repeating: 0, count: 4096)
         let deadline = Date().addingTimeInterval(4)
-        while data.count <= maxBytes && Date() < deadline {
-            let count = recv(fd, &buffer, min(buffer.count, maxBytes + 1 - data.count), 0)
+        while data.count <= limit && Date() < deadline {
+            let count = recv(fd, &buffer, min(buffer.count, limit + 1 - data.count), 0)
             if count < 0 && errno == EINTR { continue }
             guard count > 0 else { throw unavailable("The command connection closed or timed out.") }
             if let newline = buffer[..<count].firstIndex(of: 10) {
                 data.append(contentsOf: buffer[..<newline])
-                guard data.count <= maxBytes else { break }
+                guard data.count <= limit else { break }
                 return data
             }
             data.append(contentsOf: buffer[..<count])
@@ -83,8 +86,8 @@ public enum LocalSocket {
         throw AppFailure(.invalidRequest, "Command exceeds the size or time limit.")
     }
 
-    static func writeLine(_ data: Data, to fd: Int32) throws {
-        guard data.count <= maxBytes else { throw AppFailure(.invalidRequest, "Command is too large.") }
+    static func writeLine(_ data: Data, to fd: Int32, limit: Int = maxBytes) throws {
+        guard data.count <= limit else { throw AppFailure(.invalidRequest, "Command is too large.") }
         let bytes = data + Data([10])
         try bytes.withUnsafeBytes { raw in
             var sent = 0
@@ -101,7 +104,7 @@ public enum LocalSocket {
         let fd = try connect(path)
         defer { Darwin.close(fd) }
         try writeLine(JSONEncoder().encode(request), to: fd)
-        return try JSONDecoder().decode(Response.self, from: readLine(fd))
+        return try JSONDecoder().decode(Response.self, from: readLine(fd, limit: maxReplyBytes))
     }
 
     static func unavailable(_ message: String) -> AppFailure { AppFailure(.appUnavailable, message) }
@@ -161,7 +164,7 @@ public final class CommandServer: @unchecked Sendable {
                         guard box.semaphore.wait(timeout: .now() + 2) == .success, let reply = box.get() else {
                             throw LocalSocket.unavailable("AirThrow did not respond in time.")
                         }
-                        try LocalSocket.writeLine(JSONEncoder().encode(reply), to: client)
+                        try LocalSocket.writeLine(JSONEncoder().encode(reply), to: client, limit: LocalSocket.maxReplyBytes)
                     } catch {
                         let failure = error as? AppFailure ?? AppFailure(.invalidRequest, "Invalid command JSON.")
                         if let data = try? JSONEncoder().encode(Response(error: failure)) {
