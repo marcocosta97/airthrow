@@ -3,6 +3,33 @@ import AVFoundation
 
 /// A provider that deliberately completes after cancellation, modeling a
 /// resource acquisition that has already passed its final cancellation check.
+private final class ChunkGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var used = false
+    private var resume: (() -> Void)?
+    func claim() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if used { return false }
+        used = true
+        return true
+    }
+    func store(_ resume: @escaping () -> Void) {
+        lock.lock(); defer { lock.unlock() }
+        self.resume = resume
+    }
+    var isWaiting: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return resume != nil
+    }
+    func release() {
+        lock.lock()
+        let resume = self.resume
+        self.resume = nil
+        lock.unlock()
+        resume?()
+    }
+}
+
 @MainActor
 private final class LateResourceProvider {
     var pending: CheckedContinuation<URL, Never>?
@@ -88,6 +115,33 @@ struct CacheChecks {
             catch is CancellationError {}
             try check(producer.active == 0, "Cancelled seek left its encoder running")
             report("PASS five-minute seek prioritizes target, skips earlier chunks and cancels obsolete work")
+        }
+        do {
+            let workspace = try PreparationWorkspace()
+            let producer = CacheProducer()
+            let gate = ChunkGate()
+            let cache = try CachedHLS(workspace: workspace, duration: 120, fragmented: false,
+                                     preferences: PreparationPreferences()) { index, _, _, directory in
+                if index == 1 && gate.claim() {
+                    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                        gate.store { continuation.resume() }
+                    }
+                    try Task.checkCancellation()
+                }
+                return try await producer.produce(index, directory: directory)
+            }
+            defer { cache.stop() }
+            try await cache.warmUp()
+            cache.updatePosition(0, playing: true)
+            try await waitUntil("Cancelled chunk did not start", { gate.isWaiting })
+            cache.updatePosition(0)
+            let resumed = Task { try await cache.resource("segment000001.ts") }
+            try await Task.sleep(for: .milliseconds(50))
+            gate.release()
+            let resource = try await resumed.value
+            cache.release(resource)
+            try check(producer.finished.contains(1), "Cancelled segment job was reused instead of generated again")
+            report("PASS a cancelled segment job is generated again")
         }
         do {
             let workspace = try PreparationWorkspace()

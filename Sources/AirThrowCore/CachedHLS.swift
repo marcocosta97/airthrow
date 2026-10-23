@@ -203,7 +203,17 @@ final class CachedHLS {
         guard !stopped else { throw CancellationError() }
         if retained[index] != nil { return }
         guard !productionCancelled else { throw CancellationError() }
-        if let job = jobs[index] { try await job.value; return }
+        // Pause cancels speculative jobs. A later request for that segment must
+        // wait for the cancelled job to leave the map and then generate again.
+        while let job = jobs[index] {
+            do {
+                try await job.value
+                return
+            } catch is CancellationError {
+                try Task.checkCancellation()
+                if jobs[index] == job { jobs[index] = nil }
+            }
+        }
         let previous = tail
         let workspace = workspace
         let generate = generate
