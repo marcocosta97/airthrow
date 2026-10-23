@@ -253,6 +253,71 @@ public final class PreparedMedia {
     }
 }
 
+/// Remembers file sizes and only walks the workspace when a directory changes.
+/// Between those changes the growing output file is the only one restatted.
+private final class WorkspaceBytes: @unchecked Sendable {
+    private let lock = NSLock()
+    private let root: URL
+    private var sizes: [String: Int64] = [:]
+    private var directoryStamps: [String: Date] = [:]
+    private var total: Int64 = 0
+    private var hot: String?
+    init(root: URL) { self.root = root }
+
+    func totalBytes() throws -> Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        if !directoryStamps.isEmpty, !directoriesChanged() {
+            if let hot, let size = Self.fileSize(hot) {
+                total += size - (sizes[hot] ?? 0)
+                sizes[hot] = size
+            }
+            return total
+        }
+        try rescan()
+        return total
+    }
+
+    private func directoriesChanged() -> Bool {
+        directoryStamps.contains { path, stamp in Self.modificationDate(path) != stamp }
+    }
+
+    private func rescan() throws {
+        var next: [String: Int64] = [:]
+        var stamps: [String: Date] = [:]
+        var newest: (String, Date)?
+        stamps[root.path] = Self.modificationDate(root.path) ?? .distantPast
+        guard let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey, .isDirectoryKey, .contentModificationDateKey]) else {
+            sizes = [:]; directoryStamps = stamps; total = 0; hot = nil
+            return
+        }
+        let keys: Set<URLResourceKey> = [.fileSizeKey, .isRegularFileKey, .isDirectoryKey, .contentModificationDateKey]
+        while let file = files.nextObject() as? URL {
+            guard let values = try? file.resourceValues(forKeys: keys) else { continue }
+            if values.isDirectory == true {
+                stamps[file.path] = values.contentModificationDate ?? .distantPast
+                continue
+            }
+            guard values.isRegularFile == true, let size = values.fileSize else { continue }
+            next[file.path] = Int64(size)
+            if let modified = values.contentModificationDate, newest == nil || modified > newest!.1 {
+                newest = (file.path, modified)
+            }
+        }
+        sizes = next
+        directoryStamps = stamps
+        total = next.values.reduce(0, +)
+        hot = newest?.0
+    }
+
+    private static func modificationDate(_ path: String) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
+    }
+    private static func fileSize(_ path: String) -> Int64? {
+        ((try? FileManager.default.attributesOfItem(atPath: path)[.size]) as? NSNumber)?.int64Value
+    }
+}
+
 /// An advisory lease prevents startup cleanup from deleting another active session's files.
 final class PreparationWorkspace: @unchecked Sendable {
     static let root = FileManager.default.temporaryDirectory.appendingPathComponent("athrow-prepared-v1", isDirectory: true)
@@ -263,11 +328,13 @@ final class PreparationWorkspace: @unchecked Sendable {
     private var lastProgress = Date()
     private var publishedEndSequence: Int?
     private var publishedSeconds = 0.0
+    private let bytes: WorkspaceBytes
     init() throws {
         Self.cleanAbandoned()
         directory = Self.root.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                attributes: [.posixPermissions: 0o700])
+        bytes = WorkspaceBytes(root: directory)
         lease = open(directory.appendingPathComponent("lease").path,
                      O_CREAT | O_RDWR | O_EXLOCK | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW, 0o600)
         guard lease >= 0 else {
@@ -290,8 +357,8 @@ final class PreparationWorkspace: @unchecked Sendable {
         return bytes
     }
     func checkSize(_ maximumBytes: Int64) throws {
-        let bytes = try Self.size(of: directory)
-        guard bytes < maximumBytes else { throw PreparationFailure.storageLimit }
+        let used = try bytes.totalBytes()
+        guard used < maximumBytes else { throw PreparationFailure.storageLimit }
         let space = try FileManager.default.attributesOfFileSystem(forPath: directory.path)
         guard let free = (space[.systemFreeSize] as? NSNumber)?.int64Value,
               free > 64 * 1024 * 1024 else { throw PreparationFailure.diskSpace }
