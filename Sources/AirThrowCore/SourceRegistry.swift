@@ -75,7 +75,10 @@ public struct SourceRegistry: Sendable {
     }
 
     public func adapter(for url: URL) -> (any SourceAdapter)? {
-        guard ["http", "https"].contains(url.scheme?.lowercased() ?? ""), let host = url.host?.lowercased() else { return nil }
+        guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return nil }
+        var host = url.host?.lowercased() ?? ""
+        while host.hasSuffix(".") { host.removeLast() }
+        guard !host.isEmpty else { return nil }
         let registered = byHost[host]
         if SourceResolver.isDirectMediaHint(url) { return registered?.handlesDirectMediaURLs == true ? registered : nil }
         return registered ?? fallback

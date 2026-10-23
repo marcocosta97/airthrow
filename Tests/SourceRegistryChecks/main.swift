@@ -59,6 +59,7 @@ private struct SourceRegistryChecks {
         for adapters in [[adapter, fallback], [fallback, adapter]] {
             let registry = try SourceRegistry(adapters: adapters)
             try check(registry.adapter(for: URL(string: "https://VIDEO.EXAMPLE/watch")!)?.id == "example", "Host matching was case sensitive")
+            try check(registry.adapter(for: URL(string: "https://video.example./watch")!)?.id == "example", "A trailing dot hid a registered host")
             for raw in ["https://video.example.evil.test/watch", "https://sub.video.example/watch", "https://evil.test/video.example"] {
                 try check(registry.adapter(for: URL(string: raw)!)?.id == "fallback", "Host match escaped its exact domain")
             }
