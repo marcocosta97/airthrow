@@ -16,12 +16,14 @@ struct VideoMenuView: View {
     @SwiftUI.State private var draftVideo = "automatic"
     @SwiftUI.State private var draftAction: EnhancementAction = .original
     @SwiftUI.State private var draftOutput4K = false
+    @SwiftUI.State private var draftUpscaler: VideoUpscaler = .lanczos
     @SwiftUI.State private var draftSourceIDs: [String] = []
     private var status: PlaybackSnapshot { controller.snapshot }
     private var sources: [SourceOptionSnapshot] { status.sources ?? [] }
     private var audioOptions: [AudioOptionSnapshot] { status.audioOptions ?? [] }
     private var subtitleOptions: [SubtitleOptionSnapshot] { status.subtitleOptions ?? [] }
     private var enhancement: VideoEnhancement { status.videoEnhancement ?? .original }
+    private var upscaler: VideoUpscaler { status.videoUpscaler ?? .lanczos }
     private var enhancementAction: EnhancementAction { .from(enhancement) }
     private var audioSelection: String { status.selectedAudioID ?? "" }
     private var subtitleSelection: String { status.selectedSubtitleID ?? "" }
@@ -80,6 +82,7 @@ struct VideoMenuView: View {
     }
     private var hasChanges: Bool {
         draftVideo != videoSelection || draftAction != enhancementAction
+            || draftUpscaler != upscaler
             || (draftAction != .original && draftOutput4K != controller.enhancementOutput4K)
     }
     private var outputHelp: String {
@@ -223,6 +226,27 @@ struct VideoMenuView: View {
                 .pickerStyle(.radioGroup)
                 .labelsHidden()
                 .disabled(!mediaReady || isLive)
+                Picker("Upscaler", selection: $draftUpscaler) {
+                    ForEach(VideoUpscaler.allCases, id: \.self) { backend in
+                        Text(backend.label).tag(backend)
+                            .disabled(SuperResolutionSupport.unavailableReason(backend) != nil)
+                    }
+                }
+                .pickerStyle(.menu)
+                .disabled(!canChooseOutput)
+                if draftUpscaler.isAI {
+                    Text("Experimental. Detail and colors may change. SDR video. Output up to 60 fps.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if draftUpscaler == .standard && !controller.superResolutionModelReady {
+                    Button(controller.downloadingSuperResolutionModel ? "Downloading model…" : "Download Standard model") {
+                        Task { await controller.downloadSuperResolutionModel() }
+                    }
+                    .disabled(controller.downloadingSuperResolutionModel)
+                    Text("The model is downloaded and managed by macOS.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Text("Upscale output")
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(canChooseOutput ? Color.primary : Color.secondary)
@@ -238,7 +262,7 @@ struct VideoMenuView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(12)
-            .frame(width: 210, alignment: .leading)
+            .frame(width: 280, alignment: .leading)
         }
         .onChange(of: showingOptions) { _, isPresented in
             if isPresented {
@@ -283,6 +307,7 @@ struct VideoMenuView: View {
     private func resetDraft() {
         draftVideo = videoSelection
         draftAction = enhancementAction
+        draftUpscaler = upscaler
         draftOutput4K = controller.enhancementOutput4K
         draftSourceIDs = sources.map(\.id)
     }
@@ -295,7 +320,7 @@ struct VideoMenuView: View {
             try controller.applyVideoOptions(
                 sourceID: draftVideo == videoSelection ? nil : draftVideo,
                 enhancement: draftAction.enhancement(output4K: draftOutput4K),
-                output4K: draftOutput4K)
+                output4K: draftOutput4K, upscaler: draftUpscaler)
         }
     }
 

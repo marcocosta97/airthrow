@@ -507,6 +507,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 return Response(message: "Re-encoding preference saved.",
                                 pending: controller.snapshot.state == .loading || controller.snapshot.loadingPhase != nil,
                                 status: controller.snapshot)
+            case .enhance:
+                guard let enhancement = request.enhancement else {
+                    throw AppFailure(.invalidRequest, "Choose an enhancement preset.")
+                }
+                try controller.selectEnhancement(enhancement, upscaler: request.upscaler ?? .lanczos)
+                return Response(message: "Changing enhancement at the current position, preserving play/pause.", pending: true, status: controller.snapshot)
             }
             return Response(message: request.command == .status ? controller.snapshot.state.rawValue : "Done.", status: controller.snapshot)
         } catch {

@@ -13,6 +13,8 @@ let package = Package(
         .executableTarget(name: "AirThrowApp", dependencies: ["AirThrowCore"]),
         .executableTarget(name: "AirThrowCLI", dependencies: ["AirThrowCore"]),
         .executableTarget(name: "CoreChecks", dependencies: ["AirThrowCore"], path: "Tests/CoreChecks"),
-        .executableTarget(name: "SourceRegistryChecks", dependencies: ["AirThrowCore"], path: "Tests/SourceRegistryChecks")
+        .executableTarget(name: "SourceRegistryChecks", dependencies: ["AirThrowCore"], path: "Tests/SourceRegistryChecks"),
+        .executableTarget(name: "SuperResolutionBench", path: "Tests/SuperResolutionBench"),
+        .executableTarget(name: "SuperResolutionChecks", dependencies: ["AirThrowCore"], path: "Tests/SuperResolutionChecks")
     ]
 )

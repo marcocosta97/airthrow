@@ -61,6 +61,7 @@ public struct ResolvedSource: Sendable {
     /// The conversion preference in force when this plan was chosen.
     public private(set) var conversionPolicy: ConversionPolicy
     public private(set) var enhancement: VideoEnhancement
+    public private(set) var upscaler: VideoUpscaler
     /// Per-load preparation hint, independent of presentation identity. Cached
     /// preparation warms this position without encoding all preceding chunks.
     public var preparationPosition: Double? = nil
@@ -75,7 +76,7 @@ public struct ResolvedSource: Sendable {
                 videoKnownPresent: Bool = false, isLive: Bool = false,
                 conversionPolicy: ConversionPolicy = .avoidVideo,
                 plannedPath: PlaybackPath? = nil,
-                enhancement: VideoEnhancement = .original) {
+                enhancement: VideoEnhancement = .original, upscaler: VideoUpscaler = .lanczos) {
         self.url = url; self.title = title; self.headers = headers; self.audio = audio
         self.hlsAudioOptions = hlsAudioOptions
         self.hlsVariant = hlsVariant
@@ -86,6 +87,7 @@ public struct ResolvedSource: Sendable {
         self.isLive = isLive
         self.conversionPolicy = conversionPolicy
         self.enhancement = enhancement
+        self.upscaler = upscaler
         self.plannedPath = plannedPath
     }
 
@@ -97,9 +99,10 @@ public struct ResolvedSource: Sendable {
         return result
     }
 
-    public func withEnhancement(_ choice: VideoEnhancement) -> ResolvedSource {
+    public func withEnhancement(_ choice: VideoEnhancement, upscaler: VideoUpscaler = .lanczos) -> ResolvedSource {
         var result = self
         result.enhancement = choice
+        result.upscaler = upscaler
         if choice != .original {
             result.needsPreparation = true
             result.plannedPath = .videoConversion

@@ -1,7 +1,7 @@
 import Foundation
 
 public enum Command: String, Codable, Sendable {
-    case open, play, pause, stop, seek, previous, next, status, show, sources, source, conversion
+    case open, play, pause, stop, seek, previous, next, status, show, sources, source, conversion, enhance
 }
 
 public struct Request: Codable, Sendable {
@@ -11,6 +11,8 @@ public struct Request: Codable, Sendable {
     public var seconds: Double?
     public var sourceID: String?
     public var allowVideoConversion: Bool?
+    public var enhancement: VideoEnhancement?
+    public var upscaler: VideoUpscaler?
     /// An explicit open-and-play request; absent preserves paused loading.
     public var autoplay: Bool?
     public init(_ command: Command, url: String? = nil, seconds: Double? = nil, autoplay: Bool? = nil) {
@@ -103,6 +105,25 @@ public enum VideoEnhancement: String, Codable, Sendable, CaseIterable {
         }
     }
     public var cleansUp: Bool { self == .cleanup1080 || self == .cleanup4K }
+}
+
+/// An explicit processing backend, independent of output size and cleanup.
+public enum VideoUpscaler: String, Codable, Sendable, CaseIterable {
+    case lanczos
+    case lowLatency = "ai_low_latency"
+    case standard = "ai_standard"
+    public var label: String {
+        switch self {
+        case .lanczos: "Lanczos"
+        case .lowLatency: "AI Super Resolution · Low Latency"
+        case .standard: "AI Super Resolution · Standard"
+        }
+    }
+    public var isAI: Bool { self != .lanczos }
+    public static let preferenceKey = "videoUpscaler"
+    public static func preferred(_ defaults: UserDefaults = .standard) -> Self {
+        Self(rawValue: defaults.string(forKey: preferenceKey) ?? "") ?? .lanczos
+    }
 }
 
 public struct SeekRange: Codable, Sendable, Equatable {
@@ -400,6 +421,7 @@ public struct PlaybackSnapshot: Codable, Sendable, Equatable {
     public var allowVideoConversion: Bool?
     /// Per-item request, absent when no item is loaded.
     public var videoEnhancement: VideoEnhancement?
+    public var videoUpscaler: VideoUpscaler?
     public init() {}
 }
 
