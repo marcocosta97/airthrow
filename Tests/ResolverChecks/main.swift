@@ -354,6 +354,20 @@ struct ResolverChecks {
                   "YouTube start times were not parsed")
         try check(MediaClock.seconds(0.000023) == "0.000023" && MediaClock.seconds(-1.5) == "-1.500000",
                   "Helper timestamps used exponent or locale notation")
+        let publicPage = URL(string: "https://cdn.example/live.m3u8")!
+        let privatePage = URL(string: "http://192.168.1.20/live.m3u8")!
+        let loopbackPage = URL(string: "http://127.0.0.1/live.m3u8")!
+        try check(!RelayAddress.allows(URL(string: "http://127.0.0.1/a.ts")!, from: publicPage)
+                  && !RelayAddress.allows(URL(string: "http://192.168.0.8/a.ts")!, from: publicPage)
+                  && !RelayAddress.allows(URL(string: "http://10.1.1.1/a.ts")!, from: publicPage)
+                  && !RelayAddress.allows(URL(string: "http://169.254.4.4/a.ts")!, from: publicPage)
+                  && !RelayAddress.allows(URL(string: "http://[::1]/a.ts")!, from: publicPage)
+                  && RelayAddress.allows(URL(string: "https://edge.example/a.ts")!, from: publicPage)
+                  && RelayAddress.allows(URL(string: "http://10.0.0.4/a.ts")!, from: privatePage)
+                  && !RelayAddress.allows(URL(string: "http://127.0.0.1/a.ts")!, from: privatePage)
+                  && RelayAddress.allows(URL(string: "http://127.0.0.8/a.ts")!, from: loopbackPage)
+                  && !RelayAddress.allows(URL(string: "http://192.168.1.9/a.ts")!, from: loopbackPage),
+                  "Relay accepted a private or loopback target from another network class")
         try await expect(.unsupportedPage) { _ = try await absent.resolve(URL(string: "https://youtube.com/playlist?list=x")!) }
         try await expect(.unavailable) { _ = try await absent.resolve(page) }
         print("PASS local delivery selection, direct bypass, exact hosts, video-only normalization and missing helpers")

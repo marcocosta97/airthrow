@@ -47,14 +47,16 @@ final class HTTPMediaTransfer: NSObject, URLSessionDataDelegate {
     private var session: URLSession?
     private var task: URLSessionDataTask?
     private let credentials: HTTPLoginCredentials?
+    private let origin: URL
     private(set) var challenge: HTTPLoginChallenge?
     private var suspended = false
     var response: ((HTTPURLResponse) -> Bool)?
     var data: ((Data) -> Void)?
     var completed: ((Error?) -> Void)?
 
-    init(request: URLRequest, credentials: HTTPLoginCredentials?) {
+    init(request: URLRequest, credentials: HTTPLoginCredentials?, origin: URL? = nil) {
         self.credentials = credentials
+        self.origin = origin ?? request.url ?? URL(string: "https://invalid.invalid/")!
         super.init()
         let config = URLSessionConfiguration.ephemeral
         config.httpCookieStorage = nil; config.urlCredentialStorage = nil; config.urlCache = nil
@@ -97,10 +99,12 @@ final class HTTPMediaTransfer: NSObject, URLSessionDataDelegate {
                                completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
         // Redirects must authenticate again at their destination. Never follow
         // a TLS-to-cleartext downgrade or a URL carrying embedded credentials.
+        let source = MainActor.assumeIsolated { origin }
         guard let old = response.url, let next = request.url,
               ["http", "https"].contains(next.scheme?.lowercased() ?? ""),
               next.user == nil, next.password == nil,
-              !(old.scheme == "https" && next.scheme != "https") else { completionHandler(nil); return }
+              !(old.scheme == "https" && next.scheme != "https"),
+              RelayAddress.allows(next, from: source) else { completionHandler(nil); return }
         var safe = request
         // A redirect can also enter a different realm on the same origin.
         safe.setValue(nil, forHTTPHeaderField: "Authorization")

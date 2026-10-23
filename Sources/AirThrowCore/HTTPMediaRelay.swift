@@ -1,4 +1,49 @@
 import Foundation
+import Darwin
+
+/// A playlist or redirect may name another host. Loopback, link-local, and
+/// private addresses are accepted only when the original source is already in
+/// that same class, so a public stream cannot be pointed at the local network.
+enum RelayAddress {
+    enum Kind { case loopback, linkLocal, privateNetwork, publicHost }
+
+    static func allows(_ target: URL, from source: URL) -> Bool {
+        guard let targetHost = target.host, let sourceHost = source.host else { return false }
+        let destination = kind(targetHost)
+        if destination == .publicHost { return true }
+        return destination == kind(sourceHost)
+    }
+
+    static func kind(_ host: String) -> Kind {
+        var name = host.lowercased()
+        while name.hasSuffix(".") { name.removeLast() }
+        if name.hasPrefix("[") && name.hasSuffix("]") { name = String(name.dropFirst().dropLast()) }
+        if name == "localhost" { return .loopback }
+        var v4 = in_addr()
+        if inet_pton(AF_INET, name, &v4) == 1 {
+            let raw = UInt32(bigEndian: v4.s_addr)
+            let a = UInt8((raw >> 24) & 0xff)
+            let b = UInt8((raw >> 16) & 0xff)
+            if a == 0 || a == 127 { return .loopback }
+            if a == 10 || (a == 192 && b == 168) || (a == 172 && (16...31).contains(Int(b))) { return .privateNetwork }
+            if a == 169 && b == 254 { return .linkLocal }
+            return .publicHost
+        }
+        var v6 = in6_addr()
+        if inet_pton(AF_INET6, name, &v6) == 1 {
+            let bytes = withUnsafeBytes(of: v6) { Array($0.prefix(16)) }
+            if bytes.count == 16 {
+                if bytes.allSatisfy({ $0 == 0 }) || (bytes.dropLast().allSatisfy { $0 == 0 } && bytes[15] == 1) { return .loopback }
+                if bytes[0..<10].allSatisfy({ $0 == 0 }) && bytes[10] == 0xff && bytes[11] == 0xff {
+                    return kind("\(bytes[12]).\(bytes[13]).\(bytes[14]).\(bytes[15])")
+                }
+                if bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80 { return .linkLocal }
+                if (bytes[0] & 0xfe) == 0xfc { return .privateNetwork }
+            }
+        }
+        return .publicHost
+    }
+}
 
 /// Routes discovered from HLS playlists. A live playlist is remembered for a few
 /// refreshes so a receiver can still fetch a segment that just left the window,
@@ -26,6 +71,9 @@ struct RelayRoutes {
               ["http", "https"].contains(target.scheme?.lowercased() ?? ""),
               target.host != nil, target.user == nil, target.password == nil, !reference.contains("{$"),
               !(base.scheme == "https" && target.scheme != "https"), !reference.isEmpty else {
+            throw HTTPLoginFailure.invalidPlaylist
+        }
+        guard let entryPath, let source = paths[entryPath], RelayAddress.allows(target, from: source) else {
             throw HTTPLoginFailure.invalidPlaylist
         }
         return target
@@ -122,7 +170,7 @@ public final class HTTPMediaRelay {
         guard server != nil, let upstream = routes.upstream(path) else { return nil }
         let id = UUID()
         let stream = HTTPRelayStream(url: upstream, method: method, headers: headers,
-            credentials: credentials, rewrite: { [weak self] data, base in
+            credentials: credentials, origin: source, rewrite: { [weak self] data, base in
                 guard let self else { throw CancellationError() }
                 return try self.rewrite(data, base: base, routePath: path)
             }, send: send, finish: { [weak self] in
@@ -229,7 +277,7 @@ final class HTTPRelayStream {
     private var chunked = false
 
     init(url: URL, method: String, headers: [String: String], credentials: HTTPLoginCredentials?,
-         rewrite: @escaping (Data, URL) throws -> Data,
+         origin: URL? = nil, rewrite: @escaping (Data, URL) throws -> Data,
          send: @escaping (Data, @escaping @MainActor @Sendable () -> Void) -> Void, finish: @escaping () -> Void) {
         self.method = method; self.rewrite = rewrite; self.send = send; self.finish = finish
         var request = URLRequest(url: url)
@@ -240,7 +288,7 @@ final class HTTPRelayStream {
         if !knownPlaylist, method == "GET" {
             for name in ["range", "if-range"] { if let value = headers[name] { request.setValue(value, forHTTPHeaderField: name) } }
         }
-        transfer = HTTPMediaTransfer(request: request, credentials: credentials)
+        transfer = HTTPMediaTransfer(request: request, credentials: credentials, origin: origin ?? url)
         transfer.response = { [weak self] response in self?.received(response) ?? false }
         transfer.data = { [weak self] data in self?.received(data) }
         transfer.completed = { [weak self] error in self?.completed(error) }
