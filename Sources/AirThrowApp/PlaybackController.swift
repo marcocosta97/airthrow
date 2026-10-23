@@ -98,6 +98,12 @@ final class PlaybackController: ObservableObject {
     private var preparationInputRelay: HTTPMediaRelay?
     private var lastLivePipeline: LivePipelineDiagnostics?
     private var lastFailureDiagnostics: PlaybackDiagnostics?
+    private var diagnosticsCache: PlaybackDiagnostics?
+    private var diagnosticsCacheItem: ObjectIdentifier?
+    private var diagnosticsCacheStatus: AVPlayerItem.Status?
+    private var diagnosticsCacheTime: ContinuousClock.Instant?
+    private var cachedSourceOptions: [SourceOptionSnapshot]?
+    private var cachedSourceOptionsToken = ""
     private var loadingLiveChannel = false
     private var assetErrorCode: Int?
     private var assetFailureErrors: [MediaErrorCode]?
@@ -821,8 +827,11 @@ final class PlaybackController: ObservableObject {
     }
 
     private var sourceOptions: [SourceOptionSnapshot]? {
-        guard !sourceCandidates.isEmpty else { return nil }
-        return sourceCandidates.enumerated().map { index, candidate in
+        guard !sourceCandidates.isEmpty else { cachedSourceOptions = nil; cachedSourceOptionsToken = ""; return nil }
+        let token = "\(sourceOptionsGeneration.uuidString)|\(effectiveConversionPolicy)|\(sourceCandidates.count)|"
+            + sourceCandidates.map(\.id).joined(separator: ",")
+        if token == cachedSourceOptionsToken { return cachedSourceOptions }
+        let built = sourceCandidates.enumerated().map { index, candidate in
             let videoIndex = sourceCandidates.firstIndex {
                 $0.source.url == candidate.source.url &&
                 $0.source.headers == candidate.source.headers &&
@@ -840,6 +849,9 @@ final class PlaybackController: ObservableObject {
                 videoGroupID: "\(sourceOptionsGeneration.uuidString)-video-\(videoIndex)",
                 bitrate: candidate.bitrate, isAdaptive: candidate.source.delivery == .hls && candidate.source.hlsVariant == nil)
         }
+        cachedSourceOptionsToken = token
+        cachedSourceOptions = built
+        return built
     }
 
     private func startPlaylistLoad(_ url: URL, autoplay: Bool = false) {
@@ -2346,60 +2358,7 @@ final class PlaybackController: ObservableObject {
         }
         next.liveEdgeUpdateInterval = LivePolicy.edgeUpdateInterval(previous: snapshot, current: next)
         if let item {
-            var diagnostics = PlaybackDiagnostics()
-            diagnostics.itemStatus = switch item.status {
-            case .unknown: "unknown"
-            case .readyToPlay: "ready"
-            case .failed: "failed"
-            @unknown default: "other"
-            }
-            diagnostics.playerStatus = switch player.status {
-            case .unknown: "unknown"
-            case .readyToPlay: "ready"
-            case .failed: "failed"
-            @unknown default: "other"
-            }
-            diagnostics.timeControlStatus = switch player.timeControlStatus {
-            case .paused: "paused"
-            case .waitingToPlayAtSpecifiedRate: "waiting"
-            case .playing: "playing"
-            @unknown default: "other"
-            }
-            diagnostics.videoConfirmed = hasVideo
-            diagnostics.sampledVideo = sampledVideo
-            diagnostics.sourceDiscovery = sourceCandidates.compactMap(\.discovery).first
-            diagnostics.hlsVariantCount = hlsVariantCount
-            diagnostics.hlsVariants = hlsVariants
-            diagnostics.sampleInspectionStatus = sampleInspectionStatus
-            diagnostics.livePipeline = lastLivePipeline
-            diagnostics.waitingReason = waitingReason(player.reasonForWaitingToPlay)
-            diagnostics.bufferedRanges = item.loadedTimeRanges.compactMap {
-                let range = $0.timeRangeValue
-                guard let start = finite(range.start.seconds),
-                      let end = finite(CMTimeRangeGetEnd(range).seconds), end > start else { return nil }
-                return SeekRange(start: start, end: end)
-            }
-            diagnostics.bufferEmpty = item.isPlaybackBufferEmpty
-            diagnostics.bufferFull = item.isPlaybackBufferFull
-            diagnostics.likelyToKeepUp = item.isPlaybackLikelyToKeepUp
-            let videoFormats = item.tracks.compactMap(\.assetTrack)
-                .filter { $0.mediaType == .video }
-                .flatMap { $0.formatDescriptions as? [CMFormatDescription] ?? [] }
-            if !videoFormats.isEmpty {
-                diagnostics.videoCodecTypes = Array(Set(videoFormats.map(CMFormatDescriptionGetMediaSubType))).sorted()
-                diagnostics.videoWidth = videoFormats.map { Int(CMVideoFormatDescriptionGetDimensions($0).width) }.max()
-                diagnostics.videoHeight = videoFormats.map { Int(CMVideoFormatDescriptionGetDimensions($0).height) }.max()
-            }
-            if let errors = item.errorLog()?.events, !errors.isEmpty {
-                diagnostics.errorStatusCodes = errors.suffix(8).map(\.errorStatusCode)
-            }
-            diagnostics.itemErrorCode = (item.error as NSError?)?.code
-            if let event = item.accessLog()?.events.last {
-                diagnostics.observedBitrate = finite(event.observedBitrate)
-                diagnostics.indicatedBitrate = finite(event.indicatedBitrate)
-                diagnostics.stalls = event.numberOfStalls
-            }
-            next.diagnostics = diagnostics
+            next.diagnostics = playbackDiagnostics(for: item)
         } else if let lastFailureDiagnostics {
             next.diagnostics = lastFailureDiagnostics
         } else if let lastLivePipeline {
@@ -2420,10 +2379,92 @@ final class PlaybackController: ObservableObject {
            player.timeControlStatus != .playing { next.state = .buffering }
         if pendingSeek != nil, seekPlayWhenReady, external, failure == nil { next.state = .playing }
         if snapshot != next {
+            let previous = snapshot
             snapshot = next
-            updateNowPlaying()
+            if Self.shouldRefreshNowPlaying(previous, next) { updateNowPlaying() }
         }
         updateSleepActivity()
+    }
+
+    /// Codec descriptions and player logs stay valid for several seconds. Buffer
+    /// and transport fields are still read on every tick.
+    private func playbackDiagnostics(for item: AVPlayerItem) -> PlaybackDiagnostics {
+        let now = ContinuousClock.now
+        let reuse = diagnosticsCacheItem == ObjectIdentifier(item) && diagnosticsCacheStatus == item.status
+            && diagnosticsCacheTime.map { now < $0.advanced(by: .seconds(5)) } == true
+        var diagnostics = reuse ? (diagnosticsCache ?? PlaybackDiagnostics()) : PlaybackDiagnostics()
+        diagnostics.itemStatus = switch item.status {
+        case .unknown: "unknown"
+        case .readyToPlay: "ready"
+        case .failed: "failed"
+        @unknown default: "other"
+        }
+        diagnostics.playerStatus = switch player.status {
+        case .unknown: "unknown"
+        case .readyToPlay: "ready"
+        case .failed: "failed"
+        @unknown default: "other"
+        }
+        diagnostics.timeControlStatus = switch player.timeControlStatus {
+        case .paused: "paused"
+        case .waitingToPlayAtSpecifiedRate: "waiting"
+        case .playing: "playing"
+        @unknown default: "other"
+        }
+        diagnostics.videoConfirmed = hasVideo
+        diagnostics.sampledVideo = sampledVideo
+        diagnostics.sourceDiscovery = sourceCandidates.compactMap(\.discovery).first
+        diagnostics.hlsVariantCount = hlsVariantCount
+        diagnostics.hlsVariants = hlsVariants
+        diagnostics.sampleInspectionStatus = sampleInspectionStatus
+        diagnostics.livePipeline = lastLivePipeline
+        diagnostics.waitingReason = waitingReason(player.reasonForWaitingToPlay)
+        diagnostics.bufferedRanges = item.loadedTimeRanges.compactMap {
+            let range = $0.timeRangeValue
+            guard let start = finite(range.start.seconds),
+                  let end = finite(CMTimeRangeGetEnd(range).seconds), end > start else { return nil }
+            return SeekRange(start: start, end: end)
+        }
+        diagnostics.bufferEmpty = item.isPlaybackBufferEmpty
+        diagnostics.bufferFull = item.isPlaybackBufferFull
+        diagnostics.likelyToKeepUp = item.isPlaybackLikelyToKeepUp
+        diagnostics.itemErrorCode = (item.error as NSError?)?.code
+        if !reuse {
+            let videoFormats = item.tracks.compactMap(\.assetTrack)
+                .filter { $0.mediaType == .video }
+                .flatMap { $0.formatDescriptions as? [CMFormatDescription] ?? [] }
+            if !videoFormats.isEmpty {
+                diagnostics.videoCodecTypes = Array(Set(videoFormats.map(CMFormatDescriptionGetMediaSubType))).sorted()
+                diagnostics.videoWidth = videoFormats.map { Int(CMVideoFormatDescriptionGetDimensions($0).width) }.max()
+                diagnostics.videoHeight = videoFormats.map { Int(CMVideoFormatDescriptionGetDimensions($0).height) }.max()
+            }
+            if let errors = item.errorLog()?.events, !errors.isEmpty {
+                diagnostics.errorStatusCodes = errors.suffix(8).map(\.errorStatusCode)
+            }
+            if let event = item.accessLog()?.events.last {
+                diagnostics.observedBitrate = finite(event.observedBitrate)
+                diagnostics.indicatedBitrate = finite(event.indicatedBitrate)
+                diagnostics.stalls = event.numberOfStalls
+            }
+            diagnosticsCache = diagnostics
+            diagnosticsCacheItem = ObjectIdentifier(item)
+            diagnosticsCacheStatus = item.status
+            diagnosticsCacheTime = now
+        }
+        return diagnostics
+    }
+
+    /// The system advances elapsed time from the last rate. Rewriting Now Playing
+    /// on every playhead tick fights that clock.
+    private static func shouldRefreshNowPlaying(_ previous: PlaybackSnapshot, _ next: PlaybackSnapshot) -> Bool {
+        var stable = previous
+        stable.position = next.position
+        stable.liveOffset = next.liveOffset
+        stable.diagnostics = next.diagnostics
+        stable.preparedRanges = next.preparedRanges
+        stable.preparationSpeed = next.preparationSpeed
+        stable.preparationInProgress = next.preparationInProgress
+        return stable != next
     }
 
     private func waitingReason(_ reason: AVPlayer.WaitingReason?) -> PlaybackWaitingReason? {
