@@ -2451,7 +2451,7 @@ final class PlaybackController: ObservableObject {
             Self.onMain {
                 guard let self else { return .commandFailed }
                 do {
-                    if self.player.rate > 0 { self.pause() } else { try self.play() }
+                    if PlaybackPolicy.isPlaying(self.snapshot) { self.pause() } else { try self.play() }
                     return .success
                 } catch { return .commandFailed }
             }

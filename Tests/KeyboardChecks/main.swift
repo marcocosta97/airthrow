@@ -9,6 +9,20 @@ import AppKit
     var received = 0
     override func keyDown(with event: NSEvent) { received += 1 }
 }
+@MainActor private final class ButtonSink: NSButton {
+    var received = 0
+    override func keyDown(with event: NSEvent) { received += 1 }
+}
+@MainActor private final class SegmentSink: NSSegmentedControl {
+    var received = 0
+    override func keyDown(with event: NSEvent) { received += 1 }
+}
+@MainActor private final class TableSink: NSTableView {
+    var received = 0
+    override var acceptsFirstResponder: Bool { true }
+    override func becomeFirstResponder() -> Bool { true }
+    override func keyDown(with event: NSEvent) { received += 1 }
+}
 
 @main @MainActor struct KeyboardChecks {
     static func check(_ condition: Bool, _ message: String) {
@@ -58,7 +72,29 @@ import AppKit
         check(window.makeFirstResponder(text), "Cannot install text responder")
         send(49); send(123); send(124)
         check(keys.count == 4 && text.received == 3, "Playback keys intercepted text editing")
+        let button = ButtonSink(frame: sink.bounds)
+        window.contentView = button
+        check(window.makeFirstResponder(button), "Cannot install button responder")
+        send(49); send(123)
+        check(keys.count == 4 && button.received == 2, "Playback keys intercepted a focused button")
+        let segments = SegmentSink(frame: sink.bounds)
+        segments.segmentCount = 2
+        window.contentView = segments
+        check(window.makeFirstResponder(segments), "Cannot install segmented control")
+        send(49); send(124)
+        check(keys.count == 4 && segments.received == 2, "Playback keys intercepted a segmented control")
+        let table = TableSink(frame: sink.bounds)
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
+        table.addTableColumn(column)
+        window.contentView = table
+        window.makeKey()
+        let installed = window.makeFirstResponder(table)
+        let responderNow = window.firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
+        check(installed && window.firstResponder === table, "Cannot install list responder (installed \(installed), responder \(responderNow))")
+        send(49); send(123)
+        check(keys.count == 4 && table.received == 2, "Playback keys intercepted a list")
+        window.resignKey()
         check(!window.isVisible, "Keyboard checks opened a visible window")
-        print("PASS window-scoped Space/arrows, repeats, modifiers, disabled actions and text editing (headless)")
+        print("PASS window-scoped Space/arrows, repeats, modifiers, disabled actions, text editing, buttons, segments and lists (headless)")
     }
 }
