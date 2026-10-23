@@ -233,6 +233,7 @@ public struct SourceResolver: Sendable {
     }
     public static func videoPage(_ url: URL) throws -> URL { try YouTubeSourceAdapter.videoPage(url) }
     public static func playlistPage(_ url: URL) -> URL? { YouTubeSourceAdapter.playlistPage(url) }
+    public static func youtubeStartSeconds(_ url: URL) -> Double? { YouTubeSourceAdapter.startSeconds(url) }
 }
 
 /// Inspect ambiguous links without creating another player or changing the route.

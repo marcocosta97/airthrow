@@ -336,10 +336,22 @@ struct ResolverChecks {
         try check(SourceResolver.playlistPage(URL(string: "https://youtube.com/playlist?list=RD12345678")!)?
             .absoluteString == "https://www.youtube.com/playlist?list=RD12345678", "YouTube Mix page was not accepted")
         let mixWatch = URL(string: "https://www.youtube.com/watch?v=BaW_jenozKc&list=RD12345678&start_radio=1")!
-        try check(SourceResolver.playlistPage(mixWatch)?.absoluteString == "https://www.youtube.com/playlist?list=RD12345678",
-                  "YouTube Mix watch link was not normalized to its playlist page")
+        try check(SourceResolver.playlistPage(mixWatch)?.absoluteString == "https://www.youtube.com/watch?v=BaW_jenozKc&list=RD12345678",
+                  "YouTube Mix watch link dropped its seed video")
         try check(SourceResolver.playlistPage(URL(string: "https://www.youtube.com/watch?v=BaW_jenozKc&list=PL12345678")!) == nil,
                   "Watch URL with a regular playlist context became a queue")
+        let series = URL(string: "https://www.youtube.com/embed/videoseries?list=PL12345678")!
+        try check(SourceResolver.playlistPage(series)?.absoluteString == "https://www.youtube.com/playlist?list=PL12345678",
+                  "Embedded videoseries was not treated as a playlist")
+        var rejectedSeries = false
+        do { _ = try SourceResolver.videoPage(series) }
+        catch ResolutionFailure.unsupportedPage { rejectedSeries = true }
+        try check(rejectedSeries, "videoseries is not an 11-character video id")
+        try check(SourceResolver.youtubeStartSeconds(URL(string: "https://www.youtube.com/watch?v=BaW_jenozKc&t=90")!) == 90
+                  && SourceResolver.youtubeStartSeconds(URL(string: "https://youtu.be/BaW_jenozKc?t=90s")!) == 90
+                  && SourceResolver.youtubeStartSeconds(URL(string: "https://www.youtube.com/watch?v=BaW_jenozKc&t=1m30s")!) == 90
+                  && SourceResolver.youtubeStartSeconds(URL(string: "https://youtube.com./watch?v=BaW_jenozKc&t=1h2m3s")!) == 3723,
+                  "YouTube start times were not parsed")
         try await expect(.unsupportedPage) { _ = try await absent.resolve(URL(string: "https://youtube.com/playlist?list=x")!) }
         try await expect(.unavailable) { _ = try await absent.resolve(page) }
         print("PASS local delivery selection, direct bypass, exact hosts, video-only normalization and missing helpers")

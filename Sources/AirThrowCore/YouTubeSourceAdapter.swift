@@ -18,21 +18,29 @@ struct YouTubeSourceAdapter: SourceAdapter {
     }
 
     public static func isWebsite(_ url: URL) -> Bool {
-        supportedHosts.contains(url.host?.lowercased() ?? "")
+        supportedHosts.contains(normalizedHost(url))
     }
 
     /// Dedicated playlist pages opt into queue playback. A Mix (`list=RD...`) is
     /// an algorithmic radio queue and is accepted from either its dedicated page
-    /// or the watch URL YouTube shares it as. A watch URL carrying any other
-    /// `list=` remains a single-video request.
+    /// or the watch URL YouTube shares it as. A shared Mix keeps its seed video.
+    /// A watch URL carrying any other `list=` remains a single-video request.
+    /// `/embed/videoseries` is a playlist, not an 11-character video id.
     public static func playlistPage(_ url: URL) -> URL? {
-        guard isWebsite(url), url.host?.lowercased() != "youtu.be",
-              url.path == "/playlist" || url.path == "/watch",
-              let list = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
-                .first(where: { $0.name == "list" })?.value,
+        guard isWebsite(url), normalizedHost(url) != "youtu.be" else { return nil }
+        let path = url.path
+        let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
+        guard let list = query?.first(where: { $0.name == "list" })?.value,
               (10...200).contains(list.count),
-              list.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") }),
-              url.path != "/watch" || list.hasPrefix("RD") else { return nil }
+              list.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") }) else { return nil }
+        let dedicated = path == "/playlist" || path == "/embed/videoseries"
+        let watch = path == "/watch"
+        guard dedicated || (watch && list.hasPrefix("RD")) else { return nil }
+        if watch, let video = query?.first(where: { $0.name == "v" })?.value, validVideoID(video) {
+            var components = URLComponents(string: "https://www.youtube.com/watch")!
+            components.queryItems = [URLQueryItem(name: "v", value: video), URLQueryItem(name: "list", value: list)]
+            return components.url
+        }
         var components = URLComponents(string: "https://www.youtube.com/playlist")!
         components.queryItems = [URLQueryItem(name: "list", value: list)]
         return components.url
@@ -43,16 +51,61 @@ struct YouTubeSourceAdapter: SourceAdapter {
         let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         let parts = url.path.split(separator: "/").map(String.init)
         let id: String?
-        if url.host?.lowercased() == "youtu.be", parts.count == 1 { id = parts[0] }
+        if normalizedHost(url) == "youtu.be", parts.count == 1 { id = parts[0] }
         else if url.path == "/watch" {
             id = components?.queryItems?.first(where: { $0.name == "v" })?.value
-        } else if parts.count == 2, ["shorts", "embed", "live"].contains(parts[0]) { id = parts[1] }
-        else { id = nil }
-        guard isWebsite(url), let id, id.count == 11,
-              id.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") }) else {
-            throw ResolutionFailure.unsupportedPage
-        }
+        } else if parts.count == 2, ["shorts", "embed", "live"].contains(parts[0]), parts[1] != "videoseries" {
+            id = parts[1]
+        } else { id = nil }
+        guard isWebsite(url), let id, validVideoID(id) else { throw ResolutionFailure.unsupportedPage }
         return URL(string: "https://www.youtube.com/watch?v=\(id)")!
+    }
+
+    /// `t=90`, `t=90s`, and `t=1m30s` (also `start=`) become the playback position.
+    /// The value is not folded into the watch URL, so extraction stays unchanged.
+    public static func startSeconds(_ url: URL) -> Double? {
+        guard isWebsite(url),
+              let raw = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+                .first(where: { $0.name == "t" || $0.name == "start" })?.value?.lowercased(),
+              !raw.isEmpty else { return nil }
+        let seconds = Double(raw) ?? clockSeconds(raw)
+        guard let seconds, seconds.isFinite, seconds > 0, seconds <= 86_400 else { return nil }
+        return seconds
+    }
+
+    private static func normalizedHost(_ url: URL) -> String {
+        var host = url.host?.lowercased() ?? ""
+        while host.hasSuffix(".") { host.removeLast() }
+        return host
+    }
+
+    private static func validVideoID(_ id: String) -> Bool {
+        id.count == 11 && id.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") }
+    }
+
+    private static func clockSeconds(_ raw: String) -> Double? {
+        var total = 0.0
+        var number = ""
+        var sawUnit = false
+        for character in raw {
+            if character.isNumber || (character == "." && !number.contains(".")) {
+                number.append(character)
+                continue
+            }
+            guard let value = Double(number), value.isFinite, value >= 0 else { return nil }
+            let scale: Double
+            switch character {
+            case "h": scale = 3_600
+            case "m": scale = 60
+            case "s": scale = 1
+            default: return nil
+            }
+            total += value * scale
+            number = ""
+            sawUnit = true
+        }
+        guard sawUnit, number.isEmpty, total.isFinite else { return nil }
+        return total
     }
 
     /// Recognize YouTube's sign-in/bot challenge from bounded stderr. The text

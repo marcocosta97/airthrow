@@ -310,7 +310,12 @@ final class PlaybackController: ObservableObject {
         if SourceResolver.playlistPage(url) != nil {
             startPlaylistLoad(url, autoplay: shouldPlay)
         } else {
-            startLoad(url, autoplay: shouldPlay, recordHistory: true)
+            let preferences = SourceResolver.youtubeStartSeconds(url).map { seconds in
+                LoadPreferences(conversion: conversionPolicy, preferQuality: preferQuality,
+                                enhancement: .original, enhancementOutput4K: enhancementOutput4K,
+                                pinnedSourceID: nil, subtitle: nil, resumePosition: seconds)
+            }
+            startLoad(url, autoplay: shouldPlay, preferences: preferences, recordHistory: true)
         }
         if autoplay && !shouldPlay {
             notice = "Video will load paused. Choose a receiver using AirPlay, then press Play."
