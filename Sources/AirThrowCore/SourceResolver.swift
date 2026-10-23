@@ -308,7 +308,7 @@ enum HLSMaster {
               let text = String(data: data, encoding: .utf8) else { return [] }
         var options: [HLSAudioOption] = []
         var seen = Set<String>()
-        for line in text.components(separatedBy: .newlines) where line.hasPrefix("#EXT-X-MEDIA:") {
+        for line in PlaylistText.lines(in: text) where line.hasPrefix("#EXT-X-MEDIA:") {
             guard options.count < 16,
                   let attrs = attributes(String(line.dropFirst("#EXT-X-MEDIA:".count))),
                   attrs["TYPE"] == "AUDIO", attrs["GROUP-ID"]?.isEmpty == false,
@@ -346,7 +346,7 @@ enum HLSMaster {
 
     static func quality(_ data: Data, at base: URL) -> Quality? {
         guard data.count <= maximumBytes, let text = String(data: data, encoding: .utf8) else { return nil }
-        let lines = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
+        let lines = PlaylistText.lines(in: text)
         guard lines.first == "#EXTM3U",
               !lines.contains(where: { $0.hasPrefix("#EXT-X-SESSION-KEY:") }) else { return nil }
         var audioGroups = Set<String>()
@@ -458,7 +458,7 @@ public enum HLSVideoEvidence {
 
     static func livePresentation(in data: Data) -> Bool? {
         guard let text = String(data: data, encoding: .utf8) else { return nil }
-        let lines = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
+        let lines = PlaylistText.lines(in: text)
         guard lines.first == "#EXTM3U", lines.contains(where: { $0.hasPrefix("#EXT-X-TARGETDURATION:") }) else { return nil }
         return !lines.contains("#EXT-X-ENDLIST") && !lines.contains("#EXT-X-PLAYLIST-TYPE:VOD")
     }
@@ -582,7 +582,7 @@ public enum HLSVideoEvidence {
     static func reference(in data: Data, at base: URL) -> (url: URL, isPlaylist: Bool)? {
         guard data.count <= HLSMaster.maximumBytes,
               let text = String(data: data, encoding: .utf8) else { return nil }
-        let lines = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
+        let lines = PlaylistText.lines(in: text)
         guard lines.first == "#EXTM3U",
               !lines.contains(where: { $0.hasPrefix("#EXT-X-KEY:") || $0.hasPrefix("#EXT-X-SESSION-KEY:") }) else {
             return nil

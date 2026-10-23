@@ -14,6 +14,41 @@ public struct HLSVariantSelection: Sendable, Equatable {
     }
 }
 
+/// HLS lines end in LF or CRLF. Swift treats CRLF as one character, and
+/// splitting on every newline scalar turns that pair into a blank line, which
+/// hides the URI after a tag.
+enum PlaylistText {
+    static func lines(in text: String) -> [String] {
+        var lines: [String] = []
+        var current = ""
+        var skippingLead = true
+        for character in text {
+            if isBreak(character) {
+                if skippingLead { continue }
+                lines.append(current.trimmingCharacters(in: .whitespaces))
+                current = ""
+                continue
+            }
+            if skippingLead, character == " " || character == "\t" || character == "\u{FEFF}" { continue }
+            skippingLead = false
+            current.append(character)
+        }
+        if !skippingLead { lines.append(current.trimmingCharacters(in: .whitespaces)) }
+        return lines
+    }
+
+    private static func isBreak(_ character: Character) -> Bool {
+        character.unicodeScalars.contains { $0 == "\n" || $0 == "\r" || $0 == "\u{2028}" || $0 == "\u{2029}" }
+    }
+
+    static func startsAsPlaylist(_ data: Data) -> Bool {
+        let sample = data.prefix(256)
+        guard let text = String(data: sample, encoding: .utf8)
+                ?? String(data: sample.dropLast(), encoding: .utf8) else { return false }
+        return lines(in: text).first == "#EXTM3U"
+    }
+}
+
 public enum HLSRenditions {
     private static func selection(_ line: String) -> HLSVariantSelection? {
         guard line.hasPrefix("#EXT-X-STREAM-INF:"),
@@ -30,8 +65,9 @@ public enum HLSRenditions {
     }
 
     public static func variants(_ data: Data) -> [HLSVariantSelection] {
-        guard data.count <= HLSMaster.maximumBytes, let text = String(data: data, encoding: .utf8), text.hasPrefix("#EXTM3U") else { return [] }
-        let lines = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard data.count <= HLSMaster.maximumBytes, let text = String(data: data, encoding: .utf8) else { return [] }
+        let lines = PlaylistText.lines(in: text)
+        guard lines.first == "#EXTM3U" else { return [] }
         var result: [HLSVariantSelection] = []
         for (index, line) in lines.enumerated() {
             guard let selected = selection(line), index + 1 < lines.count,
@@ -48,14 +84,22 @@ public enum HLSRenditions {
         let variants = variants(data)
         guard variants.filter({ $0 == selected }).count == 1,
               let text = String(data: data, encoding: .utf8) else { throw HTTPLoginFailure.invalidPlaylist }
-        let lines = text.components(separatedBy: .newlines)
+        let lines = PlaylistText.lines(in: text)
         var output: [String] = []
         var index = 0
         while index < lines.count {
-            let line = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            let line = lines[index]
             if line.hasPrefix("#EXT-X-STREAM-INF:") {
-                if selection(line) == selected { output.append(lines[index]); output.append(lines[index + 1]) }
-                index += 2
+                if index + 1 < lines.count {
+                    let uri = lines[index + 1]
+                    if selection(line) == selected, !uri.isEmpty, !uri.hasPrefix("#") {
+                        output.append(line)
+                        output.append(uri)
+                    }
+                    index += 2
+                } else {
+                    index += 1
+                }
             } else {
                 if !line.hasPrefix("#EXT-X-I-FRAME-STREAM-INF:") { output.append(lines[index]) }
                 index += 1

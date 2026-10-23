@@ -682,6 +682,13 @@ struct ResolverChecks {
         let adaptiveVideo = separateVideo.merging(["protocol": "m3u8_native", "manifest_url": masterURL.absoluteString]) { _, rhs in rhs }
         let adaptiveData = try metadata([adaptiveVideo, separateVideo, separateAudio], extra: ["title": "HLS title"])
         try check(HLSMaster.hasAudioVideo(masterData, at: masterURL), "Alternate audio master was not recognized")
+        try check(HLSMaster.hasAudioVideo(Data(master.replacingOccurrences(of: "\n", with: "\r\n").utf8), at: masterURL),
+                  "CRLF master hid its rendition")
+        try check(HLSVideoEvidence.livePresentation(in: Data("#EXTM3U\r\n#EXT-X-TARGETDURATION:6\r\n#EXTINF:6,\r\nseg.ts\r\n".utf8)) == true,
+                  "CRLF live playlist looked finished")
+        let crlfReference = HLSVideoEvidence.reference(in: Data("#EXTM3U\r\n#EXT-X-STREAM-INF:BANDWIDTH=1\r\nmedia.m3u8\r\n".utf8), at: masterURL)
+        try check(crlfReference?.isPlaylist == true && crlfReference?.url.lastPathComponent == "media.m3u8",
+                  "CRLF master hid its variant")
         let dubbedMaster = """
         #EXTM3U
         #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",LANGUAGE="en-US",NAME="American English - dubbed-auto",DEFAULT=NO,AUTOSELECT=YES,URI="dub.m3u8"

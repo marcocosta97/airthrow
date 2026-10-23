@@ -284,6 +284,16 @@ let tests: [(String, () throws -> Void)] = [
             _ = try HLSRenditions.selecting(variants[0], in: Data((master + "\n" + master).utf8))
             throw CheckFailure(message: "Ambiguous rendition was silently pinned")
         } catch is HTTPLoginFailure {}
+        let crlf = Data(master.replacingOccurrences(of: "\n", with: "\r\n").utf8)
+        let crlfVariants = HLSRenditions.variants(crlf)
+        try check(crlfVariants.map(\.id) == variants.map(\.id), "CRLF master hid rendition URIs behind blank lines")
+        let crlfPinned = String(decoding: try HLSRenditions.selecting(crlfVariants[0], in: crlf), as: UTF8.self)
+        try check(crlfPinned.contains("low.m3u8") && !crlfPinned.contains("medium.m3u8") && !crlfPinned.contains("\r"),
+                  "CRLF selection kept a blank URI line")
+        let dangling = Data("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=426x240,CODECS=\"avc1.64001f,mp4a.40.2\"\nonly.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,CODECS=\"avc1.64001f,mp4a.40.2\"\n".utf8)
+        let danglingVariants = HLSRenditions.variants(dangling)
+        try check(danglingVariants.count == 1, "A trailing STREAM-INF without a URI became a rendition")
+        _ = try HLSRenditions.selecting(danglingVariants[0], in: dangling)
         let url = URL(string: "https://cdn.example/master.m3u8")!
         let automatic = MediaCandidate(source: ResolvedSource(url: url, delivery: .hls), id: "adaptive", height: 1080)
         var fixed = automatic.source; fixed.hlsVariant = variants[0]
