@@ -32,7 +32,7 @@ struct AirThrowCLI {
     AirPlay picker. open and show launch AirThrow if needed.
     Set AIRTHROW_APP to an explicit AirThrow.app path for development.
     PRESET: original, upscale_1080, cleanup_1080, upscale_4k, cleanup_4k.
-    BACKEND: lanczos (default), ai_low_latency, ai_standard. AI is experimental;
+    BACKEND: automatic (default), lanczos, ai_low_latency, ai_standard. AI is experimental;
     macOS 26+ and compatible hardware are required. Standard needs a ready model.
     """
 
