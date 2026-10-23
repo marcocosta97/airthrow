@@ -825,3 +825,130 @@ public enum MenuModel {
         return "\(state) · \(position) / \(PlaybackFormat.time(duration))"
     }
 }
+
+/// Downloads a bounded body in the session's chunks. Callers used to pull
+/// `URLSession.AsyncBytes` one byte at a time, which also checked cancellation
+/// once per byte.
+enum ChunkedBody {
+    struct Overflow: Error {}
+
+    static func fetch(_ request: URLRequest, maximum: Int, allowPartial: Bool = false,
+                      timeout: TimeInterval = 60, resourceTimeout: TimeInterval = 90,
+                      redirect: (@Sendable (HTTPURLResponse, URLRequest) -> URLRequest?)? = nil,
+                      challenge: (@Sendable (URLAuthenticationChallenge) -> (URLSession.AuthChallengeDisposition, URLCredential?))? = nil) async throws -> (Data, HTTPURLResponse) {
+        let collector = Collector(maximum: maximum, allowPartial: allowPartial, redirect: redirect, challenge: challenge)
+        return try await collector.run(request, timeout: timeout, resourceTimeout: resourceTimeout)
+    }
+
+    private final class Collector: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+        private let maximum: Int
+        private let allowPartial: Bool
+        private let redirect: (@Sendable (HTTPURLResponse, URLRequest) -> URLRequest?)?
+        private let challenge: (@Sendable (URLAuthenticationChallenge) -> (URLSession.AuthChallengeDisposition, URLCredential?))?
+        private let lock = NSLock()
+        private var body = Data()
+        private var response: HTTPURLResponse?
+        private var continuation: CheckedContinuation<(Data, HTTPURLResponse), Error>?
+        private var overflow = false
+        private var task: URLSessionDataTask?
+
+        init(maximum: Int, allowPartial: Bool,
+             redirect: (@Sendable (HTTPURLResponse, URLRequest) -> URLRequest?)?,
+             challenge: (@Sendable (URLAuthenticationChallenge) -> (URLSession.AuthChallengeDisposition, URLCredential?))?) {
+            self.maximum = maximum
+            self.allowPartial = allowPartial
+            self.redirect = redirect
+            self.challenge = challenge
+        }
+
+        func run(_ request: URLRequest, timeout: TimeInterval, resourceTimeout: TimeInterval) async throws -> (Data, HTTPURLResponse) {
+            let config = URLSessionConfiguration.ephemeral
+            config.httpCookieStorage = nil
+            config.urlCredentialStorage = nil
+            config.urlCache = nil
+            config.httpShouldSetCookies = false
+            config.timeoutIntervalForRequest = timeout
+            config.timeoutIntervalForResource = resourceTimeout
+            let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+            let task = session.dataTask(with: request)
+            self.task = task
+            return try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    lock.lock()
+                    self.continuation = continuation
+                    lock.unlock()
+                    task.resume()
+                }
+            } onCancel: {
+                task.cancel()
+            }
+        }
+
+        private func finish(_ result: Result<(Data, HTTPURLResponse), Error>, session: URLSession) {
+            lock.lock()
+            let continuation = self.continuation
+            self.continuation = nil
+            lock.unlock()
+            session.finishTasksAndInvalidate()
+            continuation?.resume(with: result)
+        }
+
+        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+            guard let http = response as? HTTPURLResponse else { completionHandler(.cancel); return }
+            if http.expectedContentLength > Int64(maximum), !allowPartial {
+                lock.lock(); overflow = true; lock.unlock()
+                completionHandler(.cancel)
+                return
+            }
+            lock.lock(); self.response = http; lock.unlock()
+            completionHandler(.allow)
+        }
+
+        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+            lock.lock()
+            let room = maximum - body.count
+            if data.count <= room {
+                body.append(data)
+            } else if allowPartial, room > 0 {
+                body.append(data.prefix(room))
+                overflow = true
+            } else {
+                overflow = true
+            }
+            let stop = overflow
+            lock.unlock()
+            if stop { task?.cancel() }
+        }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+                        completionHandler: @escaping (URLRequest?) -> Void) {
+            if let redirect { completionHandler(redirect(response, request)) }
+            else { completionHandler(request) }
+        }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+            if let challengePolicy = self.challenge { let decision = challengePolicy(challenge); completionHandler(decision.0, decision.1) }
+            else { completionHandler(.performDefaultHandling, nil) }
+        }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+            lock.lock()
+            let response = self.response
+            let body = self.body
+            let overflow = self.overflow
+            lock.unlock()
+            if overflow, !allowPartial {
+                finish(.failure(Overflow()), session: session)
+            } else if let response, error == nil || (allowPartial && overflow) {
+                finish(.success((body, response)), session: session)
+            } else if let error = error as? URLError, error.code == .cancelled {
+                finish(.failure(CancellationError()), session: session)
+            } else {
+                finish(.failure(error ?? URLError(.badServerResponse)), session: session)
+            }
+        }
+    }
+}

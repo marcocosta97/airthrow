@@ -280,23 +280,16 @@ enum HLSMaster {
     static let maximumBytes = 1024 * 1024
 
     static func fetch(_ url: URL) async throws -> Data {
-        let config = URLSessionConfiguration.ephemeral
-        config.httpCookieStorage = nil
-        config.urlCredentialStorage = nil
-        config.urlCache = nil
-        config.timeoutIntervalForRequest = 6
-        config.timeoutIntervalForResource = 8
-        let session = URLSession(configuration: config)
-        defer { session.invalidateAndCancel() }
-        let (bytes, response) = try await session.bytes(from: url)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-              http.expectedContentLength <= maximumBytes else { throw ResolutionFailure.failed }
-        var data = Data()
-        for try await byte in bytes {
-            try Task.checkCancellation()
-            guard data.count < maximumBytes else { throw ResolutionFailure.tooMuchOutput }
-            data.append(byte)
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 6
+        let data: Data
+        let http: HTTPURLResponse
+        do {
+            (data, http) = try await ChunkedBody.fetch(request, maximum: maximumBytes, timeout: 6, resourceTimeout: 8)
+        } catch is ChunkedBody.Overflow {
+            throw ResolutionFailure.tooMuchOutput
         }
+        guard http.statusCode == 200 else { throw ResolutionFailure.failed }
         return data
     }
 
@@ -556,28 +549,15 @@ public enum HLSVideoEvidence {
     private static func sampledBytes(at url: URL) async throws -> (data: Data, base: URL)? {
         try Task.checkCancellation()
         let maximumBytes = 256 * 1024
-        let config = URLSessionConfiguration.ephemeral
-        config.httpCookieStorage = nil
-        config.urlCredentialStorage = nil
-        config.urlCache = nil
-        config.timeoutIntervalForRequest = 6
-        config.timeoutIntervalForResource = 8
-        let session = URLSession(configuration: config)
-        defer { session.invalidateAndCancel() }
         var request = URLRequest(url: url)
+        request.timeoutInterval = 6
         request.setValue("bytes=0-\(maximumBytes - 1)", forHTTPHeaderField: "Range")
-        let (bytes, response) = try await session.bytes(for: request)
-        guard let http = response as? HTTPURLResponse, [200, 206].contains(http.statusCode),
+        guard let (sample, http) = try? await ChunkedBody.fetch(request, maximum: maximumBytes, allowPartial: true, timeout: 6, resourceTimeout: 8),
+              [200, 206].contains(http.statusCode),
               http.statusCode != 206 || http.value(forHTTPHeaderField: "Content-Range")?.hasPrefix("bytes 0-") == true else {
             return nil
         }
-        var sample = Data()
-        for try await byte in bytes {
-            try Task.checkCancellation()
-            sample.append(byte)
-            if sample.count == maximumBytes { break }
-        }
-        return (sample, response.url ?? url)
+        return (sample, http.url ?? url)
     }
 
     static func reference(in data: Data, at base: URL) -> (url: URL, isPlaylist: Bool)? {

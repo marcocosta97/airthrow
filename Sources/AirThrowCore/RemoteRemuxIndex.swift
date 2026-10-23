@@ -7,24 +7,22 @@ actor RemuxRangeReader {
     let size: Int64
     private let url: URL
     private let headers: [String: String]
-    private let session = URLSession(configuration: .ephemeral)
     private let deadline = ContinuousClock().now.advanced(by: .seconds(25))
     private var used = 0
     private var blocks: [Int64: Data] = [:]
     private init(url: URL, headers: [String: String], size: Int64) {
         self.url = url; self.headers = headers; self.size = size
     }
-    deinit { session.invalidateAndCancel() }
     static func open(_ url: URL, headers: [String: String]) async throws -> RemuxRangeReader {
-        let session = URLSession(configuration: .ephemeral)
-        defer { session.invalidateAndCancel() }
         var request = URLRequest(url: url, timeoutInterval: 5)
         for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
         request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
         request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
-        let (_, response) = try await session.bytes(for: request)
+        let (_, response): (Data, HTTPURLResponse)
+        do { (_, response) = try await ChunkedBody.fetch(request, maximum: 1, timeout: 5, resourceTimeout: 8) }
+        catch is ChunkedBody.Overflow { throw PreparationFailure.unsupported }
         try Task.checkCancellation()
-        guard let response = response as? HTTPURLResponse, response.statusCode == 206,
+        guard response.statusCode == 206,
               let range = response.value(forHTTPHeaderField: "Content-Range"), range.hasPrefix("bytes 0-0/"),
               let size = Int64(range.dropFirst(10)), size > 0 else { throw PreparationFailure.unsupported }
         return RemuxRangeReader(url: url, headers: headers, size: size)
@@ -50,21 +48,14 @@ actor RemuxRangeReader {
         let end = offset + Int64(count) - 1
         request.setValue("bytes=\(offset)-\(end)", forHTTPHeaderField: "Range")
         request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
-        let (bytes, response) = try await session.bytes(for: request)
-        guard let response = response as? HTTPURLResponse, response.statusCode == 206,
+        let data: Data
+        let response: HTTPURLResponse
+        do { (data, response) = try await ChunkedBody.fetch(request, maximum: count, timeout: 5, resourceTimeout: 8) }
+        catch is ChunkedBody.Overflow { throw PreparationFailure.unsupported }
+        guard response.statusCode == 206,
               response.value(forHTTPHeaderField: "Content-Range") == "bytes \(offset)-\(end)/\(size)",
-              response.expectedContentLength == -1 || response.expectedContentLength == count else {
-            session.invalidateAndCancel(); throw PreparationFailure.unsupported
-        }
-        var data = Data(); data.reserveCapacity(count)
-        for try await byte in bytes {
-            try Task.checkCancellation()
-            guard data.count < count, ContinuousClock().now < deadline else {
-                session.invalidateAndCancel(); throw PreparationFailure.unsupported
-            }
-            data.append(byte)
-        }
-        guard data.count == count else { throw PreparationFailure.unsupported }
+              response.expectedContentLength == -1 || response.expectedContentLength == count,
+              data.count == count, ContinuousClock().now < deadline else { throw PreparationFailure.unsupported }
         return data
     }
 }

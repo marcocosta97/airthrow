@@ -213,44 +213,31 @@ public enum IPTVCatalogLoader {
                                           title: file.deletingPathExtension().lastPathComponent)
         }
         let source = try MediaInput.url(source.absoluteString)
-        let config = URLSessionConfiguration.ephemeral
-        config.urlCredentialStorage = nil; config.httpCookieStorage = nil; config.urlCache = nil
-        config.httpShouldSetCookies = false
-        config.timeoutIntervalForRequest = 60; config.timeoutIntervalForResource = 90
-        let session = URLSession(configuration: config, delegate: CatalogRedirectDelegate(), delegateQueue: nil)
-        defer { session.invalidateAndCancel() }
-        let bytes: URLSession.AsyncBytes
-        let response: URLResponse
-        do { (bytes, response) = try await session.bytes(from: source) }
-        catch let error as URLError where error.code == .userAuthenticationRequired || error.code == .userCancelledAuthentication {
+        var request = URLRequest(url: source)
+        request.timeoutInterval = 60
+        let data: Data
+        let response: HTTPURLResponse
+        do {
+            (data, response) = try await ChunkedBody.fetch(request, maximum: IPTVPlaylist.maximumBytes, timeout: 60, resourceTimeout: 90,
+                redirect: { response, request in
+                    guard let url = request.url, (try? MediaInput.url(url.absoluteString)) != nil,
+                          !(response.url?.scheme == "https" && url.scheme != "https") else { return nil }
+                    return request
+                },
+                challenge: { challenge in
+                    challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust
+                        ? (.performDefaultHandling, nil) : (.cancelAuthenticationChallenge, nil)
+                })
+        } catch let error as URLError where error.code == .userAuthenticationRequired || error.code == .userCancelledAuthentication {
             throw IPTVCatalogFailure.accessRequired
+        } catch is ChunkedBody.Overflow {
+            throw IPTVCatalogFailure.tooLarge
         }
-        guard let response = response as? HTTPURLResponse else { throw IPTVCatalogFailure.unavailable }
         guard response.statusCode != 401 && response.statusCode != 403 else { throw IPTVCatalogFailure.accessRequired }
         guard response.statusCode == 200 else { throw IPTVCatalogFailure.httpStatus(response.statusCode) }
-        guard response.expectedContentLength <= IPTVPlaylist.maximumBytes else { throw IPTVCatalogFailure.tooLarge }
-        var data = Data()
-        for try await byte in bytes {
-            try Task.checkCancellation()
-            guard data.count < IPTVPlaylist.maximumBytes else { throw IPTVCatalogFailure.tooLarge }
-            data.append(byte)
-        }
+        guard data.count <= IPTVPlaylist.maximumBytes else { throw IPTVCatalogFailure.tooLarge }
         try Task.checkCancellation()
         return try IPTVPlaylist.parse(data, baseURL: response.url, title: "Channels")
     }
 }
 
-private final class CatalogRedirectDelegate: NSObject, URLSessionTaskDelegate, Sendable {
-    func urlSession(_ session: URLSession, task: URLSessionTask,
-                    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
-                    completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
-        guard let url = request.url, (try? MediaInput.url(url.absoluteString)) != nil,
-              !(response.url?.scheme == "https" && url.scheme != "https") else { completionHandler(nil); return }
-        completionHandler(request)
-    }
-    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
-                    completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        completionHandler(challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust
-            ? .performDefaultHandling : .cancelAuthenticationChallenge, nil)
-    }
-}
