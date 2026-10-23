@@ -38,6 +38,7 @@ run([ffmpeg, '-v', 'error', '-nostdin', '-i', FIXTURES / 'video.mp4', '-c', 'cop
 (FIXTURES / 'attributes.m3u8').write_text('#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="A",URI="stream.m3u8?token=a%2Bb%26c"\n#EXT-X-KEY:METHOD=AES-128,URI="key"\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:2,\nstream0.ts\n')
 (FIXTURES / 'unsafe.m3u8').write_text('#EXTM3U\n#EXTINF:2,\nfile:///etc/passwd\n')
 (FIXTURES / 'oversized.m3u8').write_text('#EXTM3U\n' + '#' * 1_048_576)
+(FIXTURES / 'bom.m3u8').write_bytes(b'\xef\xbb\xbf\n#EXTM3U\n#EXTINF:2,\nstream0.ts\n')
 (FIXTURES / 'key').write_bytes(bytes(range(16)))
 (FIXTURES / 'init.mp4').write_bytes((FIXTURES / 'video.mp4').read_bytes())
 observed = {'cross_origin_auth': 0, 'signed_queries': 0, 'digest': 0}

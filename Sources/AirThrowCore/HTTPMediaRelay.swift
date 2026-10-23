@@ -1,5 +1,75 @@
 import Foundation
 
+/// Routes discovered from HLS playlists. A live playlist is remembered for a few
+/// refreshes so a receiver can still fetch a segment that just left the window,
+/// then those routes are dropped instead of growing until the table is full.
+struct RelayRoutes {
+    static let maximum = 16_384
+    static let rememberedPlaylists = 4
+    private(set) var paths: [String: URL] = [:]
+    private var reverse: [URL: String] = [:]
+    private var history: [String: [Set<URL>]] = [:]
+    private var entryPath: String?
+    var prefix = ""
+    var count: Int { paths.count }
+
+    mutating func setEntry(path: String, source: URL, prefix: String) {
+        self.prefix = prefix
+        entryPath = path
+        paths[path] = source
+    }
+
+    func upstream(_ path: String) -> URL? { paths[path] }
+
+    func resolve(_ reference: String, base: URL) throws -> URL {
+        guard let target = URL(string: reference, relativeTo: base)?.absoluteURL,
+              ["http", "https"].contains(target.scheme?.lowercased() ?? ""),
+              target.host != nil, target.user == nil, target.password == nil, !reference.contains("{$"),
+              !(base.scheme == "https" && target.scheme != "https"), !reference.isEmpty else {
+            throw HTTPLoginFailure.invalidPlaylist
+        }
+        return target
+    }
+
+    /// Record the URLs this playlist refresh advertises, then drop routes that
+    /// no longer appear in any playlist's recent refreshes.
+    mutating func replacePlaylist(at path: String, with references: Set<URL>) {
+        var sets = history[path] ?? []
+        sets.append(references)
+        if sets.count > Self.rememberedPlaylists { sets.removeFirst(sets.count - Self.rememberedPlaylists) }
+        history[path] = sets
+        prune()
+    }
+
+    mutating func route(_ target: URL) throws -> String {
+        if let existing = reverse[target] { return existing }
+        guard paths.count < Self.maximum else { throw HTTPLoginFailure.invalidPlaylist }
+        let ext = target.pathExtension.lowercased()
+        let suffix = ["m3u8", "ts", "m4s", "mp4", "aac", "vtt", "key"].contains(ext) ? "." + ext : ""
+        let route = prefix + UUID().uuidString + suffix
+        paths[route] = target
+        reverse[target] = route
+        return route
+    }
+
+    private mutating func prune() {
+        func liveTargets() -> Set<URL> {
+            var live = Set(history.values.flatMap { $0.flatMap { $0 } })
+            if let entryPath, let source = paths[entryPath] { live.insert(source) }
+            return live
+        }
+        func dropStale(_ live: Set<URL>) {
+            for (path, target) in paths where path != entryPath && !live.contains(target) {
+                paths.removeValue(forKey: path)
+                if reverse[target] == path { reverse.removeValue(forKey: target) }
+            }
+        }
+        dropStale(liveTargets())
+        history = history.filter { paths[$0.key] != nil }
+        dropStale(liveTargets())
+    }
+}
+
 /// A session-scoped relay: only the source and resources discovered in its HLS
 /// playlists have routes. It never accepts a client-supplied upstream URL.
 @MainActor
@@ -9,10 +79,8 @@ public final class HTTPMediaRelay {
     private var credentials: HTTPLoginCredentials?
     private var variant: HLSVariantSelection?
     private var server: MediaHTTPServer?
-    private var routes: [String: URL] = [:]
-    private var reverseRoutes: [URL: String] = [:]
+    private var routes = RelayRoutes()
     private var streams: [UUID: HTTPRelayStream] = [:]
-    private var prefix = ""
     private var finishedDiagnostics = LivePipelineDiagnostics()
     public var diagnostics: LivePipelineDiagnostics {
         var result = finishedDiagnostics
@@ -35,8 +103,8 @@ public final class HTTPMediaRelay {
         let server = try await MediaHTTPServer.start(file: source, host: host, hls: source.pathExtension.lowercased() == "m3u8", relay: relay)
         relay.server = server; relay.url = server.url
         if let url = server.url {
-            relay.prefix = url.deletingLastPathComponent().path + "/"
-            relay.routes[url.path] = source
+            relay.routes.setEntry(path: url.path, source: source,
+                                  prefix: url.deletingLastPathComponent().path + "/")
         }
         return relay
     }
@@ -44,19 +112,19 @@ public final class HTTPMediaRelay {
     public func stop() {
         server?.stop(); server = nil
         for stream in Array(streams.values) { stream.cancel() }
-        streams.removeAll(); routes.removeAll(); reverseRoutes.removeAll()
+        streams.removeAll(); routes = RelayRoutes()
         credentials = nil
     }
 
     func serve(path: String, method: String, headers: [String: String],
                send: @escaping (Data, @escaping @MainActor @Sendable () -> Void) -> Void,
                finish: @escaping () -> Void) -> HTTPRelayStream? {
-        guard server != nil, let upstream = routes[path] else { return nil }
+        guard server != nil, let upstream = routes.upstream(path) else { return nil }
         let id = UUID()
         let stream = HTTPRelayStream(url: upstream, method: method, headers: headers,
             credentials: credentials, rewrite: { [weak self] data, base in
                 guard let self else { throw CancellationError() }
-                return try self.rewrite(data, base: base)
+                return try self.rewrite(data, base: base, routePath: path)
             }, send: send, finish: { [weak self] in
                 if let self, let stream = self.streams.removeValue(forKey: id) {
                     self.finishedDiagnostics.relayFinishedStreams += 1
@@ -77,33 +145,19 @@ public final class HTTPMediaRelay {
         return stream
     }
 
-    private func route(_ reference: String, base: URL) throws -> String {
-        guard let target = URL(string: reference, relativeTo: base)?.absoluteURL,
-              ["http", "https"].contains(target.scheme?.lowercased() ?? ""),
-              target.host != nil, target.user == nil, target.password == nil, !reference.contains("{$"),
-              !(base.scheme == "https" && target.scheme != "https"), !reference.isEmpty else {
+    private func rewrite(_ data: Data, base: URL, routePath: String) throws -> Data {
+        guard data.count <= 1_048_576, let text = String(data: data, encoding: .utf8) else {
             throw HTTPLoginFailure.invalidPlaylist
         }
-        if let route = reverseRoutes[target] { return route }
-        guard routes.count < 16_384 else { throw HTTPLoginFailure.invalidPlaylist }
-        let ext = target.pathExtension.lowercased()
-        let suffix = ["m3u8", "ts", "m4s", "mp4", "aac", "vtt", "key"].contains(ext) ? "." + ext : ""
-        let route = prefix + UUID().uuidString + suffix
-        routes[route] = target; reverseRoutes[target] = route
-        return route
-    }
-
-    private func rewrite(_ data: Data, base: URL) throws -> Data {
-        guard data.count <= 1_048_576, let text = String(data: data, encoding: .utf8),
-              text.hasPrefix("#EXTM3U") else { throw HTTPLoginFailure.invalidPlaylist }
         let filtered: Data
         if let variant, text.contains("#EXT-X-STREAM-INF:") {
             filtered = try HLSRenditions.selecting(variant, in: data)
         } else { filtered = data }
         guard let text = String(data: filtered, encoding: .utf8) else { throw HTTPLoginFailure.invalidPlaylist }
+        let lines = PlaylistText.lines(in: text)
+        guard lines.first == "#EXTM3U" else { throw HTTPLoginFailure.invalidPlaylist }
         var output: [String] = []
         finishedDiagnostics.relayManifestResponses += 1
-        let lines = text.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         if lines.contains("#EXT-X-ENDLIST") { finishedDiagnostics.relayManifestEndLists += 1 }
         if lines.contains("#EXT-X-PLAYLIST-TYPE:VOD") { finishedDiagnostics.relayManifestVODs += 1 }
         if let line = lines.first(where: { $0.hasPrefix("#EXT-X-MEDIA-SEQUENCE:") }),
@@ -112,18 +166,32 @@ public final class HTTPMediaRelay {
         }
         // URI attributes carry keys, init fragments, alternate audio and subtitles.
         let pattern = try NSRegularExpression(pattern: #"\bURI="([^"]*)""#)
-        for raw in text.components(separatedBy: "\n") {
-            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        var references: [URL] = []
+        for line in lines where !line.isEmpty {
+            if !line.hasPrefix("#") {
+                references.append(try routes.resolve(line, base: base))
+                continue
+            }
+            for match in pattern.matches(in: line, range: NSRange(line.startIndex..., in: line)) {
+                guard let value = Range(match.range(at: 1), in: line) else { throw HTTPLoginFailure.invalidPlaylist }
+                references.append(try routes.resolve(String(line[value]), base: base))
+            }
+            guard !line.contains("{$") else { throw HTTPLoginFailure.invalidPlaylist }
+        }
+        routes.replacePlaylist(at: routePath, with: Set(references))
+        for line in lines {
             if line.isEmpty { output.append(""); continue }
-            if !line.hasPrefix("#") { output.append(try route(line, base: base)); continue }
+            if !line.hasPrefix("#") {
+                output.append(try routes.route(routes.resolve(line, base: base)))
+                continue
+            }
             var rewritten = line
             for match in pattern.matches(in: line, range: NSRange(line.startIndex..., in: line)).reversed() {
                 guard let value = Range(match.range(at: 1), in: line),
                       let replacement = Range(match.range(at: 1), in: rewritten) else { throw HTTPLoginFailure.invalidPlaylist }
-                rewritten.replaceSubrange(replacement, with: try route(String(line[value]), base: base))
+                let target = try routes.resolve(String(line[value]), base: base)
+                rewritten.replaceSubrange(replacement, with: try routes.route(target))
             }
-            // Variable substitution needs an evaluator and could otherwise send a
-            // receiver straight to the origin. Refuse it instead of leaking a URL.
             guard !rewritten.contains("{$") else { throw HTTPLoginFailure.invalidPlaylist }
             output.append(rewritten)
         }
@@ -203,7 +271,7 @@ final class HTTPRelayStream {
     func received(_ data: Data) {
         guard !ended, let response else { return }
         receivedBytes += Int64(data.count)
-        if !sentHeaders && data.starts(with: Data("#EXTM3U".utf8)) { playlist = true }
+        if !sentHeaders && PlaylistText.startsAsPlaylist(data) { playlist = true }
         if playlist {
             guard manifest.count + data.count <= 1_048_576 else { reject("502 Bad Gateway"); return }
             manifest.append(data)

@@ -18,11 +18,46 @@ struct CheckFailure: Error { let message: String }
 }
 @main
 struct HTTPAuthenticationChecks {
+    static func routeRetention() throws {
+        func check(_ value: Bool, _ name: String) throws {
+            guard value else { throw CheckFailure(message: name) }
+        }
+        var table = RelayRoutes()
+        let entry = "/relay/master.m3u8"
+        let source = URL(string: "https://cdn.example/master.m3u8")!
+        table.setEntry(path: entry, source: source, prefix: "/relay/")
+        let media = URL(string: "https://cdn.example/media.m3u8")!
+        table.replacePlaylist(at: entry, with: [media])
+        let mediaRoute = try table.route(media)
+        for generation in 0..<6 {
+            let segment = URL(string: "https://cdn.example/segment\(generation).ts")!
+            table.replacePlaylist(at: mediaRoute, with: [segment])
+            _ = try table.route(segment)
+        }
+        try check(table.count == 6, "Live segment routes were kept after they left the playlist: \(table.count)")
+        try check(table.upstream(entry) == source, "Playlist refresh dropped the entry route")
+        try check(table.upstream(mediaRoute) == media, "Playlist refresh dropped the media playlist")
+        var full = RelayRoutes()
+        full.setEntry(path: entry, source: source, prefix: "/relay/")
+        var references = Set<URL>()
+        for index in 0..<(RelayRoutes.maximum - 1) {
+            references.insert(URL(string: "https://cdn.example/fill\(index).ts")!)
+        }
+        full.replacePlaylist(at: entry, with: references)
+        for reference in references { _ = try full.route(reference) }
+        try check(full.count == RelayRoutes.maximum, "Route table did not fill to its cap")
+        do {
+            _ = try full.route(URL(string: "https://cdn.example/overflow.ts")!)
+            try check(false, "Route table grew past its cap")
+        } catch is HTTPLoginFailure {}
+    }
+
     @MainActor static func main() async {
         do { try await run() }
         catch { print("FAIL: \(error)"); exit(1) }
     }
     @MainActor static func run() async throws {
+        try routeRetention()
         let base = URL(string: CommandLine.arguments[1])!
         func source(_ path: String) -> URL { URL(string: path, relativeTo: base)!.absoluteURL }
         var count = 0
@@ -187,6 +222,12 @@ struct HTTPAuthenticationChecks {
         let (_, oversizedResponse) = try await fetch(oversized.url!)
         try check(oversizedResponse.statusCode == 502, "Playlist buffer is bounded")
         oversized.stop()
+        let bom = try await HTTPMediaRelay.start(source: source("/basic/bom.m3u8"), credentials: basic, host: "127.0.0.1")
+        let (bomBytes, bomResponse) = try await fetch(bom.url!)
+        let bomText = String(decoding: bomBytes, as: UTF8.self)
+        try check(bomResponse.statusCode == 200 && bomText.contains("#EXTM3U") && bomText.contains(".ts")
+                  && !bomText.contains("/basic/"), "BOM or leading whitespace blocked playlist rewrite")
+        bom.stop()
         // Existing FFmpeg preparation receives only the relay URL, no credentials.
         let mkvRelay = try await HTTPMediaRelay.start(source: source("/basic/video.mkv"), credentials: basic, host: "127.0.0.1")
         let candidates = try await SourceResolver().candidates(for: mkvRelay.url!)
