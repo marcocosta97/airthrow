@@ -947,9 +947,11 @@ public struct MediaPreparer: Sendable {
             prepared.stop()
             await prepared.waitForProducer()
             // The caller still holds the lease. Remove partial HLS before an MP4 fallback.
-            for file in try FileManager.default.contentsOfDirectory(at: workspace.directory, includingPropertiesForKeys: nil)
-                where file.lastPathComponent != "lease" {
-                try FileManager.default.removeItem(at: file)
+            // Cleanup must not replace the original failure, including cancellation.
+            if let files = try? FileManager.default.contentsOfDirectory(at: workspace.directory, includingPropertiesForKeys: nil) {
+                for file in files where file.lastPathComponent != "lease" {
+                    try? FileManager.default.removeItem(at: file)
+                }
             }
             if error is CancellationError { throw CancellationError() }
             if let failure = error as? PreparationFailure,
