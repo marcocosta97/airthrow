@@ -352,6 +352,8 @@ struct ResolverChecks {
                   && SourceResolver.youtubeStartSeconds(URL(string: "https://www.youtube.com/watch?v=BaW_jenozKc&t=1m30s")!) == 90
                   && SourceResolver.youtubeStartSeconds(URL(string: "https://youtube.com./watch?v=BaW_jenozKc&t=1h2m3s")!) == 3723,
                   "YouTube start times were not parsed")
+        try check(MediaClock.seconds(0.000023) == "0.000023" && MediaClock.seconds(-1.5) == "-1.500000",
+                  "Helper timestamps used exponent or locale notation")
         try await expect(.unsupportedPage) { _ = try await absent.resolve(URL(string: "https://youtube.com/playlist?list=x")!) }
         try await expect(.unavailable) { _ = try await absent.resolve(page) }
         print("PASS local delivery selection, direct bypass, exact hosts, video-only normalization and missing helpers")

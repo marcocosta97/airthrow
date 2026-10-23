@@ -597,7 +597,7 @@ public struct MediaPreparer: Sendable {
                     + (try Self.inputArguments(url: source.url, headers: source.headers,
                                                hls: allowHLSInput))
                 if let audio = source.audio {
-                    if alignRemux, let remuxTimeline { arguments += ["-itsoffset", String(remuxTimeline.audioOffset)] }
+                    if alignRemux, let remuxTimeline { arguments += ["-itsoffset", MediaClock.seconds(remuxTimeline.audioOffset)] }
                     arguments += try Self.inputArguments(url: audio.url, headers: audio.headers,
                                                          hls: allowHLSInput)
                 }
@@ -787,10 +787,10 @@ public struct MediaPreparer: Sendable {
             } else {
                 // Apply accurate input seeking to video and separately selected audio.
                 for offset in chunk.indices.reversed() where chunk[offset] == "-i" {
-                    chunk.insert(contentsOf: ["-ss", String(start)], at: offset)
+                    chunk.insert(contentsOf: ["-ss", MediaClock.seconds(start)], at: offset)
                 }
                 if let filter = chunk.firstIndex(of: "-vf") { chunk[filter + 1] += ",setpts=PTS-STARTPTS" }
-                chunk += ["-af", "asetpts=PTS-STARTPTS,apad", "-t", String(length)]
+                chunk += ["-af", "asetpts=PTS-STARTPTS,apad", "-t", MediaClock.seconds(length)]
             }
             chunk += ["-f", "hls", "-hls_segment_type", fragmented ? "fmp4" : "mpegts",
                       "-hls_time", "86400", "-hls_playlist_type", "vod", "-hls_flags", "temp_file",

@@ -1,5 +1,14 @@
 import Foundation
 
+/// ffmpeg reads these arguments with the C locale. `String(Double)` can emit
+/// exponent form (`2.3e-05`) or a comma decimal, both of which shift the cut.
+enum MediaClock {
+    static func seconds(_ value: Double) -> String {
+        guard value.isFinite else { return "0.000000" }
+        return String(format: "%.6f", locale: Locale(identifier: "en_US_POSIX"), value)
+    }
+}
+
 /// Copy boundaries are decoder refresh points, not arbitrary six-second cuts.
 /// Packet DTS keeps reordered video together; audio PTS assigns each packet to
 /// exactly one interval. No compressed payload is changed by these filters.
@@ -166,9 +175,9 @@ struct RemuxTimeline: Sendable {
             videoDrop += "+gte(dts,\(boundaries?.1 ?? next.dts!))"
             audioDrop += "+gte(pts,\(Int64(ceil(Double(next.pts) * videoTimeBase / audioTimeBase))))"
         }
-        return (["-ss", String(max(0, seconds - sourceStart - 0.001)), "-t", String(length + 4)],
+        return (["-ss", MediaClock.seconds(max(0, seconds - sourceStart - 0.001)), "-t", MediaClock.seconds(length + 4)],
                 ["-copyts", "-bsf:v", "noise=amount=0:drop='\(videoDrop)'",
-                 "-bsf:a", "noise=amount=0:drop='\(audioDrop)'", "-output_ts_offset", String(-seconds)])
+                 "-bsf:a", "noise=amount=0:drop='\(audioDrop)'", "-output_ts_offset", MediaClock.seconds(-seconds)])
     }
 
     /// Read only NAL headers, using the demuxer's packet positions. Matroska
