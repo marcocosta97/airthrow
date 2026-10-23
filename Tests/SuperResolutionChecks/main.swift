@@ -26,7 +26,7 @@ struct SuperResolutionChecks {
         } catch let error as AppFailure { try check(error.code == .invalidRequest, "Unknown backend not rejected") }
         let defaults = UserDefaults(suiteName: "app.airthrow.checks.\(UUID().uuidString)")!
         try check(VideoUpscaler.preferred(defaults) == .automatic && !PreparationPreferences.current(defaults).aiBeforePlayback
-                  && PreparationPreferences.current(defaults).noiseReduction == .ffmpeg,
+                  && PreparationPreferences.current(defaults).noiseReduction == .defaultBackend,
                   "Fresh defaults changed native/direct behavior")
         try check(!VideoUpscaler.automatic.isAI && !VideoUpscaler.lanczos.isAI,
                   "Traditional processing unexpectedly selects an AI backend")
@@ -50,7 +50,7 @@ struct SuperResolutionChecks {
         let snapshot = PreparationPreferences.current(defaults)
         try check(snapshot.noiseReduction == .appleTemporal, "Cleanup preference not read")
         defaults.set("unknown", forKey: PreparationPreferences.noiseReductionKey)
-        try check(PreparationPreferences.current(defaults).noiseReduction == .ffmpeg
+        try check(PreparationPreferences.current(defaults).noiseReduction == .defaultBackend
                   && snapshot.noiseReduction == .appleTemporal, "Invalid cleanup preference or session snapshot changed")
         defaults.removeObject(forKey: PreparationPreferences.noiseReductionKey)
         defaults.removeObject(forKey: VideoUpscaler.preferenceKey)

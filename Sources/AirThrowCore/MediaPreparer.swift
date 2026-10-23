@@ -111,6 +111,10 @@ public final class PreparedMedia {
     private var drainingCache: CachedHLS?
     /// Loopback relays standing in for secret origin URLs. Helpers only see these.
     private var upstream: PreparationUpstream?
+    private var nativeInput: NativeInputPrefetch?
+    private var drainingNativeInput: NativeInputPrefetch?
+    private var nativeMetrics: NativeVideoMetrics?
+    public var nativeProcessingDiagnostics: NativeVideoDiagnostics? { nativeMetrics?.snapshot }
     fileprivate init(server: MediaHTTPServer, workspace: PreparationWorkspace? = nil,
                      sourceDuration: Double? = nil, playbackPath: PlaybackPath = .remux,
                      videoHeight: Int? = nil, videoFrameRate: Double? = nil) {
@@ -125,6 +129,10 @@ public final class PreparedMedia {
     /// the task value; this covers a hop where that value is no longer visible.
     fileprivate func retain(_ upstream: PreparationUpstream) {
         if self.upstream == nil { self.upstream = upstream }
+    }
+
+    fileprivate func retain(_ input: NativeInputPrefetch, metrics: NativeVideoMetrics) {
+        nativeInput = input; nativeMetrics = metrics
     }
 
     fileprivate func produce(executable: String, arguments: [String], workspace: PreparationWorkspace,
@@ -195,6 +203,7 @@ public final class PreparedMedia {
             await drainingCache.waitForJobs()
             self.drainingCache = nil
         } else { await cache?.waitForJobs() }
+        await drainingNativeInput?.wait(); drainingNativeInput = nil
     }
     public var liveDiagnostics: LivePipelineDiagnostics {
         var result = LivePipelineDiagnostics()
@@ -258,7 +267,7 @@ public final class PreparedMedia {
         }
         cache.onReadyRangesChanged = { [weak self] in self?.notifyReadyRangesChanged() }
     }
-    deinit { producer?.cancel() }
+    deinit { producer?.cancel(); nativeInput?.stop() }
     /// Replaces the planned height and rate with the observed output once a
     /// converted segment has been probed. Live and progressive jobs share this
     /// so they report the same output quality as the complete-file path.
@@ -273,6 +282,7 @@ public final class PreparedMedia {
         onFailure = nil
         onReadyRangesChanged = nil
         progressNotification?.cancel(); progressNotification = nil
+        nativeInput?.stop(); drainingNativeInput = nativeInput ?? drainingNativeInput; nativeInput = nil
         upstream?.stop()
         server.stop()
         cancelProduction()
@@ -507,10 +517,10 @@ final class PreparationUpstream {
     private var relays: [HTTPMediaRelay] = []
 
     func localized(_ source: ResolvedSource) async throws -> ResolvedSource {
-        let url = try await loopback(source.url)
+        let url = try await loopback(source.url, headers: source.headers, finite: !source.isLive)
         var audio = source.audio
         if let track = source.audio {
-            let audioURL = try await loopback(track.url)
+            let audioURL = try await loopback(track.url, headers: track.headers, finite: !source.isLive)
             if audioURL != track.url { audio = MediaTrack(url: audioURL) }
         }
         guard url != source.url || audio?.url != source.audio?.url else { return source }
@@ -523,9 +533,10 @@ final class PreparationUpstream {
         relays.removeAll()
     }
 
-    private func loopback(_ url: URL) async throws -> URL {
-        guard MediaURLSecrets.contains(url), !url.isFileURL else { return url }
-        let relay = try await HTTPMediaRelay.start(source: url, host: "127.0.0.1")
+    private func loopback(_ url: URL, headers: [String: String], finite: Bool) async throws -> URL {
+        guard !url.isFileURL, finite || MediaURLSecrets.contains(url) else { return url }
+        let relay = try await HTTPMediaRelay.start(source: url, host: "127.0.0.1", sourceHeaders: headers,
+                                                   readAheadBytes: finite ? 8 * 1024 * 1024 : 256 * 1024)
         guard let local = relay.url else { relay.stop(); throw PreparationFailure.unavailable }
         relays.append(relay)
         try Task.checkCancellation()
@@ -579,9 +590,6 @@ public struct MediaPreparer: Sendable {
         // session. Explicit complete-file delivery remains available for callers
         // that need the finalized file before handoff.
         var mode = mode ?? (environment["AIRTHROW_PREPARATION_MODE"] == "complete-file" ? .completeFile : .progressiveHLS)
-        let usesAppleProcessing = source.upscaler.isAI && source.enhancement != .original
-            || source.enhancement.cleansUp && preferences.noiseReduction == .appleTemporal
-        if usesAppleProcessing && preferences.aiBeforePlayback { mode = .completeFile }
         try Task.checkCancellation()
         guard source.enhancement == .original || !source.isLive else { throw PreparationFailure.unsupported }
         // Resolve a LAN address before downloading. Loopback requires an explicit test override.
@@ -610,8 +618,7 @@ public struct MediaPreparer: Sendable {
             // remain the same for every remote input.
             let allowHLSInput = source.delivery != .file
             var source = source
-            if let upstream = PreparationPrivacy.upstream,
-               MediaURLSecrets.contains(source.url) || source.audio.map({ MediaURLSecrets.contains($0.url) }) == true {
+            if let upstream = PreparationPrivacy.upstream {
                 source = try await upstream.localized(source)
             }
             let videoInput = try await probe(source.url, headers: source.headers, executable: ffprobe,
@@ -630,16 +637,25 @@ public struct MediaPreparer: Sendable {
                     .prefix(8).map { (1, $0) })
             if !source.isLive && !subtitleInputs.isEmpty { mode = .completeFile }
             let subtitleTracks = source.isLive ? [] : Array(subtitleInputs.prefix(8))
+            let videoForProcessing = videoInput.streams.first(where: { $0.copyableVideo })
+                ?? videoInput.streams.first(where: { $0.convertibleVideo })
+                ?? videoInput.streams.first(where: { $0.codec_type == "video" && $0.disposition?.attached_pic != 1 })
+            let noiseReduction: CleanupNoiseReduction
+            if preferences.noiseReduction == .automatic {
+                if #available(macOS 26, *), videoForProcessing.map(Self.nativeGPUInput) == true, subtitleTracks.isEmpty {
+                    noiseReduction = .gpu
+                } else { noiseReduction = .ffmpeg }
+            } else { noiseReduction = preferences.noiseReduction }
+            let usesAppleProcessing = source.upscaler.isAI && source.enhancement != .original
+                || source.enhancement.cleansUp && noiseReduction != .ffmpeg
+            if usesAppleProcessing && preferences.aiBeforePlayback { mode = .completeFile }
             // The inspect step copies HDR10/HLG and compatible Dolby Vision Main
             // 10 video unmodified at Original quality; it rejects encrypted,
             // attached-picture and unknown tracks, refuses HDR/Dolby Vision for
             // any re-encode (tone mapping stays out of scope), and otherwise
             // refuses video conversion unless the source explicitly allows it.
-            if usesAppleProcessing {
-                let video = videoInput.streams.first(where: { $0.copyableVideo })
-                    ?? videoInput.streams.first(where: { $0.convertibleVideo })
-                    ?? videoInput.streams.first(where: { $0.codec_type == "video" && $0.disposition?.attached_pic != 1 })
-                if let video { _ = try AppleInputNormalization(stream: video) }
+            if usesAppleProcessing, let video = videoForProcessing {
+                _ = try AppleInputNormalization(stream: video)
             }
             let plan = try Self.plan(videoInput: videoInput, audioInput: audioInput,
                                      separateAudio: source.audio != nil, policy: source.conversionPolicy,
@@ -723,21 +739,36 @@ public struct MediaPreparer: Sendable {
                 throw PreparationFailure.diskSpace
             }
             let output = workspace.directory.appendingPathComponent("media.mp4")
-            let temporalCleanup = source.enhancement.cleansUp && preferences.noiseReduction == .appleTemporal
+            let temporalCleanup = source.enhancement.cleansUp && noiseReduction == .appleTemporal
             if temporalCleanup, let reason = await TemporalNoiseFilterSupport.unavailableReason {
                 throw AppFailure(.unsupportedOperation, reason)
             }
-            if (source.upscaler.isAI && source.enhancement != .original) || temporalCleanup {
+            if (source.upscaler.isAI && source.enhancement != .original) || (source.enhancement.cleansUp && noiseReduction != .ffmpeg) {
                 let normalization = try AppleInputNormalization(stream: plan.video)
+                let boxHeight = source.enhancement.targetHeight!
+                let boxWidth = boxHeight == 2160 ? 3840 : 1920
+                let cleanupOnly = source.enhancement.cleansUp
+                    && (normalization.width == boxWidth || normalization.height == boxHeight)
+                    && normalization.width <= boxWidth && normalization.height <= boxHeight
+                let backend: VideoUpscaler = cleanupOnly ? .lanczos : source.upscaler.isAI ? source.upscaler : .lanczos
                 let layout = try await SuperResolutionLayout.make(width: normalization.width, height: normalization.height,
-                    targetHeight: source.enhancement.targetHeight!, backend: source.upscaler.isAI ? source.upscaler : .lanczos)
-                if source.upscaler == .standard, await !SuperResolutionSupport.standardModelReady {
+                    targetHeight: boxHeight, backend: backend)
+                if backend == .standard, await !SuperResolutionSupport.standardModelReady {
                     throw AppFailure(.unsupportedOperation, "Download the AI Standard model in Settings or Video options before using it.")
+                }
+                if Self.nativeGPUInput(plan.video), #available(macOS 26, *),
+                   !(source.enhancement.cleansUp && noiseReduction == .ffmpeg), subtitleTracks.isEmpty {
+                    return try await nativePrepared(workspace: workspace, source: source, plan: plan,
+                        layout: layout, ffmpeg: ffmpeg, ffprobe: ffprobe, host: host, duration: videoDuration!,
+                        cached: bounded && mode == .progressiveHLS, hlsInput: allowHLSInput, noiseReduction: noiseReduction)
+                }
+                if source.enhancement.cleansUp && noiseReduction == .gpu {
+                    throw AppFailure(.unsupportedOperation, "GPU cleanup needs progressive, square-pixel BT.709 H.264 or HEVC video without text subtitles. Choose FFmpeg cleanup for this source.")
                 }
                 return try await superResolved(workspace: workspace, source: source, plan: plan,
                     layout: layout, normalization: normalization, ffmpeg: ffmpeg, ffprobe: ffprobe, host: host, duration: videoDuration!,
                     cached: bounded && mode == .progressiveHLS, hlsInput: allowHLSInput,
-                    subtitles: subtitleTracks)
+                    subtitles: subtitleTracks, noiseReduction: noiseReduction)
             }
             func conversionArguments(encoder: String, hardwareFrames: Bool = false,
                                      precise: Bool = false, alignRemux: Bool = false) throws -> [String] {
@@ -927,17 +958,151 @@ public struct MediaPreparer: Sendable {
         catch { try Task.checkCancellation(); return false }
     }
 
+    private static func nativeGPUInput(_ stream: Stream) -> Bool {
+        ["h264", "hevc"].contains(stream.codec_name ?? "")
+            && ["yuv420p", "nv12"].contains(stream.pix_fmt ?? "")
+            && [nil, "progressive", "unknown"].contains(stream.field_order)
+            && [nil, "tv", "mpeg"].contains(stream.color_range)
+            && stream.color_transfer == "bt709" && stream.color_space == "bt709" && stream.color_primaries == "bt709"
+            && [nil, "1:1", "0:1", "N/A"].contains(stream.sample_aspect_ratio)
+            && (stream.side_data_list ?? []).allSatisfy { ($0.rotation ?? 0) == 0 }
+            && stream.constantFrameRate
+            && (stream.frameRate ?? 0) > 0 && (stream.frameRate ?? 61) <= 60.01
+    }
+
+    @available(macOS 26, *)
+    private func nativePrepared(workspace: PreparationWorkspace, source: ResolvedSource, plan: PreparationPlan,
+                                layout: SuperResolutionLayout, ffmpeg: String, ffprobe: String, host: String,
+                                duration: Double, cached: Bool, hlsInput: Bool, noiseReduction: CleanupNoiseReduction) async throws -> PreparedMedia {
+        let maximumBytes = maximumBytes
+        let metrics = NativeVideoMetrics()
+        let noise = source.enhancement.cleansUp ? noiseReduction : .ffmpeg
+        let deadline = cached ? nil : ContinuousClock.now + timeout
+        let monitor: @Sendable () throws -> Void = {
+            try workspace.checkSize(maximumBytes)
+            if let deadline, ContinuousClock.now >= deadline { throw PreparationFailure.stalled }
+        }
+        let inputs = NativeInputPrefetch(duration: duration) { _, start, length in
+            let directory = workspace.directory.appendingPathComponent("input-" + UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let file = directory.appendingPathComponent("compressed.mp4")
+            var success = false
+            defer { if !success { try? FileManager.default.removeItem(at: directory) } }
+            let began = ContinuousClock.now
+            var args = ["-v", "error", "-nostdin", "-n", "-ss", MediaClock.seconds(start)]
+                + (try Self.inputArguments(url: source.url, headers: source.headers, hls: hlsInput))
+            if cached, let audio = source.audio {
+                args += ["-ss", MediaClock.seconds(start)] + (try Self.inputArguments(url: audio.url, headers: audio.headers, hls: hlsInput))
+            }
+            args += ["-map", "0:\(plan.video.index)", "-c:v", "copy"]
+            if cached {
+                args += ["-map", "\(plan.audioInput):\(plan.audio.index)"] + Self.audioArguments(stream: plan.audio, action: plan.audioAction)
+                if plan.audioAction == .convert { args += ["-af", "asetpts=PTS-STARTPTS,apad"] }
+            } else { args += ["-an"] }
+            args += ["-t", MediaClock.seconds(length), "-avoid_negative_ts", "disabled", "-map_metadata", "0", "-movflags", "+faststart", file.path]
+            _ = try await HelperProcess.run(executable: ffmpeg, arguments: args, timeout: .seconds(120), outputLimit: 4096, monitor: monitor)
+            try Task.checkCancellation(); try monitor()
+            let bytes = (try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.int64Value ?? 0
+            let elapsed = began.duration(to: .now).components
+            metrics.fetched(seconds: Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18, bytes: bytes)
+            success = true
+            return NativeInputClip(file)
+        }
+        do {
+            @Sendable func piece(index: Int, start: Double, length: Double, directory: URL, hls: Bool) async throws {
+                let input = try await inputs.take(index: index)
+                let video = directory.appendingPathComponent("gpu-video.mp4")
+                defer { try? FileManager.default.removeItem(at: video) }
+                metrics.beginProcessing()
+                defer { metrics.endProcessing() }
+                let result = try await NativeGPUVideoEncoder.export(input: input.url, output: video, layout: layout,
+                    start: start, length: length, rate: plan.video.frameRate!, reorder: plan.video.has_b_frames ?? 0,
+                    noiseReduction: noise, monitor: monitor)
+                metrics.processed(result)
+                var args = ["-v", "error", "-nostdin", "-n", "-i", video.path]
+                if hls { args += ["-i", input.url.path, "-map", "0:v:0", "-map", "1:a:0"] }
+                else { args += ["-map", "0:v:0", "-an"] }
+                args += ["-c", "copy", "-t", MediaClock.seconds(length), "-map_metadata", "-1"]
+                if plan.fragmentedHLS { args += ["-tag:v", "hvc1"] }
+                if hls {
+                    args += ["-f", "hls", "-hls_segment_type", plan.fragmentedHLS ? "fmp4" : "mpegts", "-hls_time", "86400",
+                        "-hls_playlist_type", "vod", "-hls_flags", "temp_file", "-start_number", String(index),
+                        "-hls_segment_filename", directory.appendingPathComponent(plan.fragmentedHLS ? "segment%06d.m4s" : "segment%06d.ts").path]
+                    if plan.fragmentedHLS { args += ["-hls_fmp4_init_filename", String(format: "init%06d.mp4", index)] }
+                    args += [directory.appendingPathComponent("part.m3u8").path]
+                } else { args += ["-movflags", "+faststart", directory.appendingPathComponent("part.mp4").path] }
+                _ = try await HelperProcess.run(executable: ffmpeg, arguments: args, timeout: .seconds(120), outputLimit: 4096, monitor: monitor)
+            }
+            if cached {
+                let cache = try await CachedHLS(workspace: workspace, duration: duration, fragmented: plan.fragmentedHLS, preferences: preferences) { index, start, length, directory in
+                    try await piece(index: index, start: start, length: length, directory: directory, hls: true)
+                    let initialization = String(format: "init%06d.mp4", index)
+                    let manifest = try HLSPlaylist(directory: directory, name: "part.m3u8", initialization: initialization)
+                    guard manifest.complete, manifest.count == 1, abs(manifest.duration - length) < 0.15,
+                          let segment = manifest.segments.first else { throw PreparationFailure.failed }
+                    let probe = try await self.probeSegment(segment, directory: directory, fragmented: plan.fragmentedHLS,
+                        executable: ffprobe, initialization: initialization)
+                    try Self.validateConverted(probe, plan: plan)
+                    return (layout.outputHeight, plan.video.frameRate!)
+                }
+                let prepared = try await publish(cache: cache, workspace: workspace, host: host, duration: duration,
+                    plan: plan, startPosition: source.preparationPosition)
+                await prepared.retain(inputs, metrics: metrics)
+                return prepared
+            }
+            let scratch = workspace.directory.appendingPathComponent("gpu-working", isDirectory: true)
+            try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+            var parts: [String] = []
+            var start = 0.0
+            while start < duration {
+                try Task.checkCancellation(); let length = min(6, duration - start)
+                try await piece(index: parts.count, start: start, length: length, directory: scratch, hls: false)
+                let name = String(format: "part%06d.mp4", parts.count)
+                try FileManager.default.moveItem(at: scratch.appendingPathComponent("part.mp4"), to: scratch.appendingPathComponent(name))
+                parts.append("file '\(name)'"); start += length
+            }
+            inputs.stop(); await inputs.wait()
+            let list = scratch.appendingPathComponent("parts.ffconcat")
+            try Data(("ffconcat version 1.0\n" + parts.joined(separator: "\n") + "\n").utf8).write(to: list)
+            let joined = scratch.appendingPathComponent("joined.mp4")
+            _ = try await HelperProcess.run(executable: ffmpeg, arguments: ["-v", "error", "-nostdin", "-n", "-f", "concat", "-safe", "1",
+                "-i", list.path, "-c", "copy", joined.path], timeout: timeout, outputLimit: 4096, monitor: monitor)
+            // Audio stays one continuous stream. Joining independently encoded
+            // AAC clips would repeat encoder priming/padding at each boundary.
+            let audioURL = source.audio?.url ?? source.url
+            let audioHeaders = source.audio?.headers ?? source.headers
+            let output = workspace.directory.appendingPathComponent("media.mp4")
+            var mux = ["-v", "error", "-nostdin", "-n", "-i", joined.path]
+                + (try Self.inputArguments(url: audioURL, headers: audioHeaders, hls: hlsInput))
+                + ["-map", "0:v:0", "-map", "1:\(plan.audio.index)", "-c:v", "copy"]
+                + Self.audioArguments(stream: plan.audio, action: plan.audioAction)
+            if plan.audioAction == .convert { mux += ["-af", "asetpts=PTS-STARTPTS,apad"] }
+            mux += ["-t", MediaClock.seconds(duration), "-map_metadata", "-1", "-movflags", "+faststart", output.path]
+            _ = try await HelperProcess.run(executable: ffmpeg, arguments: mux, timeout: timeout, outputLimit: 4096, monitor: monitor)
+            try FileManager.default.removeItem(at: scratch)
+            let verified = try await probe(output, headers: [:], executable: ffprobe, local: true)
+            try Self.validateConverted(verified, plan: plan)
+            guard abs(try verified.finiteDuration - duration) <= completionTolerance(for: duration) else { throw PreparationFailure.failed }
+            let server = try await MediaHTTPServer.start(file: output, host: host)
+            do { try Task.checkCancellation() } catch { await server.stop(); throw error }
+            let prepared = await PreparedMedia(server: server, workspace: workspace, sourceDuration: duration,
+                playbackPath: .videoConversion, videoHeight: layout.outputHeight, videoFrameRate: plan.video.frameRate)
+            await prepared.retain(inputs, metrics: metrics)
+            return prepared
+        } catch { inputs.stop(); await inputs.wait(); throw error }
+    }
+
     /// AI uses the same storage lease, quota, delivery server and chunk cache as
     /// ordinary preparation. Only bounded raw intermediates are retained while
     /// processing a chunk; no additional lossy encode precedes the AI processor.
     private func superResolved(workspace: PreparationWorkspace, source: ResolvedSource, plan: PreparationPlan,
                                layout: SuperResolutionLayout, normalization: AppleInputNormalization, ffmpeg: String, ffprobe: String, host: String,
                                duration: Double, cached: Bool, hlsInput: Bool,
-                               subtitles: [(input: Int, stream: Stream)]) async throws -> PreparedMedia {
+                               subtitles: [(input: Int, stream: Stream)], noiseReduction: CleanupNoiseReduction) async throws -> PreparedMedia {
         let maximumBytes = maximumBytes
         let processSeconds: Double = 600
         let rate = normalization.rate
-        let noiseReduction = plan.enhancement.cleansUp ? preferences.noiseReduction : .ffmpeg
+        let noiseReduction = plan.enhancement.cleansUp ? noiseReduction : .ffmpeg
         let monitor: @Sendable () throws -> Void = { try workspace.checkSize(maximumBytes) }
         @Sendable func normalizedClip(start: Double, length: Double, directory: URL) async throws -> URL {
             let raw = directory.appendingPathComponent("input.mov")
@@ -1756,6 +1921,11 @@ public struct MediaPreparer: Sendable {
                 if parts.count == 2, parts[1] > 0, parts[0] > 0 { return parts[0] / parts[1] }
             }
             return nil
+        }
+        var constantFrameRate: Bool {
+            guard let actual = frameRate, let value = r_frame_rate else { return false }
+            let parts = value.split(separator: "/").compactMap { Double($0) }
+            return parts.count == 2 && parts[1] > 0 && abs(parts[0] / parts[1] - actual) < 0.001
         }
         private var encrypted: Bool { codec_tag_string == "encv" || codec_tag_string == "enca" }
         private var attachedPicture: Bool { disposition?.attached_pic == 1 }

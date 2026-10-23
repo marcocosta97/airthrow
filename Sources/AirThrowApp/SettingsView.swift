@@ -104,7 +104,7 @@ struct SettingsView: View {
     @AppStorage(PreparationPreferences.windowSecondsKey) private var windowSeconds = 60
     @AppStorage(VideoUpscaler.preferenceKey) private var upscaler = VideoUpscaler.automatic.rawValue
     @AppStorage(PreparationPreferences.aiBeforePlaybackKey) private var aiBeforePlayback = false
-    @AppStorage(PreparationPreferences.noiseReductionKey) private var noiseReduction = CleanupNoiseReduction.ffmpeg.rawValue
+    @AppStorage(PreparationPreferences.noiseReductionKey) private var noiseReduction = CleanupNoiseReduction.defaultBackend.rawValue
 
     var body: some View {
         Form {
@@ -174,7 +174,11 @@ struct SettingsView: View {
             }
             Section("Cleanup") {
                 Picker("Noise reduction", selection: $noiseReduction) {
-                    Text("FFmpeg").tag(CleanupNoiseReduction.ffmpeg.rawValue)
+                    Text("Automatic").tag(CleanupNoiseReduction.automatic.rawValue)
+                if #available(macOS 26, *) {
+                        Text("GPU (Core Image)").tag(CleanupNoiseReduction.gpu.rawValue)
+                    }
+                    Text("FFmpeg (CPU)").tag(CleanupNoiseReduction.ffmpeg.rawValue)
                     Text(TemporalNoiseFilterSupport.unavailableReason == nil
                          ? "Apple temporal noise filter (experimental)"
                          : "Apple temporal noise filter (Not supported)")

@@ -92,9 +92,9 @@ public enum VideoEnhancement: String, Codable, Sendable, CaseIterable {
         switch self {
         case .original: "Original"
         case .upscale1080: "Upscale to 1080p"
-        case .cleanup1080: "Clean up & upscale to 1080p"
+        case .cleanup1080: "Clean up · 1080p"
         case .upscale4K: "Upscale to 4K"
-        case .cleanup4K: "Clean up & upscale to 4K"
+        case .cleanup4K: "Clean up · 4K"
         }
     }
     public var targetHeight: Int? {

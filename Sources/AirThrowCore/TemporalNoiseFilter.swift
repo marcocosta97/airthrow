@@ -70,7 +70,11 @@ final class PreparedVideoProcessor {
     let cleaner: TemporalNoiseFilter?
     private let scalerSourcePool: CVPixelBufferPool?
     private var transfer: VTPixelTransferSession?
-    private lazy var context = CIContext(options: [.cacheIntermediates: false])
+    private let renderer: MetalVideoRenderer
+    private let gpuCleanupPool: CVPixelBufferPool?
+    private let gpuCleanup: Bool
+    private(set) var metalPasses = 0
+    private(set) var metalSeconds = 0.0
     private var previousSource: VTFrameProcessorFrame?
     private var previousOutput: VTFrameProcessorFrame?
     private var sessionStarted = false
@@ -79,6 +83,8 @@ final class PreparedVideoProcessor {
 
     init(layout: SuperResolutionLayout, noiseReduction: CleanupNoiseReduction) throws {
         self.layout = layout
+        renderer = try MetalVideoRenderer()
+        gpuCleanup = noiseReduction == .gpu
         let inputAttributes: [String: Any]
         let configuration: (any VTFrameProcessorConfiguration)?
         if layout.backend == .standard {
@@ -106,6 +112,8 @@ final class PreparedVideoProcessor {
         let noise = noiseReduction == .appleTemporal
             ? try TemporalNoiseFilter(width: layout.inputWidth, height: layout.inputHeight) : nil
         cleaner = noise
+        gpuCleanupPool = noiseReduction == .gpu && layout.backend.isAI
+            ? try SuperResolutionEncoder.pool(attributes: inputAttributes, width: layout.inputWidth, height: layout.inputHeight) : nil
         sourceAttributes = noise?.configuration.sourcePixelBufferAttributes ?? inputAttributes
         do {
             if noise != nil {
@@ -140,15 +148,26 @@ final class PreparedVideoProcessor {
             CVBufferPropagateAttachments(cleaned, input)
             guard CVPixelBufferFillExtendedPixels(input) == kCVReturnSuccess else { throw PreparationFailure.failed }
         }
+        let color = CGColorSpace(name: CGColorSpace.itur_709)!
+        if let gpuCleanupPool {
+            let cleaned = try await SuperResolutionEncoder.allocate(gpuCleanupPool)
+            let image = CIImage(cvPixelBuffer: input, options: [.colorSpace: color])
+                .applyingFilter("CINoiseReduction", parameters: ["inputNoiseLevel": 0.02, "inputSharpness": 0.4])
+            let info = try renderer.render(image, to: cleaned)
+            metalPasses += info.passCount; metalSeconds += info.kernelExecutionTime
+            CVBufferPropagateAttachments(input, cleaned); input = cleaned
+        }
         if layout.backend == .lanczos {
-            let color = CGColorSpace(name: CGColorSpace.itur_709)!
-            autoreleasepool {
-                let image = CIImage(cvPixelBuffer: input, options: [.colorSpace: color])
-                    .applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: layout.scale,
-                        kCIInputAspectRatioKey: Double(layout.outputWidth) / Double(layout.inputWidth) / Double(layout.scale)])
-                context.render(image, to: destination, bounds: CGRect(x: 0, y: 0,
-                    width: layout.outputWidth, height: layout.outputHeight), colorSpace: color)
+            var image = CIImage(cvPixelBuffer: input, options: [.colorSpace: color])
+            if gpuCleanup {
+                image = image.applyingFilter("CINoiseReduction", parameters: ["inputNoiseLevel": 0.02, "inputSharpness": 0.4])
             }
+            if layout.inputWidth != layout.outputWidth || layout.inputHeight != layout.outputHeight {
+                image = image.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: layout.scale,
+                    kCIInputAspectRatioKey: Double(layout.outputWidth) / Double(layout.inputWidth) / Double(layout.scale)])
+            }
+            let info = try renderer.render(image, to: destination)
+            metalPasses += info.passCount; metalSeconds += info.kernelExecutionTime
         } else {
             guard let frame = VTFrameProcessorFrame(buffer: input, presentationTimeStamp: pts),
                   let result = VTFrameProcessorFrame(buffer: destination, presentationTimeStamp: pts) else { throw PreparationFailure.failed }

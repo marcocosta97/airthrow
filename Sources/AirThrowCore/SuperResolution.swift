@@ -248,6 +248,7 @@ enum SuperResolutionEncoder {
         values[kCVPixelBufferWidthKey as String] = width
         values[kCVPixelBufferHeightKey as String] = height
         values[kCVPixelBufferIOSurfacePropertiesKey as String] = [:]
+        values[kCVPixelBufferMetalCompatibilityKey as String] = true
         var result: CVPixelBufferPool?
         guard CVPixelBufferPoolCreate(nil, nil, values as CFDictionary, &result) == kCVReturnSuccess, let result else { throw PreparationFailure.failed }
         return result

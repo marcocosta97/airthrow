@@ -1046,7 +1046,11 @@ final class PlaybackController: ObservableObject {
                     if appliedEnhancement == .cleanup1080 { appliedEnhancement = .cleanup4K }
                 }
                 if appliedEnhancement != .original {
-                    source = source.withEnhancement(appliedEnhancement, upscaler: preferences.upscaler)
+                    let cleanupOnly = appliedEnhancement.cleansUp
+                        && sourceHeight == appliedEnhancement.targetHeight.map(Double.init)
+                    let backend: VideoUpscaler = cleanupOnly ? .automatic : preferences.upscaler
+                    source = source.withEnhancement(appliedEnhancement, upscaler: backend)
+                    self.videoUpscaler = backend
                 }
                 self.videoEnhancement = appliedEnhancement
                 if (sourceHeight ?? 0) > 1080 { self.enhancementOutput4K = true }

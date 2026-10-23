@@ -80,9 +80,14 @@ struct VideoMenuView: View {
         }
         if draftAction == .upscale && !canUpscale(output4K: true) { draftAction = .original }
     }
+    private var cleanupOnly: Bool {
+        draftAction == .cleanUpUpscale
+            && controller.sourceHeight(for: draftVideo == videoSelection ? nil : draftVideo) == (draftOutput4K ? 2160 : 1080)
+    }
+    private var effectiveUpscaler: VideoUpscaler { cleanupOnly ? .automatic : draftUpscaler }
     private var hasChanges: Bool {
         draftVideo != videoSelection || draftAction != enhancementAction
-            || draftUpscaler != upscaler
+            || effectiveUpscaler != upscaler
             || (draftAction != .original && draftOutput4K != controller.enhancementOutput4K)
     }
     private var outputHelp: String {
@@ -96,10 +101,11 @@ struct VideoMenuView: View {
         if !controller.allowVideoConversion { return "Turn off Avoid video re-encoding in Settings to use enhancements." }
         if isLive { return "Enhancement is available only for on-demand video." }
         if !mediaReady { return "Video options become available when the source is ready." }
-        if !canUpscale(output4K: true) { return "The source is already 4K or higher. Upscaling is unavailable." }
+        if draftAction == .upscale && !canUpscale(output4K: true) { return "The source is already 4K or higher. Upscaling is unavailable." }
         if draftAction == .upscale && !canUpscale(output4K: false) {
             return "The source is already 1080p. Upscale uses 4K."
         }
+        if cleanupOnly { return "Clean up keeps this source at its original resolution." }
         if draftAction == .original { return "Choose an enhancement to enable output resolution." }
         if requires4K { return "This source requires 4K output and a compatible receiver." }
         return "4K needs a compatible receiver."
@@ -226,28 +232,30 @@ struct VideoMenuView: View {
                 .pickerStyle(.radioGroup)
                 .labelsHidden()
                 .disabled(!mediaReady || isLive)
-                Picker("Upscaler", selection: $draftUpscaler) {
-                    ForEach(VideoUpscaler.allCases, id: \.self) { backend in
-                        Text(backend.label).tag(backend)
-                            .disabled(SuperResolutionSupport.unavailableReason(backend) != nil)
+                if !cleanupOnly {
+                    Picker("Upscaler", selection: $draftUpscaler) {
+                        ForEach(VideoUpscaler.allCases, id: \.self) { backend in
+                            Text(backend.label).tag(backend)
+                                .disabled(SuperResolutionSupport.unavailableReason(backend) != nil)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(!canChooseOutput)
+                    if draftUpscaler.isAI {
+                        Text("Experimental. Detail and colors may change. SDR video. Output up to 60 fps.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if draftUpscaler == .standard && !controller.superResolutionModelReady {
+                        Button(controller.downloadingSuperResolutionModel ? "Downloading model…" : "Download Standard model") {
+                            Task { await controller.downloadSuperResolutionModel() }
+                        }
+                        .disabled(controller.downloadingSuperResolutionModel)
+                        Text("The model is downloaded and managed by macOS.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                .pickerStyle(.menu)
-                .disabled(!canChooseOutput)
-                if draftUpscaler.isAI {
-                    Text("Experimental. Detail and colors may change. SDR video. Output up to 60 fps.")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if draftUpscaler == .standard && !controller.superResolutionModelReady {
-                    Button(controller.downloadingSuperResolutionModel ? "Downloading model…" : "Download Standard model") {
-                        Task { await controller.downloadSuperResolutionModel() }
-                    }
-                    .disabled(controller.downloadingSuperResolutionModel)
-                    Text("The model is downloaded and managed by macOS.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                Text("Upscale output")
+                Text("Output")
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(canChooseOutput ? Color.primary : Color.secondary)
                 UpscaleOutputPicker(output4K: $draftOutput4K,
@@ -320,7 +328,7 @@ struct VideoMenuView: View {
             try controller.applyVideoOptions(
                 sourceID: draftVideo == videoSelection ? nil : draftVideo,
                 enhancement: draftAction.enhancement(output4K: draftOutput4K),
-                output4K: draftOutput4K, upscaler: draftUpscaler)
+                output4K: draftOutput4K, upscaler: effectiveUpscaler)
         }
     }
 
@@ -372,7 +380,7 @@ private enum EnhancementAction: CaseIterable, Hashable {
         switch self {
         case .original: "Original"
         case .upscale: "Upscale"
-        case .cleanUpUpscale: "Clean up and upscale"
+        case .cleanUpUpscale: "Clean up"
         }
     }
 
@@ -406,7 +414,7 @@ private struct UpscaleOutputPicker: NSViewRepresentable {
         let control = NSSegmentedControl(labels: ["1080p", "4K"], trackingMode: .selectOne,
             target: context.coordinator, action: #selector(Coordinator.choose(_:)))
         control.segmentDistribution = .fill
-        control.setAccessibilityLabel("Upscale output")
+        control.setAccessibilityLabel("Output resolution")
         return control
     }
 

@@ -1,8 +1,13 @@
 import Foundation
 
 public enum CleanupNoiseReduction: String, CaseIterable, Sendable {
+    case automatic
+    case gpu
     case ffmpeg
     case appleTemporal
+    public static var defaultBackend: Self {
+        .automatic
+    }
 }
 
 /// A snapshot of user preferences. A running session keeps its original budget.
@@ -22,7 +27,7 @@ public struct PreparationPreferences: Sendable, Equatable {
 
     public init(maximumBytes: Int64 = 2 * 1024 * 1024 * 1024,
                 retainAll: Bool = false, windowSeconds: Double = 60, remuxCache: Bool = false,
-                aiBeforePlayback: Bool = false, noiseReduction: CleanupNoiseReduction = .ffmpeg) {
+                aiBeforePlayback: Bool = false, noiseReduction: CleanupNoiseReduction = CleanupNoiseReduction.defaultBackend) {
         self.maximumBytes = max(1, maximumBytes)
         self.retainAll = retainAll
         self.remuxCache = remuxCache
@@ -39,6 +44,6 @@ public struct PreparationPreferences: Sendable, Equatable {
                     retainAll: defaults.bool(forKey: retainAllKey), windowSeconds: window,
                     remuxCache: defaults.bool(forKey: remuxCacheKey),
                     aiBeforePlayback: defaults.bool(forKey: aiBeforePlaybackKey),
-                    noiseReduction: CleanupNoiseReduction(rawValue: defaults.string(forKey: noiseReductionKey) ?? "") ?? .ffmpeg)
+                    noiseReduction: CleanupNoiseReduction(rawValue: defaults.string(forKey: noiseReductionKey) ?? "") ?? CleanupNoiseReduction.defaultBackend)
     }
 }

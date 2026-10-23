@@ -126,6 +126,9 @@ public final class HTTPMediaRelay {
     public private(set) var url: URL?
     private var credentials: HTTPLoginCredentials?
     private var variant: HLSVariantSelection?
+    private var sourceHeaders: [String: String] = [:]
+    private var readAheadBytes = 256 * 1024
+    private var preparationCache: PreparationInputCache?
     private var server: MediaHTTPServer?
     private var routes = RelayRoutes()
     private var streams: [UUID: HTTPRelayStream] = [:]
@@ -144,10 +147,22 @@ public final class HTTPMediaRelay {
         self.source = source; self.credentials = credentials
     }
 
-    public static func start(source: URL, credentials: HTTPLoginCredentials? = nil, host: String? = nil, variant: HLSVariantSelection? = nil) async throws -> HTTPMediaRelay {
+    public static func start(source: URL, credentials: HTTPLoginCredentials? = nil, host: String? = nil, variant: HLSVariantSelection? = nil,
+                             sourceHeaders: [String: String] = [:], readAheadBytes: Int = 256 * 1024) async throws -> HTTPMediaRelay {
         let source = try MediaInput.url(source.absoluteString)
         let relay = HTTPMediaRelay(source: source, credentials: credentials)
+        guard sourceHeaders.count <= 8, sourceHeaders.allSatisfy({ key, value in
+            ["user-agent", "accept", "accept-language", "sec-fetch-mode"].contains(key.lowercased())
+                && value.utf8.count <= 4096 && !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+        }) else { throw PreparationFailure.unsupported }
         relay.variant = variant
+        relay.sourceHeaders = sourceHeaders
+        relay.readAheadBytes = min(8 * 1024 * 1024, max(256 * 1024, readAheadBytes))
+        if credentials == nil, readAheadBytes > 256 * 1024, source.pathExtension.lowercased() != "m3u8" {
+            do { relay.preparationCache = try await PreparationInputCache.open(url: source, headers: sourceHeaders) }
+            catch is CancellationError { throw CancellationError() }
+            catch { try Task.checkCancellation() } // No ranges/validator: preserve bounded streaming.
+        }
         let server = try await MediaHTTPServer.start(file: source, host: host, hls: source.pathExtension.lowercased() == "m3u8", relay: relay)
         relay.server = server; relay.url = server.url
         if let url = server.url {
@@ -158,6 +173,7 @@ public final class HTTPMediaRelay {
     }
 
     public func stop() {
+        if let cache = preparationCache { Task { await cache.stop() } }; preparationCache = nil
         server?.stop(); server = nil
         for stream in Array(streams.values) { stream.cancel() }
         streams.removeAll(); routes = RelayRoutes()
@@ -170,7 +186,8 @@ public final class HTTPMediaRelay {
         guard server != nil, let upstream = routes.upstream(path) else { return nil }
         let id = UUID()
         let stream = HTTPRelayStream(url: upstream, method: method, headers: headers,
-            credentials: credentials, origin: source, rewrite: { [weak self] data, base in
+            credentials: credentials, origin: source, sourceHeaders: sourceHeaders, readAheadBytes: readAheadBytes,
+            preparationCache: upstream == source ? preparationCache : nil, rewrite: { [weak self] data, base in
                 guard let self else { throw CancellationError() }
                 return try self.rewrite(data, base: base, routePath: path)
             }, send: send, finish: { [weak self] in
@@ -263,6 +280,11 @@ final class HTTPRelayStream {
     private(set) var httpStatusCode: Int?
     private let transfer: HTTPMediaTransfer
     private let method: String
+    private let readAheadBytes: Int
+    private let preparationCache: PreparationInputCache?
+    private let requestedHeaders: [String: String]
+    private let upstreamURL: URL
+    private var cachedTransfer: Task<Void, Never>?
     private let rewrite: (Data, URL) throws -> Data
     private let send: (Data, @escaping @MainActor @Sendable () -> Void) -> Void
     private var finish: (() -> Void)?
@@ -277,13 +299,16 @@ final class HTTPRelayStream {
     private var chunked = false
 
     init(url: URL, method: String, headers: [String: String], credentials: HTTPLoginCredentials?,
-         origin: URL? = nil, rewrite: @escaping (Data, URL) throws -> Data,
+         origin: URL? = nil, sourceHeaders: [String: String] = [:], readAheadBytes: Int = 256 * 1024, preparationCache: PreparationInputCache? = nil, rewrite: @escaping (Data, URL) throws -> Data,
          send: @escaping (Data, @escaping @MainActor @Sendable () -> Void) -> Void, finish: @escaping () -> Void) {
         self.method = method; self.rewrite = rewrite; self.send = send; self.finish = finish
+        self.readAheadBytes = min(8 * 1024 * 1024, max(256 * 1024, readAheadBytes))
+        self.preparationCache = preparationCache; self.requestedHeaders = headers; self.upstreamURL = url
         var request = URLRequest(url: url)
         // HLS HEAD needs rewritten length, so obtain its manifest with GET.
         let knownPlaylist = url.pathExtension.lowercased() == "m3u8"
         request.httpMethod = "GET"
+        for (name, value) in sourceHeaders { request.setValue(value, forHTTPHeaderField: name) }
         request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
         if !knownPlaylist, method == "GET" {
             for name in ["range", "if-range"] { if let value = headers[name] { request.setValue(value, forHTTPHeaderField: name) } }
@@ -294,8 +319,41 @@ final class HTTPRelayStream {
         transfer.completed = { [weak self] error in self?.completed(error) }
     }
 
-    func start() { transfer.start() }
+    func start() {
+        guard let cache = preparationCache else { transfer.start(); return }
+        cachedTransfer = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let size = cache.size
+                var range = requestedHeaders["range"]
+                if let check = requestedHeaders["if-range"], check != cache.validator { range = nil }
+                let span = range.flatMap { MediaHTTPServer.byteRange($0, size: size) }
+                if range != nil && span == nil {
+                    enqueue(Data("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */\(size)\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8)); ended = true; drain(); return
+                }
+                let start = span?.0 ?? 0, end = span?.1 ?? size - 1
+                var fields = ["Content-Type": cache.mime, "Content-Length": String(end - start + 1), "Accept-Ranges": "bytes"]
+                fields[cache.validatorHeader] = cache.validator
+                if span != nil { fields["Content-Range"] = "bytes \(start)-\(end)/\(size)" }
+                guard let response = HTTPURLResponse(url: upstreamURL, statusCode: span == nil ? 200 : 206, httpVersion: "HTTP/1.1", headerFields: fields) else { throw PreparationFailure.failed }
+                _ = received(response)
+                if method == "HEAD" { return }
+                var offset = start
+                while offset <= end {
+                    try Task.checkCancellation()
+                    guard finish != nil else { return }
+                    while pendingBytes > readAheadBytes / 2 {
+                        try Task.checkCancellation(); try await Task.sleep(for: .milliseconds(2))
+                    }
+                    let data = try await cache.read(offset: offset, maximum: Int(min(64 * 1024, end - offset + 1)))
+                    received(data); offset += Int64(data.count)
+                }
+                completed(nil)
+            } catch { if !Task.isCancelled { self.completed(error) } }
+        }
+    }
     func cancel() {
+        cachedTransfer?.cancel(); cachedTransfer = nil
         transfer.cancel(); pending.removeAll(); manifest.removeAll()
         let callback = finish; finish = nil; callback?()
     }
@@ -358,7 +416,7 @@ final class HTTPRelayStream {
     private func header(_ response: HTTPURLResponse) -> Data {
         let code = response.statusCode == 206 ? "206 Partial Content" : response.statusCode == 416 ? "416 Range Not Satisfiable" : "200 OK"
         var text = "HTTP/1.1 \(code)\r\nCache-Control: no-store\r\nConnection: close\r\n"
-        for name in ["Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"] {
+        for name in ["Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag", "Last-Modified"] {
             if let value = response.value(forHTTPHeaderField: name), !value.contains("\r"), !value.contains("\n") { text += "\(name): \(value)\r\n" }
         }
         chunked = response.value(forHTTPHeaderField: "Content-Length") == nil && method == "GET" && response.statusCode != 416
@@ -380,7 +438,7 @@ final class HTTPRelayStream {
         }
         pending.append(data); pendingBytes += data.count
         peakBufferBytes = max(peakBufferBytes, pendingBytes)
-        if pendingBytes > 256 * 1024 { transfer.pause() }
+        if pendingBytes > readAheadBytes { transfer.pause() }
         drain()
     }
 
@@ -392,7 +450,7 @@ final class HTTPRelayStream {
         send(data) { [weak self] in
             guard let self else { return }
             self.sending = false; self.pendingBytes -= data.count
-            if self.pendingBytes < 128 * 1024 { self.transfer.resume() }
+            if self.pendingBytes < self.readAheadBytes / 2 { self.transfer.resume() }
             self.drain()
         }
     }
