@@ -291,6 +291,13 @@ public final class PreparedMedia {
         cache = nil
         workspace = nil
     }
+
+    /// Stop this attempt's output while leaving the shared input relay running.
+    /// A later fallback in the same prepare still reads that relay.
+    fileprivate func discardAttempt() {
+        upstream = nil
+        stop()
+    }
 }
 
 /// Remembers file sizes and only walks the workspace when a directory changes.
@@ -1293,7 +1300,7 @@ public struct MediaPreparer: Sendable {
                                                videoFrameRate: cache.videoFrameRate)
             await prepared.installCache(cache)
             do { try Task.checkCancellation() }
-            catch { await prepared.stop(); await prepared.waitForProducer(); throw error }
+            catch { await prepared.discardAttempt(); await prepared.waitForProducer(); throw error }
             return prepared
         } catch {
             await cache.stop(); await cache.waitForJobs()
@@ -1343,7 +1350,7 @@ public struct MediaPreparer: Sendable {
                 try await Task.sleep(for: .milliseconds(100))
             }
         } catch {
-            prepared.stop()
+            prepared.discardAttempt()
             await prepared.waitForProducer()
             if error is CancellationError { throw CancellationError() }
             throw error
@@ -1386,7 +1393,7 @@ public struct MediaPreparer: Sendable {
                 try await Task.sleep(for: .milliseconds(100))
             }
         } catch {
-            prepared.stop()
+            prepared.discardAttempt()
             await prepared.waitForProducer()
             // The caller still holds the lease. Remove partial HLS before an MP4 fallback.
             // Cleanup must not replace the original failure, including cancellation.
