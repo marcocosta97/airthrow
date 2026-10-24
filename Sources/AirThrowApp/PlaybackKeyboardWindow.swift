@@ -35,7 +35,7 @@ class PlaybackKeyboardWindow: NSWindow {
     /// Space and arrows move selection in these controls, including when Full
     /// Keyboard Access makes a button the first responder. A focused cell is
     /// inside the control, so walk its ancestors.
-    private static func controlOwnsKey(_ responder: NSResponder?) -> Bool {
+    static func controlOwnsKey(_ responder: NSResponder?) -> Bool {
         var current: NSResponder? = responder
         while let view = current as? NSView {
             if view is NSText || view is NSTextField || view is NSPopUpButton || view is NSComboBox

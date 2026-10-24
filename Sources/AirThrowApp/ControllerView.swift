@@ -30,6 +30,10 @@ final class ControllerPresentation: ObservableObject {
     @Published var playlistVisible = false
     @Published var settingsVisible = false
     @Published var xtreamPlaylistVisible = false
+    /// Bumped by File ▸ Open… so the controller presents the file panel.
+    @Published var openFileRequest = 0
+    /// Bumped by File ▸ Open Location… once the source field can take focus.
+    @Published var focusSourceRequest = 0
 }
 
 /// Keep the controller alive while Settings covers it, retaining source input
@@ -42,7 +46,7 @@ struct ControllerWindowView: View {
 
     var body: some View {
         ZStack {
-            ControllerView(controller: controller)
+            ControllerView(controller: controller, presentation: presentation)
                 .opacity(presentation.settingsVisible ? 0 : 1)
                 .allowsHitTesting(!presentation.settingsVisible)
                 .disabled(presentation.settingsVisible)
@@ -103,6 +107,7 @@ struct ControllerWindowView: View {
 
 struct ControllerView: View {
     @ObservedObject var controller: PlaybackController
+    @ObservedObject var presentation: ControllerPresentation
     @ViewState private var url = ""
     @ViewState private var scrub: Double = 0
     @ViewState private var scrubbing = false
@@ -433,6 +438,8 @@ struct ControllerView: View {
         .onReceive(controller.$sourceInput) { input in
             if let input { url = input; urlFocused = false }
         }
+        .onChange(of: presentation.openFileRequest) { _, _ in chooseFile() }
+        .onChange(of: presentation.focusSourceRequest) { _, _ in urlFocused = true }
     }
 
     private func section<Content: View>(

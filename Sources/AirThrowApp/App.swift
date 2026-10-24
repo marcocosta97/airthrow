@@ -38,6 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var iptvObservation: AnyCancellable?
     private var httpLoginObservation: AnyCancellable?
     private var menuIsOpen = false
+    private var playbackMenuItems: [MenuCommand: NSMenuItem] = [:]
     private var menuCardView: MenuCardView?
     private var menuControlRow: MenuControlRow?
     private var menuControlsItem: NSMenuItem?
@@ -103,6 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 self?.setInspector(collapsed: !visible)
                 self?.windowControls?.setSelected(settingsVisible, at: 0)
                 self?.windowControls?.setSelected(visible, at: 1)
+                self?.updatePlaybackKeyEquivalents()
             }
         didFinishLaunching = true
         openPendingURLs()
@@ -155,7 +157,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if menuItem.action == #selector(addXtreamPlaylist) {
             return controller.httpLoginRequest == nil && !presentation.xtreamPlaylistVisible
         }
+        if menuItem.action == #selector(runMenuCommand(_:)),
+           let rawValue = menuItem.representedObject as? String,
+           let command = MenuCommand(rawValue: rawValue) {
+            if command == .togglePlayback {
+                menuItem.title = PlaybackPolicy.isPlaying(controller.snapshot) ? "Pause" : "Play"
+            }
+            return playbackCommandEnabled(command)
+        }
+        if menuItem.action == #selector(NSWindow.performClose(_:))
+            || menuItem.action == #selector(NSWindow.performMiniaturize(_:)) {
+            return window?.isVisible == true
+        }
         return true
+    }
+
+    func windowWillBeginSheet(_ notification: Notification) {
+        DispatchQueue.main.async { [weak self] in self?.updatePlaybackKeyEquivalents() }
+    }
+
+    func windowDidEndSheet(_ notification: Notification) {
+        updatePlaybackKeyEquivalents()
     }
 
     private func revealWindow() {
@@ -185,6 +207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             window.titlebarSeparatorStyle = .none
             window.isReleasedWhenClosed = false
             window.delegate = self
+            window.responderChanged = { [weak self] in self?.updatePlaybackKeyEquivalents() }
 
             let mainHosting = NSHostingController(rootView: ControllerWindowView(
                 controller: controller, cookieStatus: cookieStatus, presentation: presentation))
@@ -408,6 +431,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         about.makeKeyAndOrderFront(nil)
     }
 
+    @objc private func openVideo() {
+        presentation.settingsVisible = false
+        revealWindow()
+        presentation.openFileRequest += 1
+    }
+
+    @objc private func openLocation() {
+        presentation.settingsVisible = false
+        revealWindow()
+        // The source field is disabled while Settings is on screen. Focus it
+        // after that page has been removed.
+        DispatchQueue.main.async { [weak self] in
+            self?.presentation.focusSourceRequest += 1
+        }
+    }
+
+    private func addPlaybackItem(_ command: MenuCommand, to menu: NSMenu, keyEquivalent: String = "",
+                                 modifiers: NSEvent.ModifierFlags = []) {
+        let item = NSMenuItem(title: menuTitle(command), action: #selector(runMenuCommand(_:)), keyEquivalent: keyEquivalent)
+        item.target = self
+        item.representedObject = command.rawValue
+        item.keyEquivalentModifierMask = modifiers
+        menu.addItem(item)
+        playbackMenuItems[command] = item
+    }
+
+    /// Space and the arrow keys stay with a focused field, list, or button.
+    /// The menu shows those shortcuts only while the window would handle them.
+    private func updatePlaybackKeyEquivalents() {
+        let live = playbackShortcutsLive()
+        let left = live ? String(UnicodeScalar(NSLeftArrowFunctionKey)!) : ""
+        let right = live ? String(UnicodeScalar(NSRightArrowFunctionKey)!) : ""
+        playbackMenuItems[.togglePlayback]?.keyEquivalent = live ? " " : ""
+        playbackMenuItems[.togglePlayback]?.keyEquivalentModifierMask = []
+        playbackMenuItems[.skipBackward]?.keyEquivalent = left
+        playbackMenuItems[.skipBackward]?.keyEquivalentModifierMask = []
+        playbackMenuItems[.skipForward]?.keyEquivalent = right
+        playbackMenuItems[.skipForward]?.keyEquivalentModifierMask = []
+    }
+
+    private func playbackShortcutsLive() -> Bool {
+        guard !presentation.settingsVisible, window?.attachedSheet == nil else { return false }
+        return !PlaybackKeyboardWindow.controlOwnsKey(window?.firstResponder)
+    }
+
+    private func playbackCommandEnabled(_ command: MenuCommand) -> Bool {
+        let status = controller.snapshot
+        switch command {
+        case .togglePlayback:
+            return PlaybackPolicy.canControl(status)
+        case .stop:
+            return status.state != .idle || status.receiverWaiting == true
+        case .skipBackward:
+            return PlaybackPolicy.canSkip(status, by: -MenuModel.skipInterval, position: controller.pendingSeek)
+        case .skipForward:
+            return PlaybackPolicy.canSkip(status, by: MenuModel.skipInterval, position: controller.pendingSeek)
+        case .previous:
+            guard let queue = status.queue else { return false }
+            return queue.currentIndex > 0 && !PlaybackPolicy.isBusy(status)
+        case .next:
+            guard let queue = status.queue else { return false }
+            return queue.currentIndex + 1 < queue.items.count && !PlaybackPolicy.isBusy(status)
+        case .showController, .quit:
+            return true
+        }
+    }
+
     @objc private func showHelp() {
         guard let url = URL(string: "https://github.com/marcocosta97/airthrow#play-a-video") else { return }
         NSWorkspace.shared.open(url)
@@ -432,6 +522,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         main.addItem(appMenuItem)
         let fileItem = NSMenuItem()
         let file = NSMenu(title: "File")
+        let open = file.addItem(withTitle: "Open…", action: #selector(openVideo), keyEquivalent: "o")
+        open.target = self
+        let openLocation = file.addItem(withTitle: "Open Location…", action: #selector(openLocation), keyEquivalent: "l")
+        openLocation.target = self
+        file.addItem(.separator())
         let xtream = file.addItem(withTitle: "Add Xtream Server…", action: #selector(addXtreamPlaylist), keyEquivalent: "")
         xtream.target = self
         fileItem.submenu = file
@@ -439,12 +534,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let editItem = NSMenuItem()
         let edit = NSMenu(title: "Edit")
         edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        edit.addItem(.separator())
         edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editItem.submenu = edit
         main.addItem(editItem)
+        let playbackItem = NSMenuItem()
+        let playback = NSMenu(title: "Playback")
+        addPlaybackItem(.togglePlayback, to: playback)
+        addPlaybackItem(.stop, to: playback, keyEquivalent: ".", modifiers: .command)
+        playback.addItem(.separator())
+        addPlaybackItem(.skipBackward, to: playback)
+        addPlaybackItem(.skipForward, to: playback)
+        playback.addItem(.separator())
+        addPlaybackItem(.previous, to: playback)
+        addPlaybackItem(.next, to: playback)
+        playbackItem.submenu = playback
+        main.addItem(playbackItem)
+        updatePlaybackKeyEquivalents()
+        let windowItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowItem.submenu = windowMenu
+        main.addItem(windowItem)
+        NSApp.windowsMenu = windowMenu
         let helpItem = NSMenuItem()
         let help = NSMenu(title: "Help")
         let guide = help.addItem(withTitle: "AirThrow Help", action: #selector(showHelp), keyEquivalent: "")
@@ -593,6 +711,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 @MainActor
 private final class ControllerWindow: PlaybackKeyboardWindow {
     weak var presentation: ControllerPresentation?
+    var responderChanged: (() -> Void)?
+
+    override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
+        let accepted = super.makeFirstResponder(responder)
+        responderChanged?()
+        return accepted
+    }
 
     override func cancelOperation(_ sender: Any?) {
         if presentation?.settingsVisible == true {
