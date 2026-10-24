@@ -256,6 +256,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             window.contentViewController = split
             window.center()
             window.standardWindowButton(.zoomButton)?.isEnabled = false
+            // The compact controller has no full-screen layout. The Window menu
+            // would otherwise offer Enter Full Screen.
+            window.collectionBehavior.insert(.fullScreenNone)
             window.contentMinSize = NSSize(width: ControllerMetrics.minWidth, height: Self.controllerHeight)
             window.contentMaxSize = NSSize(width: 12_000, height: Self.controllerHeight)
             self.window = window
