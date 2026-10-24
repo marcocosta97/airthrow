@@ -9,6 +9,10 @@ enum MediaClock {
     }
 }
 
+extension Duration {
+    var timeInterval: Double { Double(components.seconds) + Double(components.attoseconds) / 1e18 }
+}
+
 /// Copy boundaries are decoder refresh points, not arbitrary six-second cuts.
 /// Packet DTS keeps reordered video together; audio PTS assigns each packet to
 /// exactly one interval. No compressed payload is changed by these filters.

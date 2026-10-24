@@ -68,6 +68,7 @@ jobs:
           swiftc -swift-version 6 -parse-as-library \
             Sources/AirThrowCore/*.swift \
             Sources/AirThrowApp/MediaDiagnostics.swift \
+            Sources/AirThrowApp/InterfaceCopy.swift \
             Sources/AirThrowApp/PlaybackController.swift \
             Sources/AirThrowApp/ReceiverWaitingScreen.swift \
             Sources/AirThrowApp/XtreamLibrary.swift \

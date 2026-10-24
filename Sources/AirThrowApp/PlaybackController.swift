@@ -144,10 +144,10 @@ final class PlaybackController: ObservableObject {
         let height: Double?
         if let sourceID {
             if sourceID == "automatic" {
-                source = try? MediaSelector.select(sourceCandidates, policy: effectiveConversionPolicy,
+                source = try? MediaSelector.select(sourceCandidates, policy: conversionPolicy,
                                                     preferQuality: preferQuality)
                 height = source.flatMap { Self.candidatesHeight(for: $0, in: sourceCandidates) }
-            } else if let index = sourceCandidates.indices.first(where: { sourceOptionID($0) == sourceID }) {
+            } else if let index = candidateIndex(forOptionID: sourceID) {
                 source = sourceCandidates[index].source
                 height = sourceCandidates[index].height
             } else { return nil }
@@ -161,9 +161,7 @@ final class PlaybackController: ObservableObject {
         guard let height = sourceHeight(for: sourceID) else { return true }
         return height < (output4K ? 2160 : 1080)
     }
-    var requires4KOutput: Bool {
-        (sourceHeight() ?? 0) > 1080
-    }
+    var requires4KOutput: Bool { requires4KOutput(for: nil) }
     func requires4KOutput(for sourceID: String?) -> Bool {
         (sourceHeight(for: sourceID) ?? 0) > 1080
     }
@@ -299,21 +297,26 @@ final class PlaybackController: ObservableObject {
         player.allowsExternalPlayback = true
         player.isMuted = true
         observations = [
-            player.observe(\.isExternalPlaybackActive, options: [.new]) { [weak self] _, _ in
-                Task { @MainActor in self?.refresh() }
-            },
-            player.observe(\.timeControlStatus, options: [.new]) { [weak self] _, _ in
-                Task { @MainActor in self?.refresh() }
-            },
-            player.observe(\.rate, options: [.new]) { [weak self] _, _ in
-                Task { @MainActor in self?.refresh() }
-            }
+            refreshOnChange(of: player, \.isExternalPlaybackActive),
+            refreshOnChange(of: player, \.timeControlStatus),
+            refreshOnChange(of: player, \.rate)
         ]
         timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
         installRemoteCommands()
         updateNowPlaying()
+    }
+
+    /// A nil generation refreshes for the player's whole lifetime; otherwise only while that load is current.
+    private func refreshOnChange<Object: NSObject, Value>(of object: Object, _ keyPath: KeyPath<Object, Value>,
+                                                          generation id: UUID? = nil) -> NSKeyValueObservation {
+        object.observe(keyPath, options: [.new]) { [weak self] _, _ in
+            Task { @MainActor in
+                guard let self, id == nil || self.generation == id else { return }
+                self.refresh()
+            }
+        }
     }
 
     func load(_ input: String, autoplay: Bool = false) throws {
@@ -366,7 +369,7 @@ final class PlaybackController: ObservableObject {
                 if library.listing.items.isEmpty && !library.loading { library.browse(library.section, categoryID: library.categoryID) }
             } else { try connectXtream(source, historyEntryID: id) }
         } else if entry.kind == .iptv {
-            if iptvSourceURL == source, let catalog = iptvCatalog {
+            if iptvSourceURL == source, iptvCatalog != nil {
                 cancelIPTVImport()
                 historyStore.markOpened(id); history = historyStore.entries
                 inspectorPage = .channels
@@ -375,16 +378,17 @@ final class PlaybackController: ObservableObject {
     }
 
     func removeHistoryEntry(_ id: UUID) {
-        historyStore.remove(id); history = historyStore.entries
-        if let error = historyStore.credentialError { notice = error }
+        historyStore.remove(id); publishHistoryChange()
     }
     func toggleHistoryPin(_ id: UUID) { historyStore.togglePin(id); history = historyStore.entries }
     func clearHistory() {
-        historyStore.clear(); history = historyStore.entries
-        if let error = historyStore.credentialError { notice = error }
+        historyStore.clear(); publishHistoryChange()
     }
     private func recordHistory(_ url: URL, title: String, kind: MediaHistoryEntry.Kind) {
-        historyStore.record(url, title: title, kind: kind)
+        historyStore.record(url, title: title, kind: kind); publishHistoryChange()
+    }
+    /// For operations that can write or delete Keychain credentials.
+    private func publishHistoryChange() {
         history = historyStore.entries
         if let error = historyStore.credentialError { notice = error }
     }
@@ -499,7 +503,6 @@ final class PlaybackController: ObservableObject {
 
     private var conversionPolicy: ConversionPolicy { allowVideoConversion ? .allowVideo : .avoidVideo }
 
-    private var effectiveConversionPolicy: ConversionPolicy { conversionPolicy }
 
     /// Controls that require the installed item still wait for loading. Source
     /// and enhancement changes can cancel an in-flight load once discovery has
@@ -543,17 +546,10 @@ final class PlaybackController: ObservableObject {
         let candidateID: String?
         if optionID == "automatic" { candidateID = nil }
         else {
-            guard let index = sourceCandidates.indices.first(where: { sourceOptionID($0) == optionID }) else {
+            guard let index = candidateIndex(forOptionID: optionID) else {
                 throw AppFailure(.invalidRequest, "This source choice has expired. List sources again.")
             }
-            let candidate = sourceCandidates[index]
-            guard sourceCandidates.filter({ $0.id == candidate.id }).count == 1 else {
-                throw AppFailure(.unsupportedOperation, "This source cannot be identified uniquely. Choose Automatic.")
-            }
-            if let reason = candidate.unavailableReason(for: effectiveConversionPolicy) {
-                throw AppFailure(.unsupportedOperation, reason)
-            }
-            candidateID = candidate.id
+            candidateID = try loadableCandidateID(sourceCandidates[index])
         }
         startLoad(url, preservingQueue: queue != nil, titleOverride: title, sourceChoice: candidateID,
                   changingSource: true, enhancement: videoEnhancement,
@@ -562,8 +558,7 @@ final class PlaybackController: ObservableObject {
 
     /// A video choice keeps the current language if the new paired video offers it.
     func selectVideo(_ optionID: String) throws {
-        guard optionID != "automatic",
-              let index = sourceCandidates.indices.first(where: { sourceOptionID($0) == optionID }) else {
+        guard optionID != "automatic", let index = candidateIndex(forOptionID: optionID) else {
             try selectSource(optionID)
             return
         }
@@ -574,11 +569,8 @@ final class PlaybackController: ObservableObject {
         }
         let matching = sourceCandidates.indices.first { candidateIndex in
             let candidate = sourceCandidates[candidateIndex]
-            return candidate.source.url == picked.source.url
-                && candidate.source.headers == picked.source.headers
-                && candidate.source.playbackPath == picked.source.playbackPath
-                && candidate.audioDescription?.components(separatedBy: " · ").first == language
-                && candidate.unavailableReason(for: effectiveConversionPolicy) == nil
+            return candidate.sharesVideo(with: picked) && candidate.audioLanguage == language
+                && candidate.unavailableReason(for: conversionPolicy) == nil
         }
         try selectSource(sourceOptionID(matching ?? index))
     }
@@ -587,10 +579,43 @@ final class PlaybackController: ObservableObject {
         if let selectedNativeAudioID {
             return selectedSource?.hlsAudioOptions.first(where: { $0.id == selectedNativeAudioID })?.language
         }
-        guard let selectedSource else { return nil }
-        return sourceCandidates.first {
-            $0.source.url == selectedSource.url && $0.source.audio?.url == selectedSource.audio?.url
-        }?.audioDescription?.components(separatedBy: " · ").first
+        return selectedSource.flatMap { Self.candidate(presenting: $0, in: sourceCandidates) }?.audioLanguage
+    }
+
+    private func candidateIndex(forOptionID optionID: String?) -> Int? {
+        sourceCandidates.indices.first { sourceOptionID($0) == optionID }
+    }
+
+    /// The identity to pin for an explicit choice, or the reason it cannot load.
+    private func loadableCandidateID(_ candidate: MediaCandidate) throws -> String {
+        guard hasUniqueID(candidate) else {
+            throw AppFailure(.unsupportedOperation, "This source cannot be identified uniquely. Choose Automatic.")
+        }
+        if let reason = candidate.unavailableReason(for: conversionPolicy) {
+            throw AppFailure(.unsupportedOperation, reason)
+        }
+        return candidate.id
+    }
+
+    private func hasUniqueID(_ candidate: MediaCandidate) -> Bool {
+        sourceCandidates.filter { $0.id == candidate.id }.count == 1
+    }
+
+    private static func candidate(presenting source: ResolvedSource, in candidates: [MediaCandidate]) -> MediaCandidate? {
+        candidates.first { $0.source.url == source.url && $0.source.audio?.url == source.audio?.url }
+    }
+
+    private func requireDiscoveredSource() throws -> URL {
+        guard let url = originalSourceURL, selectedSource != nil else {
+            throw AppFailure(.unsupportedOperation, "Wait for source discovery to finish.")
+        }
+        return url
+    }
+
+    private func requireOnDemand() throws {
+        guard !snapshot.isLive, selectedSource?.isLive != true else {
+            throw AppFailure(.unsupportedOperation, "Enhancement is available for on-demand video, not live streams.")
+        }
     }
 
     /// Native HLS audio changes on the installed item. A paired-file audio
@@ -648,12 +673,8 @@ final class PlaybackController: ObservableObject {
     /// resolution for the next enhancement. On an active preset it prepares the
     /// matching output and reloads at the current position through the existing item path.
     func setEnhancementOutput4K(_ enabled: Bool) throws {
-        guard originalSourceURL != nil, selectedSource != nil else {
-            throw AppFailure(.unsupportedOperation, "Wait for source discovery to finish.")
-        }
-        guard !snapshot.isLive, selectedSource?.isLive != true else {
-            throw AppFailure(.unsupportedOperation, "Enhancement is available for on-demand video, not live streams.")
-        }
+        _ = try requireDiscoveredSource()
+        try requireOnDemand()
         guard enabled != enhancementOutput4K else { return }
         guard enabled || !requires4KOutput else {
             throw AppFailure(.unsupportedOperation, "This source is above 1080p. Choose 4K to avoid downscaling.")
@@ -674,9 +695,7 @@ final class PlaybackController: ObservableObject {
     /// the next enhancement's resolution when requesting Original.
     func applyVideoOptions(sourceID: String?, enhancement: VideoEnhancement, output4K: Bool) throws {
         try requireEnhancementAllowed(enhancement)
-        guard let url = originalSourceURL, selectedSource != nil else {
-            throw AppFailure(.unsupportedOperation, "Wait for source discovery to finish.")
-        }
+        let url = try requireDiscoveredSource()
         let target4K = enhancement.targetHeight.map { $0 == 2160 }
             ?? (output4K || requires4KOutput(for: sourceID))
         if sourceID == nil {
@@ -688,29 +707,20 @@ final class PlaybackController: ObservableObject {
         let candidateID: String?
         if sourceID == "automatic" { candidateID = nil }
         else {
-            guard let index = sourceCandidates.indices.first(where: { sourceOptionID($0) == sourceID }) else {
+            guard let index = candidateIndex(forOptionID: sourceID) else {
                 throw AppFailure(.invalidRequest, "This source choice has expired. Open Video options again.")
             }
             let picked = sourceCandidates[index]
-            let policy = conversionPolicy
-            let matching = picked.source.audio == nil ? nil : sourceCandidates.first { candidate in
-                candidate.source.url == picked.source.url && candidate.source.headers == picked.source.headers
-                    && candidate.source.playbackPath == picked.source.playbackPath
-                    && preferredAudioLanguage != nil
-                    && candidate.audioDescription?.components(separatedBy: " · ").first == preferredAudioLanguage
-                    && candidate.unavailableReason(for: policy) == nil
+            let language = preferredAudioLanguage
+            let matching = picked.source.audio == nil || language == nil ? nil : sourceCandidates.first { candidate in
+                candidate.sharesVideo(with: picked) && candidate.audioLanguage == language
+                    && candidate.unavailableReason(for: conversionPolicy) == nil
             }
             let candidate = matching ?? picked
-            guard sourceCandidates.filter({ $0.id == candidate.id }).count == 1 else {
-                throw AppFailure(.unsupportedOperation, "This source cannot be identified uniquely. Choose Automatic.")
-            }
-            if let reason = candidate.unavailableReason(for: policy) {
-                throw AppFailure(.unsupportedOperation, reason)
-            }
+            candidateID = try loadableCandidateID(candidate)
             guard enhancement.targetHeight != 1080 || (candidate.height ?? 0) <= 1080 else {
                 throw AppFailure(.unsupportedOperation, "This source is above 1080p. Choose 4K to avoid downscaling.")
             }
-            candidateID = candidate.id
         }
         guard enhancement == .original || !snapshot.isLive else {
             throw AppFailure(.unsupportedOperation, "Enhancement is available for on-demand video, not live streams.")
@@ -733,22 +743,14 @@ final class PlaybackController: ObservableObject {
 
     func selectEnhancement(_ enhancement: VideoEnhancement) throws {
         try requireEnhancementAllowed(enhancement)
-        guard let url = originalSourceURL, selectedSource != nil else {
-            throw AppFailure(.unsupportedOperation, "Wait for source discovery to finish.")
-        }
-        guard !snapshot.isLive, selectedSource?.isLive != true else {
-            throw AppFailure(.unsupportedOperation, "Enhancement is available for on-demand video, not live streams.")
-        }
+        let url = try requireDiscoveredSource()
+        try requireOnDemand()
         guard enhancement != videoEnhancement else { return }
         guard enhancement.targetHeight != 1080 || !requires4KOutput else {
             throw AppFailure(.unsupportedOperation, "This source is above 1080p. Choose 4K to avoid downscaling.")
         }
-        let pinnedSourceID: String?
-        if sourceChoice == nil, let selectedSource {
-            pinnedSourceID = sourceCandidates.first(where: {
-                $0.source.url == selectedSource.url && $0.source.audio?.url == selectedSource.audio?.url
-            })?.id
-        } else { pinnedSourceID = nil }
+        let pinnedSourceID = sourceChoice == nil
+            ? selectedSource.flatMap { Self.candidate(presenting: $0, in: sourceCandidates) }?.id : nil
         // A direct input is already the presentation being enhanced. Reuse its
         // unmodified plan rather than rediscovering it and pinning an identity
         // whose probe/extractor metadata may change. Website pages still resolve
@@ -782,18 +784,14 @@ final class PlaybackController: ObservableObject {
                     label: option.name), kind: .native(index))
             }
         }
-        guard let current = sourceCandidates.first(where: {
-            $0.source.url == selectedSource.url && $0.source.audio?.url == selectedSource.audio?.url
-        }), current.source.audio != nil else { return [] }
+        guard let current = Self.candidate(presenting: selectedSource, in: sourceCandidates),
+              current.source.audio != nil else { return [] }
         return sourceCandidates.enumerated().compactMap { index, candidate in
-            guard candidate.source.url == current.source.url,
-                  candidate.source.headers == current.source.headers,
-                  candidate.source.playbackPath == current.source.playbackPath,
-                  let label = candidate.audioDescription else { return nil }
+            guard candidate.sharesVideo(with: current), let label = candidate.audioDescription else { return nil }
             return AudioChoice(snapshot: AudioOptionSnapshot(
                 id: "\(sourceOptionsGeneration.uuidString)-audio-candidate-\(index)",
                 label: label,
-                unavailableReason: candidate.unavailableReason(for: effectiveConversionPolicy)),
+                unavailableReason: candidate.unavailableReason(for: conversionPolicy)),
                 kind: .candidate(index))
         }
     }
@@ -828,39 +826,30 @@ final class PlaybackController: ObservableObject {
     /// Match the selected source back to its candidate to recover its quality.
     private static func qualityLabel(for source: ResolvedSource, in candidates: [MediaCandidate]) -> String? {
         if let variant = source.hlsVariant { return qualityLabel(height: variant.height, frameRate: variant.frameRate) }
-        guard let candidate = candidates.first(where: {
-            $0.source.url == source.url && $0.source.audio?.url == source.audio?.url
-        }) else { return nil }
-        return qualityLabel(candidate)
+        return candidate(presenting: source, in: candidates).flatMap(qualityLabel)
     }
 
     private static func candidatesHeight(for source: ResolvedSource, in candidates: [MediaCandidate]) -> Double? {
         if let variant = source.hlsVariant { return Double(variant.height) }
-        return candidates.first {
-            $0.source.url == source.url && $0.source.audio?.url == source.audio?.url
-        }?.height
+        return candidate(presenting: source, in: candidates)?.height
     }
 
     private var sourceOptions: [SourceOptionSnapshot]? {
         guard !sourceCandidates.isEmpty else { cachedSourceOptions = nil; cachedSourceOptionsToken = ""; return nil }
-        let token = "\(sourceOptionsGeneration.uuidString)|\(effectiveConversionPolicy)|\(sourceCandidates.count)|"
+        let token = "\(sourceOptionsGeneration.uuidString)|\(conversionPolicy)|\(sourceCandidates.count)|"
             + sourceCandidates.map(\.id).joined(separator: ",")
         if token == cachedSourceOptionsToken { return cachedSourceOptions }
         let built = sourceCandidates.enumerated().map { index, candidate in
-            let videoIndex = sourceCandidates.firstIndex {
-                $0.source.url == candidate.source.url &&
-                $0.source.headers == candidate.source.headers &&
-                $0.source.playbackPath == candidate.source.playbackPath
-            } ?? index
+            let videoIndex = sourceCandidates.firstIndex { $0.sharesVideo(with: candidate) } ?? index
             let quality: String
             if let base = Self.qualityLabel(candidate) {
                 quality = base + (candidate.source.delivery == .hls && candidate.source.hlsVariant == nil ? " maximum (adaptive)" : "")
             } else { quality = "Quality unknown" }
             return SourceOptionSnapshot(id: sourceOptionID(index), quality: quality,
                 audio: candidate.audioDescription, playbackPath: candidate.source.playbackPath,
-                unavailableReason: sourceCandidates.filter({ $0.id == candidate.id }).count > 1
+                unavailableReason: !hasUniqueID(candidate)
                     ? "This source cannot be identified uniquely. Choose Automatic."
-                    : candidate.unavailableReason(for: effectiveConversionPolicy),
+                    : candidate.unavailableReason(for: conversionPolicy),
                 videoGroupID: "\(sourceOptionsGeneration.uuidString)-video-\(videoIndex)",
                 bitrate: candidate.bitrate, isAdaptive: candidate.source.delivery == .hls && candidate.source.hlsVariant == nil)
         }
@@ -1201,30 +1190,10 @@ final class PlaybackController: ObservableObject {
                 // prepared item back to the start once it is ready.
                 self.pendingInitialSeek = self.preparedMedia?.sourceDuration != nil
                 self.itemObservations = [
-                    item.observe(\.status, options: [.new]) { [weak self] _, _ in
-                        Task { @MainActor in
-                            guard let self, self.generation == id else { return }
-                            self.refresh()
-                        }
-                    },
-                    item.observe(\.tracks, options: [.new]) { [weak self] _, _ in
-                        Task { @MainActor in
-                            guard let self, self.generation == id else { return }
-                            self.refresh()
-                        }
-                    },
-                    item.observe(\.presentationSize, options: [.new]) { [weak self] _, _ in
-                        Task { @MainActor in
-                            guard let self, self.generation == id else { return }
-                            self.refresh()
-                        }
-                    },
-                    item.observe(\.seekableTimeRanges, options: [.new]) { [weak self] _, _ in
-                        Task { @MainActor in
-                            guard let self, self.generation == id else { return }
-                            self.refresh()
-                        }
-                    }
+                    self.refreshOnChange(of: item, \.status, generation: id),
+                    self.refreshOnChange(of: item, \.tracks, generation: id),
+                    self.refreshOnChange(of: item, \.presentationSize, generation: id),
+                    self.refreshOnChange(of: item, \.seekableTimeRanges, generation: id)
                 ]
                 self.notifications.append(NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
                     Task { @MainActor in
@@ -1813,12 +1782,40 @@ final class PlaybackController: ObservableObject {
     private func stopPreparedMedia() {
         guard let prepared = preparedMedia else { return }
         preparedMedia = nil
+        drain(prepared)
+    }
+
+    private func stopRetiredPreparedMedia() {
+        guard let retired = retiredPreparedMedia else { return }
+        retiredPreparedMedia = nil
+        drain(retired)
+    }
+
+    /// Stops a delivery and keeps its producer tracked until it has exited.
+    private func drain(_ prepared: PreparedMedia) {
         prepared.stop()
         let id = UUID()
         drainingLoads[id] = Task { [weak self] in
             await prepared.waitForProducer()
             self?.drainingLoads.removeValue(forKey: id)
         }
+    }
+
+    /// Deliveries kept alive only while AVPlayer still retains the replaced item.
+    private var hasRetiredDelivery: Bool {
+        retiredPreparedMedia != nil || retiredAuthenticatedMedia != nil || retiredVariantMediaRelay != nil
+    }
+
+    private func releaseRetiredDelivery() {
+        stopRetiredPreparedMedia()
+        retiredAuthenticatedMedia?.stop(); retiredAuthenticatedMedia = nil
+        retiredVariantMediaRelay?.stop(); retiredVariantMediaRelay = nil
+    }
+
+    private func detachItemObservers() {
+        itemObservations.removeAll()
+        notifications.forEach(NotificationCenter.default.removeObserver)
+        notifications.removeAll()
     }
 
     /// A ready AirPlay route may ignore Play during item replacement. Keep
@@ -1867,17 +1864,6 @@ final class PlaybackController: ObservableObject {
         }
     }
 
-    private func stopRetiredPreparedMedia() {
-        guard let retired = retiredPreparedMedia else { return }
-        retiredPreparedMedia = nil
-        retired.stop()
-        let id = UUID()
-        drainingLoads[id] = Task { [weak self] in
-            await retired.waitForProducer()
-            self?.drainingLoads.removeValue(forKey: id)
-        }
-    }
-
     private func resetItem(keepPlayerItem: Bool = false, preserveQueue: Bool = false) {
         pendingHistoryURL = nil
         waitingScreen.stop(keepingItemForReplacement: keepPlayerItem)
@@ -1912,9 +1898,7 @@ final class PlaybackController: ObservableObject {
         cancelProbe(restorePosition: false)
         player.isMuted = true
         player.pause()
-        itemObservations.removeAll()
-        notifications.forEach(NotificationCenter.default.removeObserver)
-        notifications.removeAll()
+        detachItemObservers()
         mediaItem = nil
         cancelSeekWork()
         loadPreferences = nil
@@ -1934,9 +1918,7 @@ final class PlaybackController: ObservableObject {
         } else {
             player.replaceCurrentItem(with: nil)
             stopPreparedMedia()
-            stopRetiredPreparedMedia()
-            retiredAuthenticatedMedia?.stop(); retiredAuthenticatedMedia = nil
-            retiredVariantMediaRelay?.stop(); retiredVariantMediaRelay = nil
+            releaseRetiredDelivery()
         }
         loading = false; resolving = false; preparing = false; websiteURL = nil; retriedResolution = false
         selectedSource = nil
@@ -2051,19 +2033,25 @@ final class PlaybackController: ObservableObject {
         player.pause()
         timeoutTask?.cancel()
         if !restoreWaitingScreen { player.replaceCurrentItem(with: nil) }
-        retiredAuthenticatedMedia?.stop(); retiredAuthenticatedMedia = nil
-        retiredVariantMediaRelay?.stop(); retiredVariantMediaRelay = nil
-        stopRetiredPreparedMedia()
+        releaseRetiredDelivery()
         loadingAsset?.cancelLoading(); loadingAsset = nil
         mediaItem = nil
-        itemObservations.removeAll()
-        notifications.forEach(NotificationCenter.default.removeObserver); notifications.removeAll()
+        detachItemObservers()
         stopPreparedMedia()
         if restoreWaitingScreen { waitingScreen.start() }
         refresh()
     }
 
     private func finite(_ number: Double) -> Double? { number.isFinite && number >= 0 ? number : nil }
+
+    private func seekRanges(_ ranges: [NSValue]) -> [SeekRange] {
+        ranges.compactMap {
+            let range = $0.timeRangeValue
+            guard let start = finite(range.start.seconds),
+                  let end = finite(CMTimeRangeGetEnd(range).seconds), end > start else { return nil }
+            return SeekRange(start: start, end: end)
+        }
+    }
 
     private func metadataTitle(from asset: AVURLAsset) async -> String? {
         guard let metadata = try? await asset.load(.commonMetadata) else { return nil }
@@ -2251,11 +2239,8 @@ final class PlaybackController: ObservableObject {
                 restoreProbePosition()
             }
         }
-        if (retiredPreparedMedia != nil || retiredAuthenticatedMedia != nil || retiredVariantMediaRelay != nil), !loading, item?.status == .readyToPlay,
-           !probing && !probeRestoring && !probeWhenReady {
-            stopRetiredPreparedMedia()
-            retiredAuthenticatedMedia?.stop(); retiredAuthenticatedMedia = nil
-            retiredVariantMediaRelay?.stop(); retiredVariantMediaRelay = nil
+        if hasRetiredDelivery, !loading, item?.status == .readyToPlay, !probing && !probeRestoring && !probeWhenReady {
+            releaseRetiredDelivery()
         }
         if playWhenReady, pendingResumePosition == nil, !loading, item?.status == .readyToPlay, !probeRestoring && !probeRestoreFailed {
             if external && !probing {
@@ -2360,11 +2345,7 @@ final class PlaybackController: ObservableObject {
            (1...16384).contains(size.width), (1...16384).contains(size.height) {
             next.reportedVideoWidth = Int(size.width.rounded()); next.reportedVideoHeight = Int(size.height.rounded())
         }
-        next.seekableRanges = (item?.seekableTimeRanges ?? []).compactMap {
-            let range = $0.timeRangeValue
-            guard let start = finite(range.start.seconds), let end = finite(CMTimeRangeGetEnd(range).seconds), end > start else { return nil }
-            return SeekRange(start: start, end: end)
-        }
+        next.seekableRanges = seekRanges(item?.seekableTimeRanges ?? [])
         next.isLive = item?.status == .readyToPlay && (selectedSource?.isLive == true || LivePolicy.isLive(
             sourceDuration: preparedMedia?.sourceDuration,
             itemDurationIndefinite: item?.duration.isIndefinite == true))
@@ -2435,12 +2416,7 @@ final class PlaybackController: ObservableObject {
         diagnostics.sampleInspectionStatus = sampleInspectionStatus
         diagnostics.livePipeline = lastLivePipeline
         diagnostics.waitingReason = waitingReason(player.reasonForWaitingToPlay)
-        diagnostics.bufferedRanges = item.loadedTimeRanges.compactMap {
-            let range = $0.timeRangeValue
-            guard let start = finite(range.start.seconds),
-                  let end = finite(CMTimeRangeGetEnd(range).seconds), end > start else { return nil }
-            return SeekRange(start: start, end: end)
-        }
+        diagnostics.bufferedRanges = seekRanges(item.loadedTimeRanges)
         diagnostics.bufferEmpty = item.isPlaybackBufferEmpty
         diagnostics.bufferFull = item.isPlaybackBufferFull
         diagnostics.likelyToKeepUp = item.isPlaybackLikelyToKeepUp
@@ -2495,6 +2471,15 @@ final class PlaybackController: ObservableObject {
 
     func displayError(_ error: Error) {
         notice = (error as? AppFailure)?.message ?? "The action could not be completed. Please try again."
+    }
+
+    /// Runs a user action and shows its failure as a notice.
+    func perform(_ action: () throws -> Void) {
+        do { try action() } catch { displayError(error) }
+    }
+
+    func togglePlayback() throws {
+        if PlaybackPolicy.isPlaying(snapshot) { pause() } else { try play() }
     }
 
     func clearNotice() { notice = nil }
@@ -2749,4 +2734,13 @@ enum WebsiteCookiePreference {
         if override != .none, allowsOverride { sources[.youtube] = override }
         return WebsiteSessions(sources: sources)
     }
+}
+
+private extension MediaCandidate {
+    /// The same video stream, possibly paired with a different audio track.
+    func sharesVideo(with other: MediaCandidate) -> Bool {
+        source.url == other.source.url && source.headers == other.source.headers
+            && source.playbackPath == other.source.playbackPath
+    }
+    var audioLanguage: String? { audioDescription?.components(separatedBy: " · ").first }
 }

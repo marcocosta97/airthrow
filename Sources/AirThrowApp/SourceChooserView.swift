@@ -291,28 +291,22 @@ struct VideoMenuView: View {
         // Stop/replacement can dismiss the popover too. Only commit a draft
         // that still belongs to the same source session, and only once.
         guard hasChanges, mediaReady, draftSourceIDs == sources.map(\.id) else { return }
-        do {
+        controller.perform {
             try controller.applyVideoOptions(
                 sourceID: draftVideo == videoSelection ? nil : draftVideo,
                 enhancement: draftAction.enhancement(output4K: draftOutput4K),
                 output4K: draftOutput4K)
-        } catch { controller.displayError(error) }
+        }
     }
 
     private func chooseAudio(_ id: String) {
         guard id != audioSelection else { return }
-        do {
-            try controller.selectAudio(id)
-        }
-        catch { controller.displayError(error) }
+        controller.perform { try controller.selectAudio(id) }
     }
 
     private func chooseSubtitle(_ id: String) {
         guard id != subtitleSelection else { return }
-        do {
-            try controller.selectSubtitle(id)
-        }
-        catch { controller.displayError(error) }
+        controller.perform { try controller.selectSubtitle(id) }
     }
 }
 

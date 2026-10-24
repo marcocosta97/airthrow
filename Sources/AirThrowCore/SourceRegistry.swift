@@ -76,11 +76,19 @@ public struct SourceRegistry: Sendable {
 
     public func adapter(for url: URL) -> (any SourceAdapter)? {
         guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return nil }
-        var host = url.host?.lowercased() ?? ""
-        while host.hasSuffix(".") { host.removeLast() }
+        let host = url.normalizedHost
         guard !host.isEmpty else { return nil }
         let registered = byHost[host]
         if SourceResolver.isDirectMediaHint(url) { return registered?.handlesDirectMediaURLs == true ? registered : nil }
         return registered ?? fallback
+    }
+}
+
+extension URL {
+    /// Lowercased host without trailing root dots, or empty when there is none.
+    var normalizedHost: String {
+        var host = host?.lowercased() ?? ""
+        while host.hasSuffix(".") { host.removeLast() }
+        return host
     }
 }

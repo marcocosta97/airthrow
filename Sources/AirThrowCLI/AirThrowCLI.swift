@@ -40,9 +40,8 @@ struct AirThrowCLI {
                 print(helpText)
                 return
             case .run(let parsed):
-                if parsed.command == .open || parsed.command == .show {
-                    let running = await Task.detached { (try? LocalSocket.send(Request(.status))) != nil }.value
-                    if !running { try await launch() }
+                if parsed.command == .open || parsed.command == .show, await !isAppReachable() {
+                    try await launch()
                 }
                 let response = try await Task.detached { try LocalSocket.send(parsed.request) }.value
                 output(response, json: parsed.json, showSources: parsed.showsSources)
@@ -74,11 +73,14 @@ struct AirThrowCLI {
         config.activates = true
         _ = try await NSWorkspace.shared.openApplication(at: app, configuration: config)
         for _ in 0..<40 {
-            let ready = await Task.detached { (try? LocalSocket.send(Request(.status))) != nil }.value
-            if ready { return }
+            if await isAppReachable() { return }
             try await Task.sleep(for: .milliseconds(100))
         }
         throw AppFailure(.appUnavailable, "AirThrow launched but its command endpoint is unavailable.")
+    }
+
+    private static func isAppReachable() async -> Bool {
+        await Task.detached { (try? LocalSocket.send(Request(.status))) != nil }.value
     }
 
     private static func output(_ response: Response, json: Bool, showSources: Bool = false) {

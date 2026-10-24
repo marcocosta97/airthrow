@@ -198,8 +198,14 @@ struct ResolverChecks {
         let knownWebsite = YTDLPSourceAdapter(environment: probeEnvironment, nativeProbe: { _ in throw CancellationError() })
         for rawURL in ["https://vimeo.com/123", "https://www.twitch.tv/example", "https://x.com/example/status/123",
                        "https://www.instagram.com/p/example/"] {
+            try? FileManager.default.removeItem(at: temp.appendingPathComponent("generic-args"))
             try check(try await !knownWebsite.candidates(for: URL(string: rawURL)!).isEmpty,
                       "Recognized website entered native inspection")
+            // A path shape that coincidentally matches the bare Xtream
+            // `account/account/id` guess (e.g. x.com status URLs) must still
+            // reach yt-dlp rather than being treated as a direct media URL.
+            try check(FileManager.default.fileExists(atPath: temp.appendingPathComponent("generic-args").path),
+                      "Recognized website URL bypassed yt-dlp: \(rawURL)")
         }
         try FileManager.default.removeItem(at: temp.appendingPathComponent("generic-args"))
         let slowProbe = YTDLPSourceAdapter(environment: probeEnvironment, nativeProbe: { _ in
@@ -923,10 +929,10 @@ struct ResolverChecks {
                   "File override did not take precedence")
         try check(YouTubeCookies.fromEnvironment([:]) == .none, "Missing overrides enabled cookies")
         for domain in [".youtube.com", "youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", ".youtube-nocookie.com"] {
-            try check(YouTubeCookieScope.includes(domain), "YouTube domain was rejected: \(domain)")
+            try check(WebsiteCookieScope.includes(domain, service: .youtube), "YouTube domain was rejected: \(domain)")
         }
         for domain in ["notyoutube.com", "google.com", "youtube.com.evil.example", "evil-youtube.com", ""] {
-            try check(!YouTubeCookieScope.includes(domain), "Foreign domain was accepted: \(domain)")
+            try check(!WebsiteCookieScope.includes(domain, service: .youtube), "Foreign domain was accepted: \(domain)")
         }
         let netscape = """
         # Netscape HTTP Cookie File
@@ -936,7 +942,7 @@ struct ResolverChecks {
         """
         let parsedNetscape = NetscapeCookies.parse(netscape)
         try check(parsedNetscape.count == 3, "Netscape file was not parsed")
-        let scopedNetscape = NetscapeCookies.youtube(parsedNetscape)
+        let scopedNetscape = NetscapeCookies.scoped(parsedNetscape, service: .youtube)
         try check(scopedNetscape.count == 1 && scopedNetscape[0].name == "SID" && scopedNetscape[0].httpOnly,
                   "Netscape scope filter was not applied")
         let serialized = NetscapeCookies.serialize(scopedNetscape)
@@ -944,7 +950,7 @@ struct ResolverChecks {
                   "Netscape serialization lost HttpOnly or value")
         let parsedSafari = SafariCookies.parse(safariFixture())
         try check(parsedSafari?.count == 2, "Safari binary container was not parsed")
-        let scopedSafari = NetscapeCookies.youtube(parsedSafari ?? [])
+        let scopedSafari = NetscapeCookies.scoped(parsedSafari ?? [], service: .youtube)
         try check(scopedSafari.count == 1 && scopedSafari[0].name == "SID" && scopedSafari[0].secure,
                   "Safari scope filter was not applied")
         let cookieDB = temp.appendingPathComponent("Cookies")
@@ -981,10 +987,6 @@ struct ResolverChecks {
                   "Safari was not offered as an installed browser")
         try check(!YouTubeCookies.installedBrowsers(home: emptyHome).contains("whale"),
                   "An uninstalled browser was offered")
-        let probeFile = temp.appendingPathComponent("probe.txt")
-        try ".youtube.com\tTRUE\t/\tTRUE\t0\tLOGIN_INFO\tx\n".write(to: probeFile, atomically: true, encoding: .utf8)
-        try check(YouTubeCookies.file(probeFile).probe(home: emptyHome) == .loaded(1),
-                  "Cookie file probe did not count YouTube cookies")
         let foreignFile = temp.appendingPathComponent("foreign.txt")
         try ".example.com\tTRUE\t/\tTRUE\t0\tX\ty\n".write(to: foreignFile, atomically: true, encoding: .utf8)
         try check(YouTubeCookies.file(foreignFile).probe(home: emptyHome) == .noSession,

@@ -45,7 +45,7 @@ public struct XtreamAccount: Sendable, Equatable {
         }
         var parts = URLComponents(url: server, resolvingAgainstBaseURL: false)!
         let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
-        let segments = [kind == .live ? "live" : kind == .movies ? "movie" : "series", username, password, id + "." + ext]
+        let segments = [kind.streamPath, username, password, id + "." + ext]
         let path = segments.map { $0.addingPercentEncoding(withAllowedCharacters: allowed)! }.joined(separator: "/")
         parts.percentEncodedPath = server.path(percentEncoded: true).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         parts.percentEncodedPath = "/" + ([parts.percentEncodedPath, path].filter { !$0.isEmpty }.joined(separator: "/"))
@@ -55,6 +55,19 @@ public struct XtreamAccount: Sendable, Equatable {
 }
 
 public enum XtreamSection: String, CaseIterable, Sendable { case live = "Live", movies = "Films", series = "Series" }
+
+extension XtreamSection {
+    var categoriesAction: String {
+        switch self { case .live: "get_live_categories"; case .movies: "get_vod_categories"; case .series: "get_series_categories" }
+    }
+    var listingAction: String {
+        switch self { case .live: "get_live_streams"; case .movies: "get_vod_streams"; case .series: "get_series" }
+    }
+    var listingIDKey: String { self == .series ? "series_id" : "stream_id" }
+    var streamPath: String {
+        switch self { case .live: "live"; case .movies: "movie"; case .series: "series" }
+    }
+}
 public struct XtreamAccountInfo: Sendable, Equatable {
     public let status: String
     public let expires: Date?
@@ -82,6 +95,11 @@ public struct XtreamListing: Sendable, Codable {
     public let truncated: Bool
     public init(items: [XtreamItem], skipped: Int, truncated: Bool) {
         self.items = items; self.skipped = skipped; self.truncated = truncated
+    }
+    public static let empty = XtreamListing(items: [], skipped: 0, truncated: false)
+    /// Answers a category request from an all-titles listing.
+    public func filtered(toCategory categoryID: String) -> XtreamListing {
+        XtreamListing(items: items.filter { $0.categoryID == categoryID }, skipped: 0, truncated: false)
     }
 }
 public struct XtreamEpisode: Identifiable, Sendable, Equatable {

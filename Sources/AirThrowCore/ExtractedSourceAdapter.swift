@@ -15,7 +15,7 @@ enum ExtractedSourceAdapter {
         // both inspected and left for the selector to disambiguate.
         var seen = Set<String>()
         for format in info.formats ?? [] {
-            let headers = (info.http_headers ?? [:]).merging(format.http_headers ?? [:]) { _, rhs in rhs }
+            let headers = requestHeaders(format, info: info)
             guard format.has_drm != true,
                   ["m3u8", "m3u8_native"].contains(format.protocol ?? ""),
                   format.vcodec == "h264" || format.vcodec?.hasPrefix("avc1") == true,
@@ -55,16 +55,21 @@ enum ExtractedSourceAdapter {
         let adaptive = Array(candidates.filter { $0.source.hlsVariant == nil }.sorted(by: costFirst).prefix(maximumCandidates))
         let manual = candidates.filter { $0.source.hlsVariant != nil }.sorted(by: costFirst)
             .prefix(max(0, maximumCandidates - adaptive.count))
-        return (adaptive + manual).map { candidate in
-            var result = candidate; result.discovery = discovery(info); return result
-        }
+        return withDiscovery(adaptive + manual, of: info)
     }
 
-    private static func discovery(_ info: Info) -> SourceDiscoverySummary {
+    private static func withDiscovery(_ candidates: [MediaCandidate], of info: Info) -> [MediaCandidate] {
         let formats = info.formats ?? []
         let height = formats.filter { $0.vcodec != "none" }.compactMap { $0.height }
             .filter { $0.isFinite && $0 > 0 && $0 <= 100_000 }.max().map { Int($0) }
-        return SourceDiscoverySummary(formatCount: formats.count, maximumAdvertisedVideoHeight: height)
+        let discovery = SourceDiscoverySummary(formatCount: formats.count, maximumAdvertisedVideoHeight: height)
+        return candidates.map { candidate in
+            var result = candidate; result.discovery = discovery; return result
+        }
+    }
+
+    private static func requestHeaders(_ format: Format, info: Info) -> [String: String] {
+        (info.http_headers ?? [:]).merging(format.http_headers ?? [:]) { _, rhs in rhs }
     }
 
     // yt-dlp reports these defaults even for public URLs that need no custom headers.
@@ -94,8 +99,9 @@ enum ExtractedSourceAdapter {
 
     static func candidates(_ data: Data, allowUnverifiedWholeSources: Bool = false,
                            allowAuthenticated: Bool = false) throws -> [MediaCandidate] {
-        try candidates(from: try validatedInfo(data, allowAuthenticated: allowAuthenticated),
-                       allowUnverifiedWholeSources: allowUnverifiedWholeSources)
+        let info = try validatedInfo(data, allowAuthenticated: allowAuthenticated)
+        return withDiscovery(try candidates(from: info, allowUnverifiedWholeSources: allowUnverifiedWholeSources),
+                             of: info)
     }
 
     private static func candidates(from info: Info, allowUnverifiedWholeSources: Bool = false) throws -> [MediaCandidate] {
@@ -108,7 +114,7 @@ enum ExtractedSourceAdapter {
 
         func wholePresentation(_ format: Format) -> (url: URL, headers: [String: String])? {
             guard let url = format.url.flatMap({ try? MediaInput.url($0) }) else { return nil }
-            return (url, infoHeaders.merging(format.http_headers ?? [:]) { _, rhs in rhs })
+            return (url, requestHeaders(format, info: info))
         }
 
         // Each category is ordered by the shared cost-first policy before its
@@ -138,7 +144,7 @@ enum ExtractedSourceAdapter {
             .filter { allowUnverifiedWholeSources && isUnverifiedWholeSource($0) }
             .compactMap { format -> MediaCandidate? in
                 guard let whole = wholePresentation(format) else { return nil }
-                let needsPreparation = ["mkv", "webm", "mpg", "mpeg", "vob"].contains(format.ext ?? "")
+                let needsPreparation = MediaContainer.needingPreparation.contains(format.ext ?? "")
                 return MediaCandidate(
                     source: ResolvedSource(url: whole.url, title: title, headers: whole.headers,
                                            needsPreparation: needsPreparation,
@@ -188,15 +194,13 @@ enum ExtractedSourceAdapter {
             languagePriority(left, right, tracks: audioByLanguage)
         }.prefix(maximumAudioLanguages)
         for video in videos {
-            guard let videoURL = try? MediaInput.url(video.url ?? "") else { continue }
-            let videoHeaders = infoHeaders.merging(video.http_headers ?? [:]) { _, rhs in rhs }
+            guard let videoPresentation = wholePresentation(video) else { continue }
             for key in languages {
                 guard let audio = preferredAudio(audioByLanguage[key] ?? []),
-                      let audioURL = try? MediaInput.url(audio.url ?? "") else { continue }
-                let audioHeaders = infoHeaders.merging(audio.http_headers ?? [:]) { _, rhs in rhs }
+                      let audioPresentation = wholePresentation(audio) else { continue }
                 pairs.append(MediaCandidate(
-                    source: ResolvedSource(url: videoURL, title: title, headers: videoHeaders,
-                                           audio: MediaTrack(url: audioURL, headers: audioHeaders),
+                    source: ResolvedSource(url: videoPresentation.url, title: title, headers: videoPresentation.headers,
+                                           audio: MediaTrack(url: audioPresentation.url, headers: audioPresentation.headers),
                                            needsPreparation: true,
                                            delivery: isHLSContainer(video) || isHLSContainer(audio) ? .hls : .file,
                                            videoKnownPresent: true, isLive: live,
@@ -221,9 +225,7 @@ enum ExtractedSourceAdapter {
             guard presentations.insert(sourceKey(candidate)).inserted else { continue }
             result.append(candidate)
         }
-        return result.map { candidate in
-            var value = candidate; value.discovery = discovery(info); return value
-        }
+        return result
     }
 
     /// Lower processing tiers rank first, then resolution and bitrate. The
@@ -325,13 +327,17 @@ enum ExtractedSourceAdapter {
         (format.http_headers ?? [:]).keys.allSatisfy { defaultHeaders.contains($0.lowercased()) }
     }
 
-    private static func isUnverifiedWholeSource(_ format: Format) -> Bool {
-        format.vcodec == nil && format.acodec == nil && format.has_drm != true
-            && (format.fragments == nil || isHLSContainer(format))
-            && (isHLSContainer(format) || (isSimpleHTTP(format)
-                && ["mp4", "m4v", "mov", "mkv", "webm", "mpg", "mpeg", "vob"].contains(format.ext ?? "")))
+    /// Unprotected, unfragmented (or HLS), with a valid URL and no custom headers.
+    private static func isDeliverable(_ format: Format) -> Bool {
+        format.has_drm != true && (format.fragments == nil || isHLSContainer(format))
             && format.url.flatMap { try? MediaInput.url($0) } != nil
             && headersAreDefault(format)
+    }
+
+    private static func isUnverifiedWholeSource(_ format: Format) -> Bool {
+        format.vcodec == nil && format.acodec == nil && isDeliverable(format)
+            && (isHLSContainer(format) || (isSimpleHTTP(format)
+                && ["mp4", "m4v", "mov", "mkv", "webm", "mpg", "mpeg", "vob"].contains(format.ext ?? "")))
     }
 
     /// HDR video cannot be prepared without tone mapping, so it is exposed as a
@@ -364,35 +370,21 @@ enum ExtractedSourceAdapter {
     }
 
     private static func isDirectCombined(_ format: Format) -> Bool {
-        format.has_drm != true && (format.fragments == nil || isHLSContainer(format))
+        isDeliverable(format)
             && (format.ext == "mp4" && isSimpleHTTP(format) || isHLSContainer(format))
             && isH264(format) && isAAC(audioCodec(format))
-            && format.url.flatMap { try? MediaInput.url($0) } != nil
-            && headersAreDefault(format)
     }
 
     private static func isConversionCombined(_ format: Format) -> Bool {
-        format.has_drm != true && (format.fragments == nil || isHLSContainer(format))
-            && isDemuxable(format)
-            && videoCodec(format) != nil && audioCodec(format) != nil
-            && format.url.flatMap { try? MediaInput.url($0) } != nil
-            && headersAreDefault(format)
+        isDeliverable(format) && isDemuxable(format) && videoCodec(format) != nil && audioCodec(format) != nil
     }
 
     private static func isSimpleVideoOnly(_ format: Format) -> Bool {
-        format.has_drm != true && (format.fragments == nil || isHLSContainer(format))
-            && isDemuxable(format)
-            && videoCodec(format) != nil && audioCodec(format) == nil
-            && format.url.flatMap { try? MediaInput.url($0) } != nil
-            && headersAreDefault(format)
+        isDeliverable(format) && isDemuxable(format) && videoCodec(format) != nil && audioCodec(format) == nil
     }
 
     private static func isSimpleAudioOnly(_ format: Format) -> Bool {
-        format.has_drm != true && (format.fragments == nil || isHLSContainer(format))
-            && isDemuxable(format)
-            && videoCodec(format) == nil && audioCodec(format) != nil
-            && format.url.flatMap { try? MediaInput.url($0) } != nil
-            && headersAreDefault(format)
+        isDeliverable(format) && isDemuxable(format) && videoCodec(format) == nil && audioCodec(format) != nil
     }
 
     /// Video outside the copy profile needs an encode. The preparer separately
@@ -437,8 +429,7 @@ enum ExtractedSourceAdapter {
     /// and refuse URL-like values so request detail never reaches status.
     private static func cleanLabel(_ value: String?, maxLength: Int) -> String? {
         guard let value else { return nil }
-        let withoutControl = value.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
-        let trimmed = String(String.UnicodeScalarView(withoutControl)).trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = value.removingControlCharacters.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         let lowered = trimmed.lowercased()
         if lowered.contains("://") || lowered.hasPrefix("http") || lowered.contains("/")
@@ -500,8 +491,7 @@ enum ExtractedSourceAdapter {
 
     static func cleanTitle(_ value: String?) -> String? {
         guard let value else { return nil }
-        let cleaned = value.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
-        let title = String(String.UnicodeScalarView(cleaned)).trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = value.removingControlCharacters.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { return nil }
         return String(title.prefix(200))
     }

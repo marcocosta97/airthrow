@@ -520,13 +520,25 @@ public struct Response: Codable, Sendable {
     }
 }
 
+extension String {
+    var containsControlCharacters: Bool {
+        unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
+    }
+    var removingControlCharacters: String {
+        String(String.UnicodeScalarView(unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }))
+    }
+}
+
 public enum MediaInput {
+    private static func isPlausibleInput(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 16_384 && !value.containsControlCharacters
+    }
+
     /// Accepts the existing HTTP(S) inputs plus a local POSIX path or file URL.
     /// Local files have their own validator so the network URL rules stay strict.
     public static func source(_ input: String) throws -> URL {
         let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty, value.utf8.count <= 16_384,
-              !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+        guard isPlausibleInput(value) else {
             throw AppFailure(.invalidRequest, "Enter an HTTP or HTTPS video URL, or choose a readable local video file.")
         }
         if value.hasPrefix("/") || value.hasPrefix("~") || value.hasPrefix(".") {
@@ -542,8 +554,7 @@ public enum MediaInput {
 
     public static func url(_ input: String) throws -> URL {
         let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty, value.utf8.count <= 16_384,
-              !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+        guard isPlausibleInput(value),
               let components = URLComponents(string: value),
               let scheme = components.scheme?.lowercased(), ["https", "http"].contains(scheme),
               let host = components.host, !host.isEmpty,
@@ -556,8 +567,7 @@ public enum MediaInput {
 
     public static func localFile(_ input: String) throws -> URL {
         let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty, value.utf8.count <= 16_384,
-              !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+        guard isPlausibleInput(value) else {
             throw AppFailure(.invalidRequest, "Choose a readable local video file.")
         }
         let file: URL
@@ -589,7 +599,7 @@ public enum MediaInput {
         let file = input.standardizedFileURL.resolvingSymlinksInPath()
         // A dropped link may percent-encode control characters that a typed path
         // cannot contain. Keep both forms equivalent after resolution.
-        guard !file.path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+        guard !file.path.containsControlCharacters else {
             throw AppFailure(.invalidRequest, "Choose a readable local video file.")
         }
         let attributes: [FileAttributeKey: Any]

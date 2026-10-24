@@ -27,24 +27,17 @@ final class CookieStatusModel: ObservableObject {
     private var fileRevision = 0
     private let inspectFile: @Sendable (URL) -> CookieFileInspection
     @Published private(set) var installedBrowsers: [String] = []
-    var check: Check { checks[.youtube] ?? .idle }
     private var task: Task<Void, Never>?
     private var requested: [WebsiteService: YouTubeCookies] = [:]
     private var revisions: [WebsiteService: Int] = [:]
     private var pending = Set<WebsiteService>()
     private let probe: @Sendable (WebsiteService, YouTubeCookies, URL) -> YouTubeCookieStatus
 
-    init() {
-        probe = { service, source, home in source.probe(for: service, home: home) }
-        inspectFile = CookieFileInspection.inspect
-    }
-    init(probe: @escaping @Sendable (YouTubeCookies, URL) -> YouTubeCookieStatus) {
-        self.probe = { _, source, home in probe(source, home) }
-        inspectFile = CookieFileInspection.inspect
-    }
-    init(scopedProbe: @escaping @Sendable (WebsiteService, YouTubeCookies, URL) -> YouTubeCookieStatus,
+    init(probe: @escaping @Sendable (WebsiteService, YouTubeCookies, URL) -> YouTubeCookieStatus = { service, source, home in
+             source.probe(for: service, home: home)
+         },
          inspectFile: @escaping @Sendable (URL) -> CookieFileInspection = CookieFileInspection.inspect) {
-        probe = scopedProbe
+        self.probe = probe
         self.inspectFile = inspectFile
     }
 

@@ -25,8 +25,7 @@ public struct XtreamClient: Sendable {
     }
 
     public func categories(_ section: XtreamSection) async throws -> [XtreamCategory] {
-        let action = section == .live ? "get_live_categories" : section == .movies ? "get_vod_categories" : "get_series_categories"
-        let data = try await request(action)
+        let data = try await request(section.categoriesAction)
         let rows = try XtreamParsing.rows(json(data))
         var seen = Set<String>()
         return rows.compactMap { row in
@@ -36,13 +35,12 @@ public struct XtreamClient: Sendable {
     }
 
     public func listing(_ section: XtreamSection, categoryID: String? = nil) async throws -> XtreamListing {
-        let action = section == .live ? "get_live_streams" : section == .movies ? "get_vod_streams" : "get_series"
         let parameters = categoryID.map { [URLQueryItem(name: "category_id", value: $0)] } ?? []
-        let data = try await request(action, parameters: parameters)
+        let data = try await request(section.listingAction, parameters: parameters)
         let rows = try XtreamParsing.rows(json(data))
         var items = [XtreamItem](), seen = Set<String>(), skipped = 0
         for row in rows {
-            guard let id = XtreamParsing.id(row[section == .series ? "series_id" : "stream_id"]),
+            guard let id = XtreamParsing.id(row[section.listingIDKey]),
                   let name = XtreamParsing.text(row["name"]), seen.insert(id).inserted else { skipped += 1; continue }
             items.append(XtreamItem(id: id, name: name, categoryID: XtreamParsing.id(row["category_id"]),
                                     container: XtreamParsing.text(row["container_extension"]) ?? "mp4",
@@ -108,13 +106,8 @@ public struct XtreamClient: Sendable {
         let parameters = [URLQueryItem(name: "stream_id", value: streamID)]
         let root: [String: Any]
         do {
-            let full = try await request("get_simple_data_table", parameters: parameters)
-            root = try guideRoot(full)
-        }
-        catch XtreamFailure.httpStatus(let code) where code == 400 || code == 404 {
-            root = try guideRoot(await request("get_short_epg", parameters: parameters + [URLQueryItem(name: "limit", value: "20")]))
-        }
-        catch XtreamFailure.invalidResponse {
+            root = try guideRoot(await request("get_simple_data_table", parameters: parameters))
+        } catch XtreamFailure.httpStatus(400), XtreamFailure.httpStatus(404), XtreamFailure.invalidResponse {
             root = try guideRoot(await request("get_short_epg", parameters: parameters + [URLQueryItem(name: "limit", value: "20")]))
         }
         let value = root["epg_listings"]!
@@ -141,15 +134,16 @@ public struct XtreamClient: Sendable {
             }
         }
         // Prefer Unix timestamps; legacy wall-clock dates use the advertised server timezone.
+        let iso = ISO8601DateFormatter()
+        let wallClock = timeZoneIdentifier.flatMap(TimeZone.init(identifier:)).map { zone in
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = zone; formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+            return formatter
+        }
         for key in keys {
             guard let value = XtreamParsing.text(row[key]) else { continue }
-            if let date = ISO8601DateFormatter().date(from: value) { return date }
-            if let timeZoneIdentifier, let zone = TimeZone(identifier: timeZoneIdentifier) {
-                let formatter = DateFormatter()
-                formatter.locale = Locale(identifier: "en_US_POSIX")
-                formatter.timeZone = zone; formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
-                if let date = formatter.date(from: value) { return date }
-            }
+            if let date = iso.date(from: value) ?? wallClock?.date(from: value) { return date }
         }
         return nil
     }
@@ -180,7 +174,8 @@ class XtreamRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Senda
                     newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
         guard let url = request.url, url.host?.lowercased() == origin.host?.lowercased(),
               (try? MediaInput.url(url.absoluteString)) != nil else { completionHandler(nil); return }
-        let sameOrigin = url.scheme == origin.scheme && (url.port ?? (url.scheme == "https" ? 443 : 80)) == (origin.port ?? (origin.scheme == "https" ? 443 : 80))
+        func port(_ url: URL) -> Int { url.port ?? (url.scheme == "https" ? 443 : 80) }
+        let sameOrigin = url.scheme == origin.scheme && port(url) == port(origin)
         let upgrade = origin.scheme == "http" && url.scheme == "https" && (origin.port ?? 80) == 80 && (url.port ?? 443) == 443
         guard sameOrigin || upgrade, !(response.url?.scheme == "https" && url.scheme != "https") else { completionHandler(nil); return }
         completionHandler(request)

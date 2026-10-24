@@ -153,27 +153,26 @@ final class CachedHLS {
         // needs its seek target before handoff. Skip the intervening chunks.
         try await ensure(0)
         if seconds.isFinite, seconds > 0 {
-            let target = min(seconds, max(0, duration - 0.1))
+            let target = clampedTarget(seconds)
             position = target
-            var index = chunkIndex(at: target)
-            try await ensure(index)
-            // A seek near the end of a chunk must not hand off a fraction of
-            // the initial six-second buffer. Warm adjacent chunks as needed.
-            while starts[index] + length(index) < min(duration, target + Self.chunkSeconds),
-                  index + 1 < count {
-                index += 1
-                try await ensure(index)
-            }
+            for index in chunksCovering(target) { try await ensure(index) }
         }
+    }
+
+    private func clampedTarget(_ seconds: Double) -> Double { min(seconds, max(0, duration - 0.1)) }
+
+    /// A seek near the end of a chunk must not hand off a fraction of the
+    /// six-second buffer, so the range extends into adjacent chunks as needed.
+    private func chunksCovering(_ target: Double) -> ClosedRange<Int> {
+        let first = chunkIndex(at: target)
+        var last = first
+        while starts[last] + length(last) < min(duration, target + Self.chunkSeconds), last + 1 < count { last += 1 }
+        return first...last
     }
 
     func prepareSeek(at seconds: Double) async throws {
         guard seconds.isFinite, seconds >= 0 else { return }
-        let target = min(seconds, max(0, duration - 0.1))
-        let first = chunkIndex(at: target)
-        var last = first
-        while starts[last] + length(last) < min(duration, target + Self.chunkSeconds), last + 1 < count { last += 1 }
-        let indices = Array(first...last)
+        let indices = Array(chunksCovering(clampedTarget(seconds)))
         // Protect target jobs before cancelling unrelated speculation, even
         // when the target was already being prefetched.
         indices.forEach { pins[$0, default: 0] += 1 }
@@ -241,9 +240,7 @@ final class CachedHLS {
                 self.videoHeight = output.height; self.videoFrameRate = output.frameRate
                 try Task.checkCancellation()
                 self.retained[index] = Date()
-                let elapsed = started.duration(to: .now).components
-                self.pacing.record(mediaSeconds: length,
-                                   elapsedSeconds: Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18,
+                self.pacing.record(mediaSeconds: length, elapsedSeconds: started.duration(to: .now).timeInterval,
                                    bytes: try PreparationWorkspace.size(of: directory))
                 self.prune(toBudget: true, protecting: index)
                 try workspace.checkSize(self.maximumBytes)

@@ -42,8 +42,7 @@ struct IPTVPanel: View, Equatable {
             if let catalog = controller.iptvCatalog {
                 VStack(alignment: .leading, spacing: 10) {
                     VStack(alignment: .leading, spacing: 6) {
-                        ChannelCategoryField(selection: $category, categories: categories,
-                                             includesUncategorized: includesUncategorized)
+                        CategoryPopUpField(selection: $category, options: categoryOptions, accessibilityLabel: "Channel category")
                             .frame(height: 26)
                         TextField("Find a channel", text: $search)
                             .textFieldStyle(.roundedBorder)
@@ -75,8 +74,7 @@ struct IPTVPanel: View, Equatable {
                                     selectedID: controller.selectedIPTVChannelID,
                                     resignSearch: { searchFocused = false },
                                     select: { channel in
-                                        do { try controller.selectIPTVChannel(channel.id) }
-                                        catch { controller.displayError(error) }
+                                        controller.perform { try controller.selectIPTVChannel(channel.id) }
                                     })
                             .equatable()
                     }
@@ -105,6 +103,11 @@ struct IPTVPanel: View, Equatable {
     private func refreshVisible() {
         visible = controller.iptvCatalog?.channels(category: category, search: query) ?? []
         visibleRevision += 1
+    }
+
+    private var categoryOptions: [CategoryPopUpField.Option] {
+        [.init(title: "All categories", value: nil)] + categories.map { .init(title: $0, value: $0) }
+            + (includesUncategorized ? [.init(title: "Uncategorized", value: "")] : [])
     }
 
     private func channelSummary(_ catalog: IPTVCatalog) -> String {
@@ -161,38 +164,3 @@ private struct ChannelList: View, Equatable {
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
 }
-
-private struct ChannelCategoryField: NSViewRepresentable {
-    @Binding var selection: String?
-    let categories: [String]
-    let includesUncategorized: Bool
-    private var values: [String?] { [nil] + categories.map(Optional.some) + (includesUncategorized ? [""] : []) }
-    func makeNSView(context: Context) -> NSPopUpButton {
-        let button = NSPopUpButton(frame: .zero, pullsDown: false)
-        button.setAccessibilityLabel("Channel category")
-        button.target = context.coordinator
-        button.action = #selector(Coordinator.select(_:))
-        button.cell?.lineBreakMode = .byTruncatingTail
-        return button
-    }
-    func updateNSView(_ button: NSPopUpButton, context: Context) {
-        context.coordinator.parent = self
-        let titles = ["All categories"] + categories + (includesUncategorized ? ["Uncategorized"] : [])
-        if button.itemTitles != titles { button.removeAllItems(); button.addItems(withTitles: titles) }
-        button.selectItem(at: values.firstIndex(of: selection) ?? 0)
-    }
-    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSPopUpButton, context: Context) -> CGSize? {
-        // Menu contents must not determine the inspector's width.
-        CGSize(width: proposal.width ?? 0, height: nsView.intrinsicContentSize.height)
-    }
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
-    @MainActor final class Coordinator: NSObject {
-        var parent: ChannelCategoryField
-        init(_ parent: ChannelCategoryField) { self.parent = parent }
-        @objc func select(_ sender: NSPopUpButton) {
-            guard parent.values.indices.contains(sender.indexOfSelectedItem) else { return }
-            parent.selection = parent.values[sender.indexOfSelectedItem]
-        }
-    }
-}
-

@@ -15,7 +15,7 @@ public actor XtreamCatalogStore {
     }
     private let directory: URL
     private var enabled: Bool
-    private static let maximumBytes = 64 * 1024 * 1024
+    private static let maximumBytes = XtreamClient.maximumResponseBytes
 
     public init(directory: URL = URL.applicationSupportDirectory.appendingPathComponent("AirThrow/XtreamCatalogs", isDirectory: true), enabled: Bool = false) {
         self.directory = directory; self.enabled = enabled
@@ -60,10 +60,10 @@ public actor XtreamCatalogStore {
     private func accountID(_ account: XtreamAccount) -> String {
         // Cache identity must not publish a password-derived digest outside Keychain.
         let identity = [account.server.absoluteString, account.username, account.format.rawValue]
-        let data = (try? JSONEncoder().encode(identity)) ?? Data()
-        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        return digest((try? JSONEncoder().encode(identity)) ?? Data())
     }
-    private func digest(_ value: String) -> String {
-        SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    private func digest(_ value: String) -> String { digest(Data(value.utf8)) }
+    private func digest(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }
