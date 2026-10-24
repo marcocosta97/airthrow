@@ -28,7 +28,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var window: NSWindow?
     private var aboutWindow: NSWindow?
     private var windowControls: NSToolbarItemGroup?
-    private var splitViewController: NSSplitViewController?
+    private var splitViewController: ControllerSplitViewController?
+    private var mainHosting: NSHostingController<ControllerWindowView>?
+    private var playlistHosting: NSHostingController<PlaylistPanel>?
     private var inspectorItem: NSSplitViewItem?
     private var inspectorObservation: NSKeyValueObservation?
     private var statusItem: NSStatusItem?
@@ -215,8 +217,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             mainHosting.preferredContentSize = NSSize(width: ControllerMetrics.width, height: Self.controllerHeight)
             let playlistHosting = NSHostingController(rootView: PlaylistPanel(controller: controller))
             playlistHosting.sizingOptions = []
+            playlistHosting.preferredContentSize = NSSize(width: ControllerMetrics.playlistWidth, height: Self.controllerHeight)
+            self.mainHosting = mainHosting
+            self.playlistHosting = playlistHosting
 
-            let split = NSSplitViewController()
+            let split = ControllerSplitViewController()
+            split.minimumContentHeight = Self.controllerHeight
             let contentItem = NSSplitViewItem(viewController: mainHosting)
             contentItem.minimumThickness = ControllerMetrics.minWidth
             contentItem.canCollapse = false
@@ -315,9 +321,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let inspectorOpen = !(inspectorItem?.isCollapsed ?? true)
         let minimumWidth = ControllerMetrics.minWidth + (inspectorOpen ? ControllerMetrics.playlistWidth : 0)
         let width = max(frameSize.width, minimumWidth)
-        guard inspectorOpen else { return NSSize(width: width, height: sender.frame.height) }
-        let minimumHeight = sender.frameRect(forContentRect: NSRect(x: 0, y: 0, width: width, height: Self.controllerHeight)).height
-        return NSSize(width: width, height: max(frameSize.height, minimumHeight))
+        let compactHeight = sender.frameRect(forContentRect: NSRect(x: 0, y: 0, width: width, height: Self.controllerHeight)).height
+        guard inspectorOpen else {
+            // Closing animates back to the designed height. Any other request
+            // stays put, so the compact controller cannot be dragged taller.
+            let height = abs(frameSize.height - compactHeight) < 1 ? compactHeight : sender.frame.height
+            return NSSize(width: width, height: height)
+        }
+        (sender as? ControllerWindow)?.allowsVerticalGrowth = true
+        sender.contentMaxSize = NSSize(width: 12_000, height: 12_000)
+        var height = max(frameSize.height, compactHeight)
+        // Layout asks for the hosting controllers' old preferred height after
+        // the drag has already been accepted. Ignore that snap-back. A real
+        // drag still has the mouse down and keeps the proposed height.
+        if NSEvent.pressedMouseButtons == 0, height + 1 < sender.frame.height {
+            height = sender.frame.height
+        }
+        let contentHeight = sender.contentRect(forFrameRect: NSRect(origin: .zero, size: NSSize(width: width, height: height))).height
+        syncInspectorPreferredHeight(to: contentHeight)
+        return NSSize(width: width, height: height)
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        guard let resized = notification.object as? NSWindow, resized === window,
+              inspectorItem?.isCollapsed == false,
+              (resized as? ControllerWindow)?.allowsVerticalGrowth == true else { return }
+        let contentHeight = resized.contentRect(forFrameRect: resized.frame).height
+        syncInspectorPreferredHeight(to: contentHeight)
+    }
+
+    /// The split view treats a fixed preferred height as the window's height.
+    /// Keep the designed widths and follow the live content height.
+    private func syncInspectorPreferredHeight(to contentHeight: CGFloat) {
+        guard contentHeight > 1 else { return }
+        updatePreferredHeight(mainHosting, width: ControllerMetrics.width, height: contentHeight)
+        updatePreferredHeight(playlistHosting, width: ControllerMetrics.playlistWidth, height: contentHeight)
+    }
+
+    private func updatePreferredHeight<Content: View>(_ hosting: NSHostingController<Content>?, width: CGFloat, height: CGFloat) {
+        guard let hosting else { return }
+        let size = NSSize(width: width, height: height)
+        guard hosting.preferredContentSize != size else { return }
+        hosting.preferredContentSize = size
     }
 
     private func updatePlaylistAvailability(_ available: Bool) {
@@ -331,12 +376,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         guard let inspectorItem, inspectorItem.isCollapsed != collapsed else { return }
         // Let the user drag taller as soon as the list is opening. The width
         // minimum follows the split view once its animation has settled.
-        if !collapsed, let window {
-            window.contentMaxSize = NSSize(width: 12_000, height: 12_000)
+        if !collapsed {
+            splitViewController?.allowsVerticalGrowth = true
+            (window as? ControllerWindow)?.allowsVerticalGrowth = true
+            let contentHeight = window.map { $0.contentRect(forFrameRect: $0.frame).height } ?? Self.controllerHeight
+            syncInspectorPreferredHeight(to: max(contentHeight, Self.controllerHeight))
+            window?.contentMaxSize = NSSize(width: 12_000, height: 12_000)
         }
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             inspectorItem.isCollapsed = collapsed
-            if collapsed { restoreCompactHeight() }
+            if collapsed { restoreCompactController() }
             updateVerticalResizeLimit(inspectorOpen: !collapsed)
             return
         }
@@ -347,7 +396,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             let collapsed = collapsed
             Task { @MainActor in
                 guard let self else { return }
-                if collapsed { self.restoreCompactHeight() }
+                if collapsed { self.restoreCompactController() }
                 self.updateVerticalResizeLimit(inspectorOpen: !collapsed)
             }
         }
@@ -361,6 +410,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     /// Closing the inspector returns the controller to its designed height.
+    private func restoreCompactController() {
+        (window as? ControllerWindow)?.allowsVerticalGrowth = false
+        splitViewController?.allowsVerticalGrowth = false
+        mainHosting?.preferredContentSize = NSSize(width: ControllerMetrics.width, height: Self.controllerHeight)
+        playlistHosting?.preferredContentSize = NSSize(width: ControllerMetrics.playlistWidth, height: Self.controllerHeight)
+        restoreCompactHeight()
+    }
+
     private func restoreCompactHeight() {
         guard let window else { return }
         let content = window.contentRect(forFrameRect: window.frame)
@@ -750,10 +807,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
 /// Escape dismisses the Settings page through the native responder chain,
 /// including when focus is on the window rather than a form control.
+/// Reapplies the height ceiling after the split view lays out. The split view
+/// otherwise keeps the hosting controllers' original height as a maximum.
+@MainActor
+private final class ControllerSplitViewController: NSSplitViewController {
+    var allowsVerticalGrowth = false
+    var minimumContentHeight: CGFloat = 416
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        guard let window = view.window else { return }
+        let minWidth = window.contentMinSize.width
+        let maxHeight = allowsVerticalGrowth ? CGFloat(12_000) : minimumContentHeight
+        let minSize = NSSize(width: minWidth, height: minimumContentHeight)
+        let maxSize = NSSize(width: max(minWidth, 12_000), height: maxHeight)
+        if window.contentMinSize != minSize { window.contentMinSize = minSize }
+        if window.contentMaxSize != maxSize { window.contentMaxSize = maxSize }
+    }
+}
+
 @MainActor
 private final class ControllerWindow: PlaybackKeyboardWindow {
     weak var presentation: ControllerPresentation?
     var responderChanged: (() -> Void)?
+    /// While the inspector is open, AppKit keeps writing the compact height
+    /// back into the window's maximum. Refuse that ceiling.
+    var allowsVerticalGrowth = false
+
+    override var contentMaxSize: NSSize {
+        get { super.contentMaxSize }
+        set {
+            var size = newValue
+            if allowsVerticalGrowth {
+                size.width = max(size.width, 12_000)
+                size.height = max(size.height, 12_000)
+            }
+            guard super.contentMaxSize != size else { return }
+            super.contentMaxSize = size
+        }
+    }
 
     override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
         let accepted = super.makeFirstResponder(responder)
