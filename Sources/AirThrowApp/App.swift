@@ -334,21 +334,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if !collapsed, let window {
             window.contentMaxSize = NSSize(width: 12_000, height: 12_000)
         }
-        let finish = { [weak self] in
-            guard let self else { return }
-            if collapsed { self.restoreCompactHeight() }
-            self.updateVerticalResizeLimit(inspectorOpen: !collapsed)
-        }
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             inspectorItem.isCollapsed = collapsed
-            finish()
+            if collapsed { restoreCompactHeight() }
+            updateVerticalResizeLimit(inspectorOpen: !collapsed)
             return
         }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = ControllerMetrics.animationDuration
             inspectorItem.animator().isCollapsed = collapsed
-        } completionHandler: {
-            Task { @MainActor in finish() }
+        } completionHandler: { [weak self] in
+            let collapsed = collapsed
+            Task { @MainActor in
+                guard let self else { return }
+                if collapsed { self.restoreCompactHeight() }
+                self.updateVerticalResizeLimit(inspectorOpen: !collapsed)
+            }
         }
     }
 
