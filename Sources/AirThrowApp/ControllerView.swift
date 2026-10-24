@@ -335,10 +335,14 @@ struct ControllerView: View {
                                     }
                                     .controlSize(.small)
                                 }
-                                if status.error == nil {
-                                    Button { controller.clearNotice(); controller.clearIPTVImportError() } label: { Image(systemName: "xmark") }
-                                        .buttonStyle(.plain).accessibilityLabel("Dismiss message")
-                                }
+                                Button {
+                                    if status.error != nil { controller.dismissPlaybackError() }
+                                    controller.clearNotice()
+                                    controller.clearIPTVImportError()
+                                } label: { Image(systemName: "xmark") }
+                                    .buttonStyle(.plain)
+                                    .help("Dismiss message")
+                                    .accessibilityLabel("Dismiss message")
                             }
                             .font(.callout)
                             .foregroundStyle(status.error == nil ? Color.secondary : Color.primary)

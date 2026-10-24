@@ -210,6 +210,8 @@ final class PlaybackController: ObservableObject {
     private var wasExternal = false
     private var failure: String?
     private var failureReason: MediaFailureReason?
+    /// Hides the failed-item message without changing the failed playback state.
+    private var playbackErrorDismissed = false
     private var hasAudio: Bool?
     private var hasVideo = false
     private var title = "No video loaded"
@@ -1952,7 +1954,7 @@ final class PlaybackController: ObservableObject {
         changingSource = false
         sourceOptionsGeneration = UUID()
         actualPlaybackPath = nil
-        ended = false; hasPlayed = false; failure = nil; failureReason = nil
+        ended = false; hasPlayed = false; failure = nil; failureReason = nil; playbackErrorDismissed = false
         playWhenReady = false
         pendingAutoplaySeek = false
         replacementPlayTask?.cancel(); replacementPlayTask = nil
@@ -2033,6 +2035,7 @@ final class PlaybackController: ObservableObject {
         variantMediaRelay?.stop(); variantMediaRelay = nil
         failureReason = reason
         failure = message ?? reason.message
+        playbackErrorDismissed = false
         loadTask?.cancel(); loadTask = nil
         sampledVideo = nil
         sampleInspectionStatus = nil
@@ -2105,7 +2108,7 @@ final class PlaybackController: ObservableObject {
             if let failure {
                 next.state = .failed
                 next.title = title
-                next.error = failure
+                next.error = playbackErrorDismissed ? nil : failure
                 next.errorReason = failureReason
             }
             next.allowVideoConversion = allowVideoConversion
@@ -2290,7 +2293,7 @@ final class PlaybackController: ObservableObject {
         next.seekInProgress = pendingSeek != nil ? true : nil
         next.title = title
         next.externalPlaybackActive = external
-        next.error = failure
+        next.error = playbackErrorDismissed ? nil : failure
         next.errorReason = failureReason
         next.loadingPhase = httpLoginRequest != nil ? "authentication" : resolving ? "resolving" : (preparing ? "preparing" : nil)
         next.preparationInProgress = preparedMedia?.sourceDuration != nil && preparedMedia?.isProducing == true && !loading ? true : nil
@@ -2495,6 +2498,13 @@ final class PlaybackController: ObservableObject {
     }
 
     func clearNotice() { notice = nil }
+
+    /// Removes the visible failure text. Playback stays failed until the next load.
+    func dismissPlaybackError() {
+        guard failure != nil, !playbackErrorDismissed else { return }
+        playbackErrorDismissed = true
+        refresh()
+    }
 
     /// Quit waits for cancelled jobs to reap their helpers and release temporary files.
     /// The wait is bounded so a stuck helper cannot keep the process open.
