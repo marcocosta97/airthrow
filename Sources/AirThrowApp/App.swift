@@ -250,6 +250,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             window.contentViewController = split
             window.center()
             window.standardWindowButton(.zoomButton)?.isEnabled = false
+            window.contentMinSize = NSSize(width: ControllerMetrics.minWidth, height: Self.controllerHeight)
+            window.contentMaxSize = NSSize(width: 12_000, height: Self.controllerHeight)
             self.window = window
         }
         NSApp.activate(ignoringOtherApps: true)
@@ -307,12 +309,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
     }
 
-    /// Horizontal resizing only: the proposed width is honored, the height is
-    /// pinned so the controller keeps its designed vertical layout.
+    /// The compact controller keeps its height. With the inspector open, the
+    /// window can grow so a channel list is not stuck at 416 pt.
     func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
         let inspectorOpen = !(inspectorItem?.isCollapsed ?? true)
-        let minimum = ControllerMetrics.minWidth + (inspectorOpen ? ControllerMetrics.playlistWidth : 0)
-        return NSSize(width: max(frameSize.width, minimum), height: sender.frame.height)
+        let minimumWidth = ControllerMetrics.minWidth + (inspectorOpen ? ControllerMetrics.playlistWidth : 0)
+        let width = max(frameSize.width, minimumWidth)
+        guard inspectorOpen else { return NSSize(width: width, height: sender.frame.height) }
+        let minimumHeight = sender.frameRect(forContentRect: NSRect(x: 0, y: 0, width: width, height: Self.controllerHeight)).height
+        return NSSize(width: width, height: max(frameSize.height, minimumHeight))
     }
 
     private func updatePlaylistAvailability(_ available: Bool) {
@@ -324,13 +329,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     /// in one coordinated animation instead of two competing ones.
     private func setInspector(collapsed: Bool) {
         guard let inspectorItem, inspectorItem.isCollapsed != collapsed else { return }
+        // Let the user drag taller as soon as the list is opening. The width
+        // minimum follows the split view once its animation has settled.
+        if !collapsed, let window {
+            window.contentMaxSize = NSSize(width: 12_000, height: 12_000)
+        }
+        let finish = { [weak self] in
+            guard let self else { return }
+            if collapsed { self.restoreCompactHeight() }
+            self.updateVerticalResizeLimit(inspectorOpen: !collapsed)
+        }
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             inspectorItem.isCollapsed = collapsed
+            finish()
             return
         }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = ControllerMetrics.animationDuration
             inspectorItem.animator().isCollapsed = collapsed
+        } completionHandler: {
+            Task { @MainActor in finish() }
+        }
+    }
+
+    private func updateVerticalResizeLimit(inspectorOpen: Bool) {
+        guard let window else { return }
+        let minimumWidth = ControllerMetrics.minWidth + (inspectorOpen ? ControllerMetrics.playlistWidth : 0)
+        window.contentMinSize = NSSize(width: minimumWidth, height: Self.controllerHeight)
+        window.contentMaxSize = NSSize(width: 12_000, height: inspectorOpen ? 12_000 : Self.controllerHeight)
+    }
+
+    /// Closing the inspector returns the controller to its designed height.
+    private func restoreCompactHeight() {
+        guard let window else { return }
+        let content = window.contentRect(forFrameRect: window.frame)
+        guard abs(content.height - Self.controllerHeight) > 0.5 else { return }
+        var next = content
+        next.origin.y += content.height - Self.controllerHeight
+        next.size.height = Self.controllerHeight
+        let frame = window.frameRect(forContentRect: next)
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            window.setFrame(frame, display: true)
+        } else {
+            window.setFrame(frame, display: true, animate: true)
         }
     }
 
