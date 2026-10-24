@@ -58,14 +58,17 @@ struct IPTVPanel: View, Equatable {
                 }.padding(.horizontal, 12).padding(.bottom, 10)
                 Divider()
                 if visible.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("No matching channels").font(.callout)
+                    ContentUnavailableView {
+                        Label("No matching channels", systemImage: "tv.slash")
+                    } description: {
+                        Text("Try another category or clear the search.")
+                    } actions: {
                         Button("Clear filters") {
                             searchTask?.cancel()
                             search = ""; query = ""; category = nil
                         }
-                    }.padding(16)
-                    Spacer(minLength: 0)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     ScrollView {
                         ChannelList(revision: visibleRevision, channels: visible,

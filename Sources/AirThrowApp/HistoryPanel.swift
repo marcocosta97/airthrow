@@ -47,12 +47,12 @@ struct HistoryPanel: View {
             }
             Divider()
             if controller.history.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("No recent sources").font(.callout)
+                ContentUnavailableView {
+                    Label("No recent sources", systemImage: "clock")
+                } description: {
                     Text("Load a video or playlist in Source. It will appear here for next time.")
-                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                }.padding(16)
-                Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List(controller.history) { entry in
                     HStack(spacing: 8) {
