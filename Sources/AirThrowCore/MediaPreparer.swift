@@ -1149,8 +1149,12 @@ public struct MediaPreparer: Sendable {
     /// missing. Video encoding requires an explicit `.allowVideo` policy.
     private static func plan(videoInput: Probe, audioInput: Probe, separateAudio: Bool,
                              policy: ConversionPolicy, enhancement: VideoEnhancement) throws -> PreparationPlan {
-        let video = videoInput.streams.first(where: { $0.copyableVideo })
-            ?? videoInput.streams.first(where: { $0.convertibleVideo })
+        // A Dolby Vision enhancement layer muxed as its own track (profile 7
+        // dual-track files) is never a candidate: it has no base layer of its
+        // own and isn't a displayable picture.
+        let videoCandidates = videoInput.streams.filter { !$0.isDolbyVisionEnhancementLayerOnly }
+        let video = videoCandidates.first(where: { $0.copyableVideo })
+            ?? videoCandidates.first(where: { $0.convertibleVideo })
         guard let video else { throw PreparationFailure.unsupported }
         let audio = audioInput.streams.first(where: { $0.copyableAudio })
             ?? audioInput.streams.first(where: { $0.convertibleAudio })
@@ -1183,7 +1187,18 @@ public struct MediaPreparer: Sendable {
     private static func videoArguments(stream: Stream, action: TrackAction, encoder: String,
                                        enhancement: VideoEnhancement, hardwareFrames: Bool = false) -> [String] {
         guard action == .convert else {
-            return stream.codec_name == "hevc" ? ["-c:v", "copy", "-tag:v", "hvc1"] : ["-c:v", "copy"]
+            guard stream.codec_name == "hevc" else { return ["-c:v", "copy"] }
+            var arguments = ["-c:v", "copy", "-tag:v", "hvc1"]
+            // A profile 7 single-track file multiplexes its enhancement layer
+            // and RPU into this same bitstream as extra NAL units a non-Dolby
+            // -Vision-aware receiver can't use; `dovi_split=mode=bl` drops them
+            // packet-by-packet, which is still a copy, not a re-encode. It is a
+            // no-op (verified byte-for-byte) on a stream that has no such NAL
+            // units, so it's safe to leave off outside this specific case.
+            if stream.hasMultiplexedDolbyVisionEnhancementLayer {
+                arguments += ["-bsf:v", "dovi_split=mode=bl"]
+            }
+            return arguments
         }
         let fourK = enhancement.targetHeight == 2160
         let bitrate = fourK ? "14000k" : "4000k"
@@ -1332,6 +1347,13 @@ public struct MediaPreparer: Sendable {
         } else {
             // Video is copied: it must still match the inspected source stream.
             guard video.codec_name == plan.video.codec_name else { throw PreparationFailure.failed }
+            // A multiplexed Dolby Vision enhancement layer was stripped via
+            // `dovi_split`; the muxed output carries no DOVI configuration
+            // record at all once it's gone (verified empirically), so its
+            // absence here confirms the filter actually ran.
+            if plan.video.hasMultiplexedDolbyVisionEnhancementLayer {
+                guard !video.hasMultiplexedDolbyVisionEnhancementLayer else { throw PreparationFailure.failed }
+            }
         }
         guard let audio = probe.streams.first(where: { $0.codec_type == "audio" }) else {
             throw PreparationFailure.failed
@@ -1352,7 +1374,7 @@ public struct MediaPreparer: Sendable {
                        "-rw_timeout", "15000000", "-probesize", "5000000", "-analyzeduration", "5000000"]
         guard headers.count <= 8, headers.allSatisfy({ key, value in
             ["user-agent", "accept", "accept-language", "sec-fetch-mode"].contains(key.lowercased())
-                && value.utf8.count <= 4096 && !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+                && value.utf8.count <= 4096 && !value.containsControlCharacters
         }) else { throw PreparationFailure.unsupported }
         if !headers.isEmpty {
             options += ["-headers", headers.sorted(by: { $0.key < $1.key }).map { "\($0.key): \($0.value)\r\n" }.joined()]
@@ -1452,7 +1474,18 @@ public struct MediaPreparer: Sendable {
                 .contains(codec_name ?? "")
         }
         struct Disposition: Decodable { let attached_pic: Int? }
-        struct SideData: Decodable { let side_data_type: String? }
+        /// `bl_present_flag`/`el_present_flag`/`dv_bl_signal_compatibility_id`
+        /// come from the "DOVI configuration record" side data (the container's
+        /// own Dolby Vision signaling, ref. the Dolby ISOBMFF mapping spec) and
+        /// are what tells a profile 7 base layer apart from its enhancement
+        /// layer; see `isDolbyVisionEnhancementLayerOnly` and
+        /// `hasMultiplexedDolbyVisionEnhancementLayer`.
+        struct SideData: Decodable {
+            let side_data_type: String?
+            let bl_present_flag: Int?
+            let el_present_flag: Int?
+            let dv_bl_signal_compatibility_id: Int?
+        }
         var frameRate: Double? {
             for value in [avg_frame_rate, r_frame_rate] {
                 let parts = (value ?? "").split(separator: "/").compactMap { Double($0) }
@@ -1462,6 +1495,28 @@ public struct MediaPreparer: Sendable {
         }
         private var encrypted: Bool { codec_tag_string == "encv" || codec_tag_string == "enca" }
         private var attachedPicture: Bool { disposition?.attached_pic == 1 }
+        /// The stream's own DOVI configuration record, when ffprobe exposes
+        /// one as side data.
+        private var dolbyVisionConfig: SideData? {
+            (side_data_list ?? []).first { ($0.side_data_type ?? "").lowercased() == "dovi configuration record" }
+        }
+        /// A Dolby Vision enhancement layer muxed as its own stream (the
+        /// second track of a profile 7 dual-track file). It has no base layer
+        /// of its own, is not an independently displayable picture, and must
+        /// never be picked as the video track, copied or converted.
+        var isDolbyVisionEnhancementLayerOnly: Bool {
+            guard let config = dolbyVisionConfig else { return false }
+            return config.el_present_flag == 1 && config.bl_present_flag != 1
+        }
+        /// A Dolby Vision base layer whose enhancement layer (and RPU) are
+        /// multiplexed into this same stream, as with a profile 7 single-track
+        /// file. The base layer underneath is an ordinary, independently
+        /// decodable HEVC Main 10 HDR10/HLG picture; only the extra NAL units
+        /// need to be dropped before a receiver sees it. When the enhancement
+        /// layer instead lives in a separate track (the dual-track case), this
+        /// is false and the plain base-layer stream already has nothing to
+        /// strip; see `videoArguments`.
+        var hasMultiplexedDolbyVisionEnhancementLayer: Bool { dolbyVisionConfig?.el_present_flag == 1 }
         /// A conservative HDR/Dolby Vision signal from transfer, primaries, tags
         /// and side data. SDR output is required for the tested H.264 profile.
         var isHDR: Bool {
@@ -1478,15 +1533,25 @@ public struct MediaPreparer: Sendable {
         /// A Main 10 base layer tagged with a real PQ (HDR10/HDR10+) or HLG
         /// transfer and BT.2020 primaries. This also covers a Dolby Vision
         /// base layer that is independently decodable as HDR10/HLG (profiles
-        /// 8.1/8.2/8.4): the DV RPU rides along as in-stream NAL units and
-        /// survives an unmodified packet copy, while a non-backward-compatible
-        /// layer (profiles 5/7) reports no standard transfer here and stays
+        /// 7 and 8.1/8.2/8.4): the DV RPU and any enhancement layer ride along
+        /// as extra, separable NAL units/tracks (stripped via
+        /// `hasMultiplexedDolbyVisionEnhancementLayer`/
+        /// `isDolbyVisionEnhancementLayerOnly`) and the base layer's own
+        /// picture survives an unmodified copy, while a non-backward-compatible
+        /// layer (profile 5) reports no standard transfer here and stays
         /// unsupported. Re-encoding this picture would require tone mapping,
         /// which stays out of scope; only an unmodified copy is accepted.
         private var main10HDR: Bool {
-            codec_name == "hevc" && profile == "Main 10" && pix_fmt == "yuv420p10le"
-                && Self.hdrTransfers.contains((color_transfer ?? "").lowercased())
-                && (color_primaries ?? "").lowercased() == "bt2020"
+            guard codec_name == "hevc", profile == "Main 10", pix_fmt == "yuv420p10le" else { return false }
+            if Self.hdrTransfers.contains((color_transfer ?? "").lowercased())
+                && (color_primaries ?? "").lowercased() == "bt2020" { return true }
+            // dv_bl_signal_compatibility_id of 1 (HDR10) or 4 (HLG) is the DOVI
+            // config's own declaration that this base layer is a valid
+            // standalone picture of that kind, even if the stream's own
+            // transfer/primaries tags are missing or inconsistent (2 is SDR,
+            // 0 is "none", i.e. profile 5's non-backward-compatible layer).
+            if let id = dolbyVisionConfig?.dv_bl_signal_compatibility_id, [1, 4].contains(id) { return true }
+            return false
         }
         var copyableVideo: Bool {
             guard let fps = frameRate, fps.isFinite, fps > 0 else { return false }

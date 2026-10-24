@@ -99,6 +99,57 @@ struct PreparationChecks {
         }
         print("PASS HDR10/HLG Main 10 copy-remux preserves codec, color metadata and dimensions; re-encode and a non-base-compatible Dolby Vision layer stay unsupported")
     }
+    /// A profile 7 Dolby Vision base layer is still an ordinary, independently
+    /// decodable HDR10 picture, delivered either multiplexed with its
+    /// enhancement layer/RPU in the same stream ("single-track") or alongside
+    /// a wholly separate enhancement-layer track ("dual-track"). AirThrow
+    /// copies only the base layer's picture in both cases: stripping the
+    /// multiplexed extra NAL units in the first, and never selecting the
+    /// enhancement-layer track at all in the second. Real multi-layer/RPU
+    /// bitstreams need Dolby's own tools to produce, so these fixtures model
+    /// only the container-level DOVI signaling that drives that decision.
+    static func dolbyVision7Copy(preparer: MediaPreparer, base: String, directory: URL) async throws {
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let finder = HelperExecutables(environment: ProcessInfo.processInfo.environment)
+        guard let ffprobe = finder.executable("ffprobe", override: "AIRTHROW_FFPROBE") else {
+            try check(false, "Missing fixture inspector"); return
+        }
+        for name in ["hevc-main10-dv7-single.mp4", "hevc-main10-dv7-dual.mp4"] {
+            let source = ResolvedSource(url: URL(string: base + "/" + name)!, needsPreparation: true)
+            let prepared = try await preparer.prepare(source, mode: .completeFile)
+            try check(prepared.playbackPath == .remux && prepared.videoHeight == 180,
+                      "Profile 7 base layer was not copy-remuxed at its own (not the enhancement layer's) resolution: \(name)")
+            let (data, _) = try await session.data(from: prepared.url)
+            let local = directory.appendingPathComponent("dv7-" + name)
+            try data.write(to: local)
+            let output = try await HelperProcess.run(executable: ffprobe, arguments: [
+                "-v", "error", "-select_streams", "v:0", "-show_entries",
+                "stream=codec_name,codec_tag_string,pix_fmt,color_transfer,color_primaries,height:stream_side_data=side_data_type",
+                "-of", "json", local.path
+            ], outputLimit: 16 * 1024)
+            let video = (try JSONSerialization.jsonObject(with: output) as! [String: Any])["streams"] as! [[String: Any]]
+            try check(video.first?["codec_name"] as? String == "hevc" && video.first?["codec_tag_string"] as? String == "hvc1"
+                      && video.first?["pix_fmt"] as? String == "yuv420p10le"
+                      && video.first?["color_transfer"] as? String == "smpte2084"
+                      && video.first?["color_primaries"] as? String == "bt2020"
+                      && video.first?["height"] as? Int == 180,
+                      "Profile 7 copy lost the base layer's own codec, color metadata or dimensions: \(name)")
+            if name == "hevc-main10-dv7-single.mp4" {
+                // The multiplexed enhancement layer/RPU were stripped from
+                // this stream (`dovi_split`); no trace of the configuration
+                // record should remain (the dual-track base layer, which had
+                // nothing multiplexed to strip, isn't held to this: a plain
+                // stream copy drops that record either way).
+                let sideData = video.first?["side_data_list"] as? [[String: Any]] ?? []
+                try check(!sideData.contains { ($0["side_data_type"] as? String) == "DOVI configuration record" },
+                          "Profile 7 single-track copy still carries a Dolby Vision configuration record: \(name)")
+            }
+            try check(try await AVURLAsset(url: local).load(.isPlayable), "Profile 7 copy output is not playable: \(name)")
+            prepared.stop()
+        }
+        print("PASS profile 7 Dolby Vision single-track and dual-track files copy only the base layer's own HDR10 picture, with no enhancement layer/RPU left behind")
+    }
     static func oddDimensions(_ url: URL) async throws {
         var environment = ProcessInfo.processInfo.environment
         environment["AIRTHROW_MEDIA_HOST"] = "127.0.0.1"
@@ -409,6 +460,7 @@ struct PreparationChecks {
         try hevcData.write(to: directory.appendingPathComponent("hevc-remuxed.mp4"))
         hevcCopy.stop()
         try await hdrCopy(preparer: preparer, base: base, directory: directory)
+        try await dolbyVision7Copy(preparer: preparer, base: base, directory: directory)
         do {
             _ = try await preparer.prepare(uhdSource.withConversionPolicy(.allowVideo).withEnhancement(.upscale1080))
             try check(false, "Explicit 1080p preparation downscaled a 4K source")
