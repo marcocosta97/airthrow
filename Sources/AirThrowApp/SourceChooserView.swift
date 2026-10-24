@@ -12,6 +12,7 @@ import AirThrowCore
 struct VideoMenuView: View {
     @ObservedObject var controller: PlaybackController
     @SwiftUI.State private var showingOptions = false
+    @SwiftUI.State private var escape = VideoMenuEscape()
     @SwiftUI.State private var draftVideo = "automatic"
     @SwiftUI.State private var draftAction: EnhancementAction = .original
     @SwiftUI.State private var draftOutput4K = false
@@ -240,8 +241,21 @@ struct VideoMenuView: View {
             .frame(width: 210, alignment: .leading)
         }
         .onChange(of: showingOptions) { _, isPresented in
-            if !isPresented { applyDraft() }
+            if isPresented {
+                escape.start { showingOptions = false }
+            } else {
+                escape.stop()
+                // Closing the popover applies. Escape discards and must not
+                // restart preparation.
+                if escape.discard {
+                    escape.discard = false
+                    resetDraft()
+                } else {
+                    applyDraft()
+                }
+            }
         }
+        .onDisappear { escape.stop() }
         .onChange(of: sources.map(\.id)) { _, _ in
             if showingOptions { resetDraft() }
         }
@@ -299,6 +313,31 @@ struct VideoMenuView: View {
             try controller.selectSubtitle(id)
         }
         catch { controller.displayError(error) }
+    }
+}
+
+/// Escape must cancel the popover before SwiftUI treats the dismissal as Apply.
+/// A menu that is already tracking keeps the key so its own menu can close.
+@MainActor
+private final class VideoMenuEscape {
+    var discard = false
+    private var monitor: Any?
+
+    func start(_ dismiss: @escaping () -> Void) {
+        stop()
+        discard = false
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == 53, !event.isARepeat else { return event }
+            if RunLoop.current.currentMode == .eventTracking { return event }
+            self?.discard = true
+            dismiss()
+            return nil
+        }
+    }
+
+    func stop() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
     }
 }
 
