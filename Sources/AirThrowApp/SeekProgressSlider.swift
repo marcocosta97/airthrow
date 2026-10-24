@@ -8,6 +8,7 @@ import AirThrowCore
 /// behavior. Only verified/loaded ranges are added to the track drawing.
 struct SeekProgressSlider: NSViewRepresentable {
     @Binding var value: Double
+    @Binding var knobWidth: CGFloat
     let bounds: ClosedRange<Double>
     let readyRanges: [SeekRange]
     let onEditingChanged: (Bool) -> Void
@@ -34,6 +35,11 @@ struct SeekProgressSlider: NSViewRepresentable {
         slider.controlSize = .regular
         (slider.cell as? ProgressSliderCell)?.readyRanges = readyRanges
         slider.needsDisplay = true
+        let measured = (slider.cell as? NSSliderCell)?.knobRect(flipped: slider.isFlipped).width ?? 0
+        if measured > 1, abs(measured - knobWidth) > 0.5 {
+            let width = measured
+            DispatchQueue.main.async { knobWidth = width }
+        }
     }
 
     @MainActor final class Coordinator: NSObject {

@@ -122,24 +122,11 @@ struct ControllerView: View {
     @ViewState private var url = ""
     @ViewState private var scrub: Double = 0
     @ViewState private var scrubbing = false
-    @ViewState private var hoverTime: Double?
-    @ViewState private var hoverX: CGFloat = 0
     @ViewState private var dropTargeted = false
     @FocusState private var urlFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var status: PlaybackSnapshot { controller.snapshot }
-    private var progressHelp: String {
-        if status.isLive, !LivePolicy.supportsTimeShift(status) {
-            return "Live broadcast. No rewind window is currently available."
-        }
-        let ranges = PlaybackPolicy.readyRanges(status)
-        let label = status.preparedRanges == nil ? "Buffered video" : "Video ready on this Mac"
-        guard !ranges.isEmpty else { return "Highlighted sections show \(label.lowercased())." }
-        let times = ranges.prefix(3).map { "\(PlaybackFormat.time($0.start))–\(PlaybackFormat.time($0.end))" }.joined(separator: ", ")
-        let more = ranges.count > 3 ? ", and \(ranges.count - 3) more ranges" : ""
-        return "\(label): \(times)\(more)."
-    }
     private var busy: Bool { PlaybackPolicy.isBusy(status) }
     private var range: SeekRange? { PlaybackPolicy.activeSeekRange(status) }
     private var canControl: Bool { PlaybackPolicy.canControl(status) }
@@ -268,49 +255,9 @@ struct ControllerView: View {
                     }
                     Spacer(minLength: 0)
                     VStack(spacing: 4) {
-                        GeometryReader { geometry in
-                            ZStack(alignment: .topLeading) {
-                                SeekProgressSlider(value: Binding(get: {
-                                    LivePolicy.timelinePosition(status, requested: scrubbing ? scrub : controller.pendingSeek)
-                                }, set: { scrub = $0 }), bounds: (range?.start ?? 0)...(range?.end ?? 1),
-                                    readyRanges: PlaybackPolicy.readyRanges(status), onEditingChanged: { editing in
-                                    scrubbing = editing
-                                    if !editing {
-                                        perform {
-                                            if status.isLive, (LivePolicy.delay(status, position: scrub) ?? .infinity) <= 3 {
-                                                try controller.goLive()
-                                            } else { try controller.seek(scrub) }
-                                        }
-                                    }
-                                })
-                                .frame(height: 20)
-                                .padding(.top, 8)
-                                .disabled(!PlaybackPolicy.canSeek(status))
-                                .accessibilityLabel("Playback position")
-                                .accessibilityValue(status.isLive ? livePositionLabel : PlaybackFormat.time(controller.pendingSeek ?? status.position))
-                                .accessibilityHint(progressHelp)
-                                .help(progressHelp)
-                                if PlaybackPolicy.canSeek(status), let hoverTime {
-                                    Text(status.isLive ? LivePolicy.positionLabel(status, position: hoverTime) : PlaybackFormat.time(hoverTime))
-                                        .font(.caption2.monospacedDigit())
-                                        .padding(.horizontal, 5).padding(.vertical, 2)
-                                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
-                                        .position(x: min(max(hoverX, 24), geometry.size.width - 24), y: 7)
-                                        .allowsHitTesting(false)
-                                        .accessibilityHidden(true)
-                                }
-                            }
-                            .onContinuousHover { phase in
-                                switch phase {
-                                case .active(let location):
-                                    guard PlaybackPolicy.canSeek(status), let range, geometry.size.width > 0 else { hoverTime = nil; return }
-                                    hoverX = min(max(location.x, 0), geometry.size.width)
-                                    hoverTime = range.start + (range.end - range.start) * hoverX / geometry.size.width
-                                case .ended: hoverTime = nil
-                                }
-                            }
-                        }
-                        .frame(height: 34)
+                        PlaybackTimeline(controller: controller, scrub: $scrub, scrubbing: $scrubbing,
+                                         perform: perform)
+                            .frame(height: 34)
                         HStack {
                             Text(livePositionLabel)
                             Spacer()
@@ -515,4 +462,87 @@ struct ControllerView: View {
         do { try action() } catch { controller.displayError(error) }
     }
 
+}
+
+/// Hover lives here so a pointer move does not rebuild the rest of the controller.
+/// The time follows the slider knob, which cannot reach the ends of the view.
+private struct PlaybackTimeline: View {
+    @ObservedObject var controller: PlaybackController
+    @Binding var scrub: Double
+    @Binding var scrubbing: Bool
+    let perform: (() throws -> Void) -> Void
+    @State private var hoverTime: Double?
+    @State private var hoverX: CGFloat = 0
+    @State private var knobWidth: CGFloat = 18
+
+    private var status: PlaybackSnapshot { controller.snapshot }
+    private var range: SeekRange? { PlaybackPolicy.activeSeekRange(status) }
+    private var positionLabel: String {
+        if status.isLive {
+            return LivePolicy.positionLabel(status, position: scrubbing ? scrub : controller.pendingSeek)
+        }
+        return PlaybackFormat.time(scrubbing ? scrub : (controller.pendingSeek ?? status.position))
+    }
+    private var progressHelp: String {
+        if status.isLive, !LivePolicy.supportsTimeShift(status) {
+            return "Live broadcast. No rewind window is currently available."
+        }
+        let ranges = PlaybackPolicy.readyRanges(status)
+        let label = status.preparedRanges == nil ? "Buffered video" : "Video ready on this Mac"
+        guard !ranges.isEmpty else { return "Highlighted sections show \(label.lowercased())." }
+        let times = ranges.prefix(3).map { "\(PlaybackFormat.time($0.start))–\(PlaybackFormat.time($0.end))" }.joined(separator: ", ")
+        let more = ranges.count > 3 ? ", and \(ranges.count - 3) more ranges" : ""
+        return "\(label): \(times)\(more)."
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .topLeading) {
+                SeekProgressSlider(value: Binding(get: {
+                    LivePolicy.timelinePosition(status, requested: scrubbing ? scrub : controller.pendingSeek)
+                }, set: { scrub = $0 }), knobWidth: $knobWidth,
+                    bounds: (range?.start ?? 0)...(range?.end ?? 1),
+                    readyRanges: PlaybackPolicy.readyRanges(status), onEditingChanged: { editing in
+                    scrubbing = editing
+                    if !editing {
+                        perform {
+                            if status.isLive, (LivePolicy.delay(status, position: scrub) ?? .infinity) <= 3 {
+                                try controller.goLive()
+                            } else { try controller.seek(scrub) }
+                        }
+                    }
+                })
+                .frame(height: 20)
+                .padding(.top, 8)
+                .disabled(!PlaybackPolicy.canSeek(status))
+                .accessibilityLabel("Playback position")
+                .accessibilityValue(positionLabel)
+                .accessibilityHint(progressHelp)
+                .help(progressHelp)
+                if PlaybackPolicy.canSeek(status), let hoverTime {
+                    Text(status.isLive ? LivePolicy.positionLabel(status, position: hoverTime) : PlaybackFormat.time(hoverTime))
+                        .font(.caption2.monospacedDigit())
+                        .padding(.horizontal, 5).padding(.vertical, 2)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
+                        .position(x: min(max(hoverX, 24), max(geometry.size.width - 24, 24)), y: 7)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+            }
+            .onContinuousHover { phase in
+                switch phase {
+                case .active(let location):
+                    guard PlaybackPolicy.canSeek(status), let range, geometry.size.width > 0 else { hoverTime = nil; return }
+                    let inset = max(knobWidth, 1) / 2
+                    let span = max(geometry.size.width - max(knobWidth, 1), 1)
+                    let x = min(max(location.x, inset), inset + span)
+                    let fraction = (x - inset) / span
+                    hoverX = x
+                    let time = range.start + (range.end - range.start) * fraction
+                    hoverTime = min(max(time, range.start), range.end)
+                case .ended: hoverTime = nil
+                }
+            }
+        }
+    }
 }
