@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private let presentation = ControllerPresentation()
     private let server = CommandServer()
     private var window: NSWindow?
+    private var aboutWindow: NSWindow?
     private var windowControls: NSToolbarItemGroup?
     private var splitViewController: NSSplitViewController?
     private var inspectorItem: NSSplitViewItem?
@@ -388,13 +389,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     @objc private func showAbout() {
-        let revision = Bundle.main.url(forResource: "BuildCommit", withExtension: "txt")
-            .flatMap { try? String(contentsOf: $0, encoding: .utf8) }
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        NSApp.orderFrontStandardAboutPanel(options: [
-            .credits: NSAttributedString(string: "Commit: \(revision ?? "unknown")",
-                attributes: [.font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)])
-        ])
+        let about = aboutWindow ?? {
+            let hosting = NSHostingController(rootView: AboutView())
+            hosting.sizingOptions = .intrinsicContentSize
+            let window = NSWindow(contentViewController: hosting)
+            window.title = "About AirThrow"
+            window.styleMask = [.titled, .closable, .fullSizeContentView]
+            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .hidden
+            window.backgroundColor = SurfaceColor.window
+            window.isReleasedWhenClosed = false
+            window.center()
+            return window
+        }()
+        aboutWindow = about
+        about.center()
+        NSApp.activate(ignoringOtherApps: true)
+        about.makeKeyAndOrderFront(nil)
     }
 
     @objc private func showHelp() {
