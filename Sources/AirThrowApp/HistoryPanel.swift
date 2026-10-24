@@ -25,6 +25,7 @@ struct InspectorHeader: View {
 struct HistoryPanel: View {
     @ObservedObject var controller: PlaybackController
     @SwiftUI.State private var hoveredEntryID: UUID?
+    @SwiftUI.State private var confirmClear = false
     @FocusState private var focusedRemovalID: UUID?
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -32,7 +33,7 @@ struct HistoryPanel: View {
                 Text("History").font(.headline)
                 Spacer(minLength: 8)
                 Menu {
-                    Button("Clear History", role: .destructive) { controller.clearHistory() }
+                    Button("Clear History", role: .destructive) { confirmClear = true }
                         .disabled(!controller.history.contains(where: { !$0.isPinned }))
                         .help("Remove all unpinned entries")
                 } label: { Image(systemName: "ellipsis.circle") }
@@ -110,6 +111,12 @@ struct HistoryPanel: View {
                 }.listStyle(.plain)
                     .contentMargins(.horizontal, 0, for: .scrollContent)
             }
+        }
+        .confirmationDialog("Clear history?", isPresented: $confirmClear, titleVisibility: .visible) {
+            Button("Clear History", role: .destructive) { controller.clearHistory() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Unpinned items are removed. Pinned items stay. Account credentials for the removed items are deleted and cannot be restored.")
         }
     }
 
