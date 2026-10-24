@@ -140,7 +140,30 @@ if not (OUT / 'hevc-main10-sdr.mkv').exists():
     ffmpeg('-i', OUT / 'combined.mkv', '-c:v', 'libx265', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p10le',
            '-x265-params', 'log-level=error:pools=1:colorprim=1:transfer=1:colormatrix=1',
            '-c:a', 'copy', OUT / 'hevc-main10-sdr.mkv')
-FILES = {f'/{name}': (OUT / name).read_bytes() for name in ['hevc-main10-sdr.mkv', 'odd-width.mkv', 'combined.mp4', 'combined.mkv', 'subtitles.mkv', 'video.mp4', 'audio.m4a',
+# A Main 10 base layer with PQ transfer and BT.2020 primaries: real-world
+# HDR10/HDR10+ and a Dolby Vision profile 8.1/8.2/8.4 base layer look the same
+# here. This is copied unmodified at Original quality; it is still refused for
+# any re-encode (tone mapping stays out of scope).
+if not (OUT / 'hevc-main10-hdr10.mkv').exists():
+    ffmpeg('-i', OUT / 'combined.mkv', '-c:v', 'libx265', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p10le',
+           '-x265-params', 'log-level=error:pools=1:colorprim=9:transfer=16:colormatrix=9:hdr10=1:'
+           'master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400',
+           '-c:a', 'copy', OUT / 'hevc-main10-hdr10.mkv')
+# A Main 10 base layer with the HLG transfer and BT.2020 primaries.
+if not (OUT / 'hevc-main10-hlg.mkv').exists():
+    ffmpeg('-i', OUT / 'combined.mkv', '-c:v', 'libx265', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p10le',
+           '-x265-params', 'log-level=error:pools=1:colorprim=9:transfer=18:colormatrix=9',
+           '-c:a', 'copy', OUT / 'hevc-main10-hlg.mkv')
+# A non-backward-compatible Dolby Vision layer (profile 5 style): Main 10 with
+# BT.2020 primaries but no standard PQ/HLG transfer tag. This stays
+# unsupported; reconstructing it needs the RPU, which this app does not apply.
+if not (OUT / 'hevc-main10-dv5.mkv').exists():
+    ffmpeg('-i', OUT / 'combined.mkv', '-c:v', 'libx265', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p10le',
+           '-x265-params', 'log-level=error:pools=1:colorprim=9:transfer=2:colormatrix=9',
+           '-c:a', 'copy', OUT / 'hevc-main10-dv5.mkv')
+FILES = {f'/{name}': (OUT / name).read_bytes() for name in ['hevc-main10-sdr.mkv', 'hevc-main10-hdr10.mkv',
+                                                            'hevc-main10-hlg.mkv', 'hevc-main10-dv5.mkv',
+                                                            'odd-width.mkv', 'combined.mp4', 'combined.mkv', 'subtitles.mkv', 'video.mp4', 'audio.m4a',
                                                             'flac.mkv', 'multitrack.mkv', 'long.mp4', 'vp9-opus.mkv',
                                                             'hdr.mkv', 'uhd.mkv', 'hevc-sdr.mkv', 'highfps.mkv', 'tenbit.mkv',
                                                             'long-vp9.mkv', 'long-flac.mkv']}
@@ -261,7 +284,8 @@ try:
     if '--live-hevc-only' in sys.argv or ("--progressive-only" not in sys.argv and "--cache-only" not in sys.argv and "--network-continuity-only" not in sys.argv):
         binary = OUT / 'PreparationChecks'
         run(['swiftc', '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
-             ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
+             ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/InterfaceCopy.swift',
+             ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
              ROOT / 'Sources/AirThrowApp/XtreamLibrary.swift',
              ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
              ROOT / 'Tests/PreparationChecks/main.swift', '-o', binary], timeout=90)
@@ -335,7 +359,8 @@ try:
         print('PASS 4K remux, four enhancement presets, 100->60 fps cap, software fallback and 10-bit refusal')
     cached = OUT / 'CacheChecks'
     run(['swiftc', '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
-         ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
+         ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/InterfaceCopy.swift',
+         ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
          ROOT / 'Sources/AirThrowApp/XtreamLibrary.swift',
          ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
          ROOT / 'Tests/CacheChecks/main.swift', '-o', cached], timeout=90)
@@ -346,7 +371,8 @@ try:
         raise SystemExit(0)
     progressive = OUT / 'ProgressiveChecks'
     run(['swiftc', '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
-         ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
+         ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/InterfaceCopy.swift',
+         ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
          ROOT / 'Sources/AirThrowApp/XtreamLibrary.swift',
          ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
          ROOT / 'Tests/ProgressiveChecks/main.swift', '-o', progressive], timeout=90)

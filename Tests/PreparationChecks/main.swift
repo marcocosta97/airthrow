@@ -50,6 +50,55 @@ struct PreparationChecks {
         }
         print("PASS live HEVC Main and Main 10 SDR preserve codec, bit depth and dimensions in hvc1/fMP4 through opaque loopback input")
     }
+    /// A Main 10 base layer with a real PQ/HLG transfer (HDR10/HDR10+/HLG, and
+    /// a Dolby Vision base layer that is independently decodable the same way)
+    /// copies through unmodified at Original quality, keeping its color
+    /// metadata. Any re-encode of that source, and a layer with no standard
+    /// transfer tag (modeling a non-backward-compatible Dolby Vision profile),
+    /// both stay unsupported.
+    static func hdrCopy(preparer: MediaPreparer, base: String, directory: URL) async throws {
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let finder = HelperExecutables(environment: ProcessInfo.processInfo.environment)
+        guard let ffprobe = finder.executable("ffprobe", override: "AIRTHROW_FFPROBE") else {
+            try check(false, "Missing fixture inspector"); return
+        }
+        for (name, transfer) in [("hevc-main10-hdr10.mkv", "smpte2084"), ("hevc-main10-hlg.mkv", "arib-std-b67")] {
+            let source = ResolvedSource(url: URL(string: base + "/" + name)!, needsPreparation: true)
+            let prepared = try await preparer.prepare(source, mode: .completeFile)
+            try check(prepared.playbackPath == .remux && prepared.videoHeight == 180,
+                      "Compatible Main 10 HDR/HLG source was not copy-remuxed at native resolution: \(name)")
+            let (data, _) = try await session.data(from: prepared.url)
+            let local = directory.appendingPathComponent("hdr-" + name + ".mp4")
+            try data.write(to: local)
+            let output = try await HelperProcess.run(executable: ffprobe, arguments: [
+                "-v", "error", "-select_streams", "v:0", "-show_entries",
+                "stream=codec_name,codec_tag_string,pix_fmt,color_transfer,color_primaries,height",
+                "-of", "json", local.path
+            ], outputLimit: 16 * 1024)
+            let video = (try JSONSerialization.jsonObject(with: output) as! [String: Any])["streams"] as! [[String: Any]]
+            try check(video.first?["codec_name"] as? String == "hevc" && video.first?["codec_tag_string"] as? String == "hvc1"
+                      && video.first?["pix_fmt"] as? String == "yuv420p10le"
+                      && video.first?["color_transfer"] as? String == transfer
+                      && video.first?["color_primaries"] as? String == "bt2020"
+                      && video.first?["height"] as? Int == 180,
+                      "HDR copy-remux lost codec, color metadata or dimensions for \(name)")
+            try check(try await AVURLAsset(url: local).load(.isPlayable), "HDR copy-remux output is not playable: \(name)")
+            try await expect(.preparationRequired) {
+                _ = try await preparer.prepare(source.withConversionPolicy(.allowVideo).withEnhancement(.upscale1080))
+            }
+            prepared.stop()
+        }
+        // A layer with no standard PQ/HLG transfer (modeling a Dolby Vision
+        // profile whose base layer needs the RPU to display correctly, which
+        // this app does not apply) stays unsupported, like the tested H.264
+        // HDR fixture.
+        try await expect(.preparationRequired) {
+            _ = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/hevc-main10-dv5.mkv")!,
+                                                          needsPreparation: true))
+        }
+        print("PASS HDR10/HLG Main 10 copy-remux preserves codec, color metadata and dimensions; re-encode and a non-base-compatible Dolby Vision layer stay unsupported")
+    }
     static func oddDimensions(_ url: URL) async throws {
         var environment = ProcessInfo.processInfo.environment
         environment["AIRTHROW_MEDIA_HOST"] = "127.0.0.1"
@@ -359,6 +408,7 @@ struct PreparationChecks {
         let (hevcData, _) = try await fetch(hevcCopy.url)
         try hevcData.write(to: directory.appendingPathComponent("hevc-remuxed.mp4"))
         hevcCopy.stop()
+        try await hdrCopy(preparer: preparer, base: base, directory: directory)
         do {
             _ = try await preparer.prepare(uhdSource.withConversionPolicy(.allowVideo).withEnhancement(.upscale1080))
             try check(false, "Explicit 1080p preparation downscaled a 4K source")

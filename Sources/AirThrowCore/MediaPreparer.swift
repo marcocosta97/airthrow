@@ -624,9 +624,11 @@ public struct MediaPreparer: Sendable {
                     .prefix(8).map { (1, $0) })
             if !source.isLive && !subtitleInputs.isEmpty { mode = .completeFile }
             let subtitleTracks = source.isLive ? [] : Array(subtitleInputs.prefix(8))
-            // The inspect step rejects HDR/Dolby Vision, encrypted, attached-picture
-            // and unknown tracks, and refuses video conversion unless the source
-            // explicitly allows it.
+            // The inspect step copies HDR10/HLG and compatible Dolby Vision Main
+            // 10 video unmodified at Original quality; it rejects encrypted,
+            // attached-picture and unknown tracks, refuses HDR/Dolby Vision for
+            // any re-encode (tone mapping stays out of scope), and otherwise
+            // refuses video conversion unless the source explicitly allows it.
             let plan = try Self.plan(videoInput: videoInput, audioInput: audioInput,
                                      separateAudio: source.audio != nil, policy: source.conversionPolicy,
                                      enhancement: source.enhancement)
@@ -1473,19 +1475,34 @@ public struct MediaPreparer: Sendable {
                     || type.contains("hdr dynamic metadata")
             }
         }
+        /// A Main 10 base layer tagged with a real PQ (HDR10/HDR10+) or HLG
+        /// transfer and BT.2020 primaries. This also covers a Dolby Vision
+        /// base layer that is independently decodable as HDR10/HLG (profiles
+        /// 8.1/8.2/8.4): the DV RPU rides along as in-stream NAL units and
+        /// survives an unmodified packet copy, while a non-backward-compatible
+        /// layer (profiles 5/7) reports no standard transfer here and stays
+        /// unsupported. Re-encoding this picture would require tone mapping,
+        /// which stays out of scope; only an unmodified copy is accepted.
+        private var main10HDR: Bool {
+            codec_name == "hevc" && profile == "Main 10" && pix_fmt == "yuv420p10le"
+                && Self.hdrTransfers.contains((color_transfer ?? "").lowercased())
+                && (color_primaries ?? "").lowercased() == "bt2020"
+        }
         var copyableVideo: Bool {
             guard let fps = frameRate, fps.isFinite, fps > 0 else { return false }
-            // Apple receivers support Main 10 SDR. Copy it into hvc1/fMP4;
-            // this does not make 10-bit inputs eligible for video conversion.
+            // Apple receivers support Main 10 SDR and HDR10/HLG/compatible
+            // Dolby Vision. Copy either into hvc1/fMP4; neither makes a
+            // 10-bit input eligible for video conversion.
             let main10SDR = codec_name == "hevc" && profile == "Main 10" && pix_fmt == "yuv420p10le"
                 && Self.sdrTransfers.contains((color_transfer ?? "").lowercased())
+            let main10 = main10SDR || main10HDR
             let supportedProfile = (codec_name == "h264"
                 && ["Constrained Baseline", "Baseline", "Main", "High"].contains(profile ?? ""))
-                || (codec_name == "hevc" && profile == "Main") || main10SDR
+                || (codec_name == "hevc" && profile == "Main") || main10
             return codec_type == "video" && supportedProfile && !encrypted
-                && (["yuv420p", "yuvj420p"].contains(pix_fmt ?? "") || main10SDR)
+                && (["yuv420p", "yuvj420p"].contains(pix_fmt ?? "") || main10)
                 && (1...3840).contains(width ?? 0) && (1...2160).contains(height ?? 0)
-                && !isHDR && !attachedPicture && (understoodSDR || main10SDR) && fps <= 60
+                && (main10HDR || !isHDR) && !attachedPicture && (understoodSDR || main10) && fps <= 60
         }
         /// A known 8-bit SDR pixel layout. Anything outside this set (including
         /// 10-bit and exotic layouts) is not understood for our 4:2:0 output.
@@ -1500,6 +1517,10 @@ public struct MediaPreparer: Sendable {
         private static let sdrTransfers: Set<String> = [
             "bt709", "smpte170m", "smpte240m", "gamma22", "gamma28", "iec61966-2-1"
         ]
+        /// PQ (HDR10/HDR10+/Dolby Vision base layer) and HLG transfer tags.
+        /// Both describe an image that a compatible receiver can display
+        /// without re-encoding; see `main10HDR`.
+        private static let hdrTransfers: Set<String> = ["smpte2084", "arib-std-b67"]
         private var understoodSDR: Bool {
             guard Self.sdrPixelFormats.contains((pix_fmt ?? "").lowercased()) else { return false }
             let transfer = (color_transfer ?? "").lowercased()
