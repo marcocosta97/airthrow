@@ -521,6 +521,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             window.titleVisibility = .hidden
             window.backgroundColor = SurfaceColor.window
             window.isReleasedWhenClosed = false
+            hosting.view.layoutSubtreeIfNeeded()
+            let fitted = hosting.sizeThatFits(in: NSSize(width: 320, height: 800))
+            if fitted.width > 1, fitted.height > 1 { window.setContentSize(fitted) }
             window.center()
             return window
         }()
