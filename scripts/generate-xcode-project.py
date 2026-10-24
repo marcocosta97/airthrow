@@ -31,13 +31,14 @@ for path in sorted((root / 'Sources').rglob('*.swift')):
 icon = add('Icon', dict(isa='PBXFileReference', lastKnownFileType='folder.iconcomposer.icon', path='Resources/AppIcon.icon', sourceTree='<group>'))
 waiting = add('ReadyToPlay', dict(isa='PBXFileReference', lastKnownFileType='folder', path='Resources/WaitingScreen', sourceTree='<group>'))
 plist = add('Info', dict(isa='PBXFileReference', lastKnownFileType='text.plist.xml', path='Resources/Info.plist', sourceTree='<group>'))
+catalog = add('Localizable', dict(isa='PBXFileReference', lastKnownFileType='text.json.xcstrings', path='Resources/Localizable.xcstrings', sourceTree='<group>'))
 share_plist = add('ShareInfo', dict(isa='PBXFileReference', lastKnownFileType='text.plist.xml', path='Resources/ShareExtension-Info.plist', sourceTree='<group>'))
 share_entitlements = add('ShareEntitlements', dict(isa='PBXFileReference', lastKnownFileType='text.plist.entitlements', path='Resources/ShareExtension.entitlements', sourceTree='<group>'))
 app_product = add('AppProduct', dict(isa='PBXFileReference', explicitFileType='wrapper.application', path='AirThrow.app', sourceTree='BUILT_PRODUCTS_DIR'))
 cli_product = add('CLIProduct', dict(isa='PBXFileReference', explicitFileType='compiled.mach-o.executable', path='athrow', sourceTree='BUILT_PRODUCTS_DIR'))
 share_product = add('ShareProduct', dict(isa='PBXFileReference', explicitFileType='wrapper.app-extension', path='AirThrowShare.appex', sourceTree='BUILT_PRODUCTS_DIR'))
 products = add('Products', dict(isa='PBXGroup', children=[app_product, cli_product, share_product], name='Products', sourceTree='<group>'))
-main_group = add('MainGroup', dict(isa='PBXGroup', children=list(files.values()) + [plist, share_plist, share_entitlements, icon, waiting, products], sourceTree='<group>'))
+main_group = add('MainGroup', dict(isa='PBXGroup', children=list(files.values()) + [plist, catalog, share_plist, share_entitlements, icon, waiting, products], sourceTree='<group>'))
 
 common = dict(MACOSX_DEPLOYMENT_TARGET='14.0', SWIFT_VERSION='6.0', SDKROOT='macosx', CLANG_ENABLE_MODULES='YES')
 
@@ -79,7 +80,8 @@ share_resources = add('ShareResources', dict(isa='PBXResourcesBuildPhase', build
 add('ShareTarget', dict(isa='PBXNativeTarget', buildConfigurationList=share_configs, buildPhases=[source_phase('Share', ['AirThrowShareExtension'], ['Sources/AirThrowCore/Protocol.swift', 'Sources/AirThrowCore/MediaHandoff.swift']), share_resources], buildRules=[], dependencies=[], name='AirThrowShare', productName='AirThrowShare', productReference=share_product, productType='com.apple.product-type.app-extension'))
 icon_build = add('IconBuild', dict(isa='PBXBuildFile', fileRef=icon))
 waiting_build = add('ReadyToPlayBuild', dict(isa='PBXBuildFile', fileRef=waiting))
-resources = add('AppResources', dict(isa='PBXResourcesBuildPhase', buildActionMask='2147483647', files=[icon_build, waiting_build], runOnlyForDeploymentPostprocessing='0'))
+catalog_build = add('LocalizableBuild', dict(isa='PBXBuildFile', fileRef=catalog))
+resources = add('AppResources', dict(isa='PBXResourcesBuildPhase', buildActionMask='2147483647', files=[icon_build, waiting_build, catalog_build], runOnlyForDeploymentPostprocessing='0'))
 commit_phase = add('BuildCommit', dict(isa='PBXShellScriptBuildPhase', buildActionMask='2147483647', files=[],
     name='Stamp version and commit', inputPaths=[], outputPaths=['$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/BuildCommit.txt'],
     alwaysOutOfDate='1', runOnlyForDeploymentPostprocessing='0', shellPath='/bin/bash',

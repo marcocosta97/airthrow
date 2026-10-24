@@ -108,15 +108,15 @@ struct IPTVPanel: View, Equatable {
     }
 
     private func channelSummary(_ catalog: IPTVCatalog) -> String {
-        var parts = ["\(visible.count) of \(catalog.channels.count) channels"]
+        var parts = [InterfaceCopy.channels(visible: visible.count, total: catalog.channels.count)]
         if catalog.skippedEntries > 0 { parts.append("\(catalog.skippedEntries) not imported") }
         if catalog.truncated { parts.append("Limit reached") }
         return parts.joined(separator: " · ")
     }
 
     private func importDetails(_ catalog: IPTVCatalog) -> String {
-        var parts = ["\(visible.count) of \(catalog.channels.count) channels"]
-        if catalog.skippedEntries > 0 { parts.append("\(catalog.skippedEntries) unsupported entries were not imported.") }
+        var parts = [InterfaceCopy.channels(visible: visible.count, total: catalog.channels.count)]
+        if catalog.skippedEntries > 0 { parts.append(InterfaceCopy.unsupportedEntriesNotImported(catalog.skippedEntries)) }
         if catalog.truncated { parts.append("Showing the first \(IPTVPlaylist.maximumChannels) supported channels.") }
         return parts.joined(separator: "\n")
     }

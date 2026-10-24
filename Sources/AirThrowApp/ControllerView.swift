@@ -495,7 +495,7 @@ private struct PlaybackTimeline: View {
         let label = status.preparedRanges == nil ? "Buffered video" : "Video ready on this Mac"
         guard !ranges.isEmpty else { return "Highlighted sections show \(label.lowercased())." }
         let times = ranges.prefix(3).map { "\(PlaybackFormat.time($0.start))–\(PlaybackFormat.time($0.end))" }.joined(separator: ", ")
-        let more = ranges.count > 3 ? ", and \(ranges.count - 3) more ranges" : ""
+        let more = ranges.count > 3 ? ", and \(InterfaceCopy.moreRanges(ranges.count - 3))" : ""
         return "\(label): \(times)\(more)."
     }
 

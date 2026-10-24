@@ -90,7 +90,7 @@ struct XtreamPanel: View, Equatable {
     }
 
     private var summary: String {
-        var text = "\(items.count) titles"
+        var text = InterfaceCopy.titles(items.count)
         if library.listing.skipped > 0 { text += " · \(library.listing.skipped) skipped" }
         if library.listing.truncated { text += " · Limit reached" }
         return text
@@ -99,8 +99,16 @@ struct XtreamPanel: View, Equatable {
     private var details: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Button { library.back() } label: { Label(library.section.rawValue, systemImage: "chevron.left") }
-                    .buttonStyle(.plain).help("Back to catalog")
+                Button { library.back() } label: {
+                    Label {
+                        Text("Back to \(library.section.rawValue)")
+                    } icon: {
+                        Image(systemName: "chevron.left").accessibilityHidden(true)
+                    }
+                }
+                    .buttonStyle(.plain)
+                    .help("Back to \(library.section.rawValue)")
+                    .accessibilityLabel("Back to \(library.section.rawValue)")
                 Spacer()
                 if !library.detailLoading {
                     Button { library.loadDetails() } label: { Image(systemName: "arrow.clockwise") }
@@ -170,7 +178,7 @@ struct XtreamPanel: View, Equatable {
                     Text("All seasons").tag(Optional<Int>.none)
                     ForEach(seasons, id: \.self) { Text("Season \($0)").tag(Optional($0)) }
                 }
-                if info.skippedEpisodes > 0 { Text("\(info.skippedEpisodes) episodes not imported").font(.caption).foregroundStyle(.secondary) }
+                if info.skippedEpisodes > 0 { Text(InterfaceCopy.episodesNotImported(info.skippedEpisodes)).font(.caption).foregroundStyle(.secondary) }
                 ForEach(info.episodes.filter { season == nil || $0.season == season }) { episode in
                     Button {
                         do {
@@ -184,9 +192,12 @@ struct XtreamPanel: View, Equatable {
                                 if let duration = episode.duration { Text(duration).font(.caption).foregroundStyle(.secondary) }
                             }
                             Spacer(minLength: 0)
-                            Image(systemName: library.isPlaying(episode.id) ? "checkmark" : "play.fill").font(.caption)
+                            Image(systemName: library.isPlaying(episode.id) ? "checkmark" : "play.fill")
+                                .font(.caption)
+                                .accessibilityHidden(true)
                         }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle()).padding(.vertical, 4)
                     }.buttonStyle(.plain).help("Load \(episode.title)")
+                        .accessibilityValue(library.isPlaying(episode.id) ? "Now playing" : "")
                 }
             }
         }

@@ -1511,7 +1511,7 @@ final class PlaybackController: ObservableObject {
         self.queue = queue
         queueDirection = direction
         queueAttemptsRemaining = attempts
-        if !skippedTitles.isEmpty { notice = "Skipped \(skippedTitles.count) unavailable playlist item\(skippedTitles.count == 1 ? "" : "s")." }
+        if !skippedTitles.isEmpty { notice = InterfaceCopy.skippedPlaylistItems(skippedTitles.count) }
         startLoad(url, preservingQueue: true, autoplay: autoplay, titleOverride: queue.entries[index].title)
     }
 

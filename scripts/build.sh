@@ -49,6 +49,7 @@ swiftc -swift-version 6 -parse-as-library -application-extension \
     -Xlinker -platform_version -Xlinker macos -Xlinker "$deployment_target" -Xlinker "$sdk_version" \
     -o "$share/Contents/MacOS/AirThrowShare"
 cp -R Resources/WaitingScreen "$app/Contents/Resources/WaitingScreen"
+xcrun xcstringstool compile Resources/Localizable.xcstrings --output-directory "$app/Contents/Resources"
 bash scripts/write-build-version.sh "$app/Contents/Info.plist" "$share/Contents/Info.plist"
 bash scripts/write-build-commit.sh "$app/Contents/Resources/BuildCommit.txt"
 # Compile the Icon Composer document so macOS renders the Liquid Glass icon,
