@@ -389,6 +389,39 @@ struct ResolverChecks {
                   && plain.width == 1920 && plain.height == 1080
                   && odd.width == 1918 && odd.height == 1078,
                   "Hardware frames were selected for a cleanup, full-range, or high-frame-rate source")
+        let packet = RemuxTimeline.packetLine("pts=10|dts=9|flags=K_|pos=100|size=50|unused=1")
+        let timeline = try RemuxTimeline(cuts: [.init(pts: 0, dts: 0), .init(pts: 6000, dts: 5900)],
+                                         videoTimeBase: 0.001, audioTimeBase: 0.001,
+                                         sourceStart: 0, duration: 20, inspectBoundaries: false)
+        var reordered = RemuxTimeline.Cut(pts: 6000, dts: 5900)
+        reordered.followingKeyframe = 8000
+        var crowded = reordered
+        crowded.followingKeyframe = 6100
+        let slop = try RemuxTimeline(cuts: [.init(pts: 0, dts: 0), reordered],
+                                     videoTimeBase: 0.001, audioTimeBase: 0.001,
+                                     sourceStart: 0, duration: 20, inspectBoundaries: false, containerSeekSlop: true)
+        let crowdedTimeline = try RemuxTimeline(cuts: [.init(pts: 0, dts: 0), crowded],
+                                                videoTimeBase: 0.001, audioTimeBase: 0.001,
+                                                sourceStart: 0, duration: 20, inspectBoundaries: false, containerSeekSlop: true)
+        try check(packet.pts == 10 && packet.dts == 9 && packet.isKeyframe && packet.position == 100 && packet.size == 50
+                  && timeline.arguments(index: 1, length: 6).input == ["-ss", "6.000000", "-t", "10.000000"]
+                  && timeline.arguments(index: 1, length: 6).audio == ["-ss", "5.999000", "-t", "10.000000"]
+                  && slop.arguments(index: 1, length: 6).input == ["-ss", "6.131435", "-t", "10.000000"]
+                  && crowdedTimeline.arguments(index: 1, length: 6).input == ["-ss", "6.000000", "-t", "10.000000"],
+                  "Remux seek did not cancel the container delay")
+        let served = FileManager.default.temporaryDirectory.appendingPathComponent("athrow-serve-\(UUID().uuidString)")
+        var servedBody = Data(count: 300_000)
+        for index in servedBody.indices { servedBody[index] = UInt8(index & 0xff) }
+        try servedBody.write(to: served)
+        let server = try await MediaHTTPServer.start(file: served, host: "127.0.0.1")
+        defer { server.stop(); try? FileManager.default.removeItem(at: served) }
+        let service = try await URLSession.shared.data(from: server.url!)
+        var rangeRequest = URLRequest(url: server.url!)
+        rangeRequest.setValue("bytes=10-13", forHTTPHeaderField: "Range")
+        let (rangeBody, rangeResponse) = try await URLSession.shared.data(for: rangeRequest)
+        try check(service.0 == servedBody && (service.1 as? HTTPURLResponse)?.statusCode == 200
+                  && (rangeResponse as? HTTPURLResponse)?.statusCode == 206 && rangeBody == Data([10, 11, 12, 13]),
+                  "Prepared file was not served with its ranged body")
         try await expect(.unsupportedPage) { _ = try await absent.resolve(URL(string: "https://youtube.com/playlist?list=x")!) }
         try await expect(.unavailable) { _ = try await absent.resolve(page) }
         print("PASS local delivery selection, direct bypass, exact hosts, video-only normalization and missing helpers")

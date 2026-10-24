@@ -21,6 +21,38 @@ enum ChunkOutputCheck {
     }
 }
 
+/// Plain VideoToolbox conversions keep frames on the media engine. Cleanup,
+/// full-range video, and frame rates above 60 stay on the software filters.
+enum HardwareDecode {
+    static func enabled(encoder: String, enhancement: VideoEnhancement, frameRate: Double?, colorRange: String?) -> Bool {
+        guard encoder.hasSuffix("_videotoolbox"), !enhancement.cleansUp,
+              colorRange != "pc", let frameRate, frameRate.isFinite, frameRate > 0, frameRate <= 60 else { return false }
+        return true
+    }
+}
+
+/// Even output size for `scale_vt`, which has no aspect or divisible-by option.
+/// The box matches the software scale: fit inside it, and do not enlarge an
+/// original beyond its own frame.
+enum HardwareScale {
+    static func outputSize(width: Int, height: Int, enhancement: VideoEnhancement) -> (width: Int, height: Int) {
+        let boxWidth: Int
+        let boxHeight: Int
+        switch enhancement {
+        case .upscale4K, .cleanup4K: boxWidth = 3840; boxHeight = 2160
+        case .original: boxWidth = min(1920, max(width, 2)); boxHeight = min(1080, max(height, 2))
+        case .upscale1080, .cleanup1080: boxWidth = 1920; boxHeight = 1080
+        }
+        guard width > 0, height > 0 else { return (2, 2) }
+        let scale = min(Double(boxWidth) / Double(width), Double(boxHeight) / Double(height))
+        var outWidth = Int((Double(width) * scale).rounded(.towardZero))
+        var outHeight = Int((Double(height) * scale).rounded(.towardZero))
+        if outWidth % 2 != 0 { outWidth -= 1 }
+        if outHeight % 2 != 0 { outHeight -= 1 }
+        return (max(2, outWidth), max(2, outHeight))
+    }
+}
+
 /// A deterministic codec error returns immediately and would fail the same way
 /// on every retry. A dropped connection also returns immediately; allow two
 /// more attempts only for that quick case, never for a failure that already
@@ -677,10 +709,15 @@ public struct MediaPreparer: Sendable {
                 throw PreparationFailure.diskSpace
             }
             let output = workspace.directory.appendingPathComponent("media.mp4")
-            func conversionArguments(encoder: String, precise: Bool = false, alignRemux: Bool = false) throws -> [String] {
-                var arguments = ["-hide_banner", "-loglevel", "error", "-nostdin", "-n"]
-                    + (try Self.inputArguments(url: source.url, headers: source.headers,
-                                               hls: allowHLSInput))
+            func conversionArguments(encoder: String, hardwareFrames: Bool = false,
+                                     precise: Bool = false, alignRemux: Bool = false) throws -> [String] {
+                let accelerate = hardwareFrames
+                var videoInput = try Self.inputArguments(url: source.url, headers: source.headers, hls: allowHLSInput)
+                if accelerate, let input = videoInput.lastIndex(of: "-i") {
+                    // videotoolbox_vld is the frame format scale_vt and the hardware encoder share.
+                    videoInput.insert(contentsOf: ["-hwaccel", "videotoolbox", "-hwaccel_output_format", "videotoolbox_vld"], at: input)
+                }
+                var arguments = ["-hide_banner", "-loglevel", "error", "-nostdin", "-n"] + videoInput
                 if let audio = source.audio {
                     if alignRemux, let remuxTimeline { arguments += ["-itsoffset", MediaClock.seconds(remuxTimeline.audioOffset)] }
                     arguments += try Self.inputArguments(url: audio.url, headers: audio.headers,
@@ -693,7 +730,8 @@ public struct MediaPreparer: Sendable {
                     }
                 }
                 arguments += Self.videoArguments(stream: plan.video, action: plan.videoAction,
-                                                 encoder: encoder, enhancement: plan.enhancement)
+                                                 encoder: encoder, enhancement: plan.enhancement,
+                                                 hardwareFrames: accelerate)
                     + Self.audioArguments(stream: plan.audio, action: precise ? .convert : plan.audioAction)
                 if mode == .completeFile && !subtitleTracks.isEmpty {
                     arguments += ["-c:s", "mov_text"]
@@ -716,14 +754,14 @@ public struct MediaPreparer: Sendable {
                 }
                 return arguments
             }
-            // A hardware encoder is selected by a preflight at the real output
-            // size, rate and profile. If it still fails before any URL handoff,
-            // retry once in software; the item is never restarted after handoff.
-            func produce(encoder: String) async throws -> PreparedMedia {
+            // Each attempt completes startup before URL handoff. Fallback never
+            // replaces an item which is already playing.
+            func produce(encoder: String, hardwareFrames: Bool = false) async throws -> PreparedMedia {
                 if bounded {
                     do {
                         return try await cached(workspace: workspace,
-                                                arguments: conversionArguments(encoder: encoder, precise: plan.videoAction == .convert, alignRemux: true),
+                                                arguments: conversionArguments(encoder: encoder, hardwareFrames: hardwareFrames,
+                                                    precise: plan.videoAction == .convert, alignRemux: true),
                                                 executable: ffmpeg, host: host, duration: videoDuration!,
                                                 plan: plan, ffprobe: ffprobe, startPosition: source.preparationPosition,
                                                 remuxTimeline: remuxTimeline,
@@ -744,7 +782,7 @@ public struct MediaPreparer: Sendable {
                         try validateSequentialCopySize()
                     }
                 }
-                let arguments = try conversionArguments(encoder: encoder)
+                let arguments = try conversionArguments(encoder: encoder, hardwareFrames: hardwareFrames)
                 if source.isLive {
                     return try await live(workspace: workspace, arguments: arguments, executable: ffmpeg,
                                           host: host, playbackPath: plan.path, plan: plan,
@@ -813,6 +851,17 @@ public struct MediaPreparer: Sendable {
             let encoder = plan.videoAction == .convert
                 ? try await Self.selectEncoder(stream: plan.video, enhancement: plan.enhancement, executable: ffmpeg)
                 : "copy"
+            if Self.hardwareFrames(stream: plan.video, encoder: encoder, enhancement: plan.enhancement),
+               try await Self.canEncode(stream: plan.video, enhancement: plan.enhancement,
+                                        encoder: encoder, executable: ffmpeg, hardwareFrames: true) {
+                do { return try await produce(encoder: encoder, hardwareFrames: true) }
+                catch {
+                    guard Self.retryableHardwareFailure(error) else { throw error }
+                    try Task.checkCancellation()
+                    // A failed decoder/filter need not discard a working
+                    // hardware encoder. Retry CPU filters before software encode.
+                }
+            }
             do {
                 return try await produce(encoder: encoder)
             } catch {
@@ -1130,22 +1179,41 @@ public struct MediaPreparer: Sendable {
     /// conversion stays at or below 1080p H.264; explicit presets target 1080p
     /// H.264 or 4K HEVC. All cap frame rate at 60 and use a two-second GOP.
     private static func videoArguments(stream: Stream, action: TrackAction, encoder: String,
-                                       enhancement: VideoEnhancement) -> [String] {
+                                       enhancement: VideoEnhancement, hardwareFrames: Bool = false) -> [String] {
         guard action == .convert else {
             return stream.codec_name == "hevc" ? ["-c:v", "copy", "-tag:v", "hvc1"] : ["-c:v", "copy"]
         }
         let fourK = enhancement.targetHeight == 2160
         let bitrate = fourK ? "14000k" : "4000k"
         let buffer = fourK ? "28000k" : "8000k"
-        var arguments = ["-c:v", encoder, "-pix_fmt", "yuv420p", "-profile:v", fourK ? "main" : "high",
-                         "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", buffer,
-                         "-color_range", "tv", "-g", "120", "-keyint_min", "120", "-sc_threshold", "0",
-                         "-force_key_frames", "expr:gte(t,n_forced*2)",
-                         "-vf", Self.scaleFilter(for: stream, enhancement: enhancement)]
+        let filter = hardwareFrames ? Self.hardwareScaleFilter(for: stream, enhancement: enhancement)
+            : Self.scaleFilter(for: stream, enhancement: enhancement)
+        var arguments = ["-c:v", encoder]
+        // A software pixel format pulls VideoToolbox frames back to the CPU.
+        if !hardwareFrames { arguments += ["-pix_fmt", "yuv420p"] }
+        arguments += ["-profile:v", fourK ? "main" : "high",
+                      "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", buffer,
+                      "-color_range", "tv", "-g", "120", "-keyint_min", "120", "-sc_threshold", "0",
+                      "-force_key_frames", "expr:gte(t,n_forced*2)", "-vf", filter]
         if fourK { arguments += ["-tag:v", "hvc1"] }
         else { arguments += ["-level:v", "4.2"] }
         arguments += encoder.hasSuffix("_videotoolbox") ? ["-allow_sw", "0"] : ["-preset", "veryfast"]
         return arguments
+    }
+
+    /// Decode and scale stay on the video engine only when no CPU filter is required.
+    private static func hardwareFrames(stream: Stream, encoder: String, enhancement: VideoEnhancement) -> Bool {
+        HardwareDecode.enabled(encoder: encoder, enhancement: enhancement,
+                               frameRate: stream.frameRate, colorRange: stream.color_range)
+            && [.upscale1080, .upscale4K].contains(enhancement)
+            && ["h264", "hevc"].contains(stream.codec_name ?? "")
+            && ["yuv420p", "nv12"].contains(stream.pix_fmt ?? "")
+            && (stream.width ?? 1) % 2 == 0 && (stream.height ?? 1) % 2 == 0
+    }
+
+    private static func hardwareScaleFilter(for stream: Stream, enhancement: VideoEnhancement) -> String {
+        let size = HardwareScale.outputSize(width: stream.width ?? 2, height: stream.height ?? 2, enhancement: enhancement)
+        return "scale_vt=w=\(size.width):h=\(size.height)"
     }
 
     private static func scaleFilter(for stream: Stream, enhancement: VideoEnhancement) -> String {
@@ -1185,11 +1253,11 @@ public struct MediaPreparer: Sendable {
     }
 
     private static func canEncode(stream: Stream, enhancement: VideoEnhancement,
-                                  encoder: String, executable: String) async throws -> Bool {
+                                  encoder: String, executable: String, hardwareFrames: Bool = false) async throws -> Bool {
         do {
             _ = try await HelperProcess.run(executable: executable,
                                             arguments: Self.encoderPreflightArguments(stream: stream,
-                                                enhancement: enhancement, encoder: encoder),
+                                                enhancement: enhancement, encoder: encoder, hardwareFrames: hardwareFrames),
                                             timeout: .seconds(30), outputLimit: 4096)
             return true
         } catch is CancellationError {
@@ -1200,15 +1268,20 @@ public struct MediaPreparer: Sendable {
     }
 
     private static func encoderPreflightArguments(stream: Stream, enhancement: VideoEnhancement,
-                                                  encoder: String) -> [String] {
+                                                  encoder: String, hardwareFrames: Bool = false) -> [String] {
         let width = max(2, min(3840, stream.width ?? 1920))
         let height = max(2, min(2160, stream.height ?? 1080))
         let rate = min(60, max(1, stream.frameRate ?? 30))
-        var arguments = ["-hide_banner", "-loglevel", "error", "-nostdin", "-f", "lavfi",
+        var arguments = ["-hide_banner", "-loglevel", "error", "-nostdin"]
+        if hardwareFrames { arguments += ["-init_hw_device", "videotoolbox=preflightVT", "-filter_hw_device", "preflightVT"] }
+        arguments += ["-f", "lavfi",
                          "-i", "color=c=black:s=\(width)x\(height):r=\(rate):d=0.1",
                          "-frames:v", "1"]
         arguments += Self.videoArguments(stream: stream, action: .convert,
-                                         encoder: encoder, enhancement: enhancement)
+                                         encoder: encoder, enhancement: enhancement, hardwareFrames: hardwareFrames)
+        if hardwareFrames, let filter = arguments.firstIndex(of: "-vf") {
+            arguments[filter + 1] = "format=nv12,hwupload," + arguments[filter + 1]
+        }
         arguments += ["-f", "null", "-"]
         return arguments
     }
