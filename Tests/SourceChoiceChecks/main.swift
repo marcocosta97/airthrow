@@ -235,17 +235,20 @@ struct SourceChoiceChecks {
         try check(loaded.videoUpscaler == .standard && loaded.videoEnhancement == .original,
                   "Delayed resolution did not capture the backend without enabling enhancement")
         try controller.applyVideoOptions(sourceID: nil, enhancement: .original, output4K: false, upscaler: .lanczos)
+        try check(controller.snapshot.videoUpscaler == .lanczos && controller.snapshot.videoEnhancement == .original,
+                  "Per-video backend override was not stored")
         try controller.selectEnhancement(.cleanup1080)
         let enhanced = try await settle(controller)
         let backends = await requests.backends
-        try check(enhanced.videoUpscaler == .lanczos && backends.last == .lanczos,
-                  "Per-video backend override was lost on enhancement reload")
+        // Cleanup at the source's own height stays on the hardware scaler.
+        try check(enhanced.videoUpscaler == .automatic && backends.last == .automatic,
+                  "Native-resolution cleanup kept \(String(describing: enhanced.videoUpscaler)) / \(String(describing: backends.last))")
         try controller.selectEnhancement(.original)
         _ = try await settle(controller)
-        try check(controller.snapshot.videoUpscaler == .lanczos && controller.player.rate == 0,
-                  "Restoring Original lost the backend or started playback")
+        try check(controller.snapshot.videoUpscaler == .automatic && controller.player.rate == 0,
+                  "Restoring Original changed the hardware scaler or started playback")
         await controller.shutdownAndWait()
-        print("PASS default backend captured during resolution and per-video override preserved")
+        print("PASS default backend captured during resolution and native-resolution cleanup stays on hardware scaling")
     }
 
     // Optional integration check with the installed generic extractor and original
