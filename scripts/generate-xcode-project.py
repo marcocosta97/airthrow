@@ -81,9 +81,9 @@ icon_build = add('IconBuild', dict(isa='PBXBuildFile', fileRef=icon))
 waiting_build = add('ReadyToPlayBuild', dict(isa='PBXBuildFile', fileRef=waiting))
 resources = add('AppResources', dict(isa='PBXResourcesBuildPhase', buildActionMask='2147483647', files=[icon_build, waiting_build], runOnlyForDeploymentPostprocessing='0'))
 commit_phase = add('BuildCommit', dict(isa='PBXShellScriptBuildPhase', buildActionMask='2147483647', files=[],
-    name='Stamp Git commit', inputPaths=[], outputPaths=['$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/BuildCommit.txt'],
+    name='Stamp version and commit', inputPaths=[], outputPaths=['$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/BuildCommit.txt'],
     alwaysOutOfDate='1', runOnlyForDeploymentPostprocessing='0', shellPath='/bin/bash',
-    shellScript='bash "$SRCROOT/scripts/write-build-commit.sh" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/BuildCommit.txt"\n'))
+    shellScript='bash "$SRCROOT/scripts/write-build-commit.sh" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/BuildCommit.txt"\nbash "$SRCROOT/scripts/write-build-version.sh" "$TARGET_BUILD_DIR/$INFOPLIST_PATH" "$BUILT_PRODUCTS_DIR/AirThrowShare.appex/Contents/Info.plist"\n'))
 app_target = add('AppTarget', dict(isa='PBXNativeTarget', buildConfigurationList=app_configs, buildPhases=[source_phase('App', ['AirThrowCore', 'AirThrowApp']), resources, copy, share_copy, commit_phase], buildRules=[], dependencies=[dependency, share_dependency], name='AirThrow', productName='AirThrow', productReference=app_product, productType='com.apple.product-type.application'))
 add('Project', dict(isa='PBXProject', attributes=dict(LastUpgradeCheck='1600'), buildConfigurationList=project_configs, compatibilityVersion='Xcode 14.0', developmentRegion='en', hasScannedForEncodings='0', knownRegions=['en', 'Base'], mainGroup=main_group, productRefGroup=products, projectDirPath='', projectRoot='', targets=[app_target, cli_target, share_target]))
 project = root / 'AirThrow.xcodeproj'

@@ -49,16 +49,7 @@ swiftc -swift-version 6 -parse-as-library -application-extension \
     -Xlinker -platform_version -Xlinker macos -Xlinker "$deployment_target" -Xlinker "$sdk_version" \
     -o "$share/Contents/MacOS/AirThrowShare"
 cp -R Resources/WaitingScreen "$app/Contents/Resources/WaitingScreen"
-if [[ -n "$version" ]]; then
-    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
-fi
-if [[ -n "$build_number" ]]; then
-    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build_number" "$app/Contents/Info.plist"
-fi
-for key in CFBundleShortVersionString CFBundleVersion; do
-    value="$(/usr/libexec/PlistBuddy -c "Print :$key" "$app/Contents/Info.plist")"
-    /usr/libexec/PlistBuddy -c "Set :$key $value" "$share/Contents/Info.plist"
-done
+bash scripts/write-build-version.sh "$app/Contents/Info.plist" "$share/Contents/Info.plist"
 bash scripts/write-build-commit.sh "$app/Contents/Resources/BuildCommit.txt"
 # Compile the Icon Composer document so macOS renders the Liquid Glass icon,
 # including its light, dark, and tinted appearances (Assets.car), with a loose
