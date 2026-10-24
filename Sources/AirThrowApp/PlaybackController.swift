@@ -70,6 +70,10 @@ final class PlaybackController: ObservableObject {
     private var catalogPersistenceTask: Task<Void, Never>?
     @Published private(set) var iptvImporting = false
     @Published private(set) var iptvImportError: String?
+    /// Sign-in started from the Xtream sheet. Failures stay in the sheet
+    /// instead of the playback footer, and the sheet stays up until this ends.
+    @Published private(set) var xtreamSigningIn = false
+    @Published private(set) var xtreamSignInError: String?
     @Published private(set) var selectedIPTVChannelID: UUID?
     @Published private(set) var history: [MediaHistoryEntry] = []
     @Published var inspectorPage: InspectorPage = .history
@@ -383,11 +387,12 @@ final class PlaybackController: ObservableObject {
         if let error = historyStore.credentialError { notice = error }
     }
 
-    func connectXtream(_ source: URL, historyEntryID: UUID? = nil) throws {
+    func connectXtream(_ source: URL, historyEntryID: UUID? = nil, reportInSheet: Bool = false) throws {
         let account = try XtreamAccount(source: source)
         cancelIPTVImport()
         let id = iptvImportID
         iptvImporting = true; iptvImportError = nil
+        if reportInSheet { xtreamSigningIn = true; xtreamSignInError = nil }
         // Leave playback and the previous working catalog mounted while signing in.
         iptvImportTask = Task { [weak self] in
             do {
@@ -404,14 +409,20 @@ final class PlaybackController: ObservableObject {
                 }
                 self.inspectorPage = .xtream
                 self.iptvImporting = false; self.iptvImportTask = nil
+                self.xtreamSigningIn = false
                 library.browse(.live)
             } catch {
                 guard !Task.isCancelled, let self, self.iptvImportID == id else { return }
                 self.iptvImporting = false; self.iptvImportTask = nil
-                self.iptvImportError = XtreamFailure.message(for: error)
+                self.xtreamSigningIn = false
+                let message = XtreamFailure.message(for: error)
+                if reportInSheet { self.xtreamSignInError = message }
+                else { self.iptvImportError = message }
             }
         }
     }
+
+    func clearXtreamSignInError() { xtreamSignInError = nil }
 
     func setSaveXtreamCatalogs(_ enabled: Bool) {
         saveXtreamCatalogs = enabled
@@ -464,6 +475,8 @@ final class PlaybackController: ObservableObject {
         iptvImportID = UUID()
         iptvImportTask?.cancel(); iptvImportTask = nil
         iptvImporting = false; iptvImportError = nil
+        xtreamSigningIn = false
+        xtreamSignInError = nil
     }
     func clearIPTVImportError() { iptvImportError = nil }
 

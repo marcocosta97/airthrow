@@ -67,14 +67,23 @@ struct ControllerWindowView: View {
                 }, cancel: { controller.cancelHTTPLogin(id: request.id) })
                 .id(request.id)
             case .xtream:
-                XtreamPlaylistView(submit: { url in
-                    try controller.connectXtream(url)
-                    presentation.xtreamPlaylistVisible = false
-                }, cancel: { presentation.xtreamPlaylistVisible = false })
+                XtreamPlaylistView(signingIn: controller.xtreamSigningIn,
+                                   serverError: controller.xtreamSignInError,
+                                   submit: { url in
+                    try controller.connectXtream(url, reportInSheet: true)
+                }, cancel: { presentation.xtreamPlaylistVisible = false },
+                                   clearServerError: { controller.clearXtreamSignInError() })
             }
         }
         .onChange(of: controller.httpLoginRequest?.id) { _, request in
             if request != nil { presentation.xtreamPlaylistVisible = false }
+        }
+        .onChange(of: controller.xtreamSigningIn) { wasSigningIn, signingIn in
+            // Close only when a sign-in this sheet started has succeeded.
+            // Assigning the idle flag must not dismiss a sheet that is still waiting.
+            guard wasSigningIn, !signingIn, presentation.xtreamPlaylistVisible,
+                  controller.xtreamSignInError == nil, controller.inspectorPage == .xtream else { return }
+            presentation.xtreamPlaylistVisible = false
         }
     }
     private enum Sheet: Identifiable {
@@ -97,7 +106,9 @@ struct ControllerWindowView: View {
             guard value == nil, activeSheet?.id == presented?.id else { return }
             switch presented {
             case .http(let request): controller.cancelHTTPLogin(id: request.id)
-            case .xtream: presentation.xtreamPlaylistVisible = false
+            case .xtream:
+                controller.cancelIPTVImport()
+                presentation.xtreamPlaylistVisible = false
             case nil: break
             }
         })
