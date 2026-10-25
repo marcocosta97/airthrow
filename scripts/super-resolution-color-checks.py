@@ -31,7 +31,7 @@ def main():
     report = {"schemaVersion": 1, "cases": [],
         "binarySha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
         "runnerSha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        "nativeSourceSha256": hashlib.sha256((ROOT / "Tests/SuperResolutionBench/main.swift").read_bytes()).hexdigest(),
+        "nativeSourceSha256": hashlib.sha256((ROOT / "Tests/SuperResolutionBench/SuperResolutionBench.swift").read_bytes()).hexdigest(),
         "scope": "Six 8x8 patches on the first frame: decoded vs processor input vs pre-encode output; video-range BT.709"}
     for case, colors in palettes.items():
         row = b"".join(bytes(color) * 160 for color in colors)

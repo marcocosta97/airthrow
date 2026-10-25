@@ -129,7 +129,7 @@ def real_comparison(args, directory, capabilities):
         "audioValidated": False, "receiverValidated": False, "energyMeasured": False}
     report["binarySha256"] = hashlib.sha256(args.binary.read_bytes()).hexdigest()
     report["runnerSha256"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-    report["nativeSourceSha256"] = hashlib.sha256((ROOT / "Tests/SuperResolutionBench/main.swift").read_bytes()).hexdigest()
+    report["nativeSourceSha256"] = hashlib.sha256((ROOT / "Tests/SuperResolutionBench/SuperResolutionBench.swift").read_bytes()).hexdigest()
     report["sourcePage"] = "https://developer.apple.com/documentation/videotoolbox/enhancing-your-app-with-machine-learning-based-video-effects"
     # Keep the third-party sample attribution beside the derived artifacts.
     license_path = assets.parent / "LICENSE.txt"
