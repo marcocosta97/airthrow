@@ -11,7 +11,7 @@ struct PlaylistPanel: View {
     var body: some View {
         VStack(spacing: 0) {
             if controller.inspectorPage == .playlist, let queue = controller.snapshot.queue {
-                InspectorHeader(title: "Playlist", back: { controller.inspectorPage = .history })
+                InspectorHeader(title: "Queue", back: nil)
                 PlaylistView(queue: queue)
             } else if controller.inspectorPage == .xtream, let library = controller.xtreamLibrary {
                 XtreamPanel(library: library, controller: controller).equatable()
@@ -65,7 +65,9 @@ struct PlaylistView: View {
                     .accessibilityValue(item.state == .current ? "Now playing" : item.state == .skipped ? "Skipped" : "Not yet played")
                     .id(index)
                 }
-                .listStyle(.sidebar)
+                .listStyle(.inset)
+                .scrollContentBackground(.hidden)
+                .background(Color(nsColor: SurfaceColor.window))
                 .onAppear { proxy.scrollTo(queue.currentIndex, anchor: .center) }
                 .onChange(of: queue.currentIndex) { _, index in
                     withAnimation(reduceMotion ? nil : .default) {

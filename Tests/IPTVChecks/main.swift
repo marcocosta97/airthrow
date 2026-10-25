@@ -557,6 +557,8 @@ struct IPTVChecks {
                   && controller.inspectorPage == .channels && controller.history.first?.credentialReference != nil && controller.history.first?.url.query?.contains("password") == false
                   && player.currentItem === retainedItem,
                   "Source imports get.php catalog without replacing current playback")
+        try check(controller.iptvPlaylists.count == 2,
+                  "A second IPTV playlist stays in the library beside the first")
         let queryHistory = controller.history.first(where: { $0.credentialReference != nil })!
         try check(queryHistory.kind == .iptv && queryHistory.title == "Fixture TV",
                   "Query catalog history retains replayable URL with a clean display title")

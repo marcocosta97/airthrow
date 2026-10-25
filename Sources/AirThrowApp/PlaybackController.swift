@@ -16,6 +16,15 @@ struct HTTPLoginRequest: Identifiable {
 
 enum InspectorPage { case history, channels, playlist, xtream }
 
+/// One M3U catalog in the library. `source` is how a later import finds the
+/// same playlist; the window shows `title` only.
+struct IPTVLibraryPlaylist: Identifiable, Equatable {
+    let id: UUID
+    let source: URL
+    var title: String
+    var catalog: IPTVCatalog
+}
+
 private final class ShutdownResume: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Void, Never>?
@@ -62,7 +71,15 @@ final class PlaybackController: ObservableObject {
     @Published private(set) var notice: String?
     @Published private(set) var pendingSeek: Double?
     @Published private(set) var httpLoginRequest: HTTPLoginRequest?
-    @Published private(set) var iptvCatalog: IPTVCatalog?
+    /// Every imported M3U stays in the library. `iptvCatalog` is the selected one.
+    @Published private(set) var iptvPlaylists: [IPTVLibraryPlaylist] = []
+    @Published private(set) var selectedIPTVPlaylistID: UUID?
+    var iptvCatalog: IPTVCatalog? {
+        iptvPlaylists.first { $0.id == selectedIPTVPlaylistID }?.catalog
+    }
+    private var iptvSourceURL: URL? {
+        iptvPlaylists.first { $0.id == selectedIPTVPlaylistID }?.source
+    }
     @Published private(set) var xtreamLibrary: XtreamLibrary?
     @Published private(set) var saveXtreamCatalogs: Bool
     private let xtreamCatalogStore: XtreamCatalogStore
@@ -80,7 +97,6 @@ final class PlaybackController: ObservableObject {
     @Published private(set) var sourceInput: String?
     private let historyStore: MediaHistoryStore
     private var pendingHistoryURL: URL?
-    private var iptvSourceURL: URL?
     private var iptvImportTask: Task<Void, Never>?
     private var iptvImportID = UUID()
     private let loadIPTVCatalog: @Sendable (URL) async throws -> IPTVCatalog
@@ -215,6 +231,8 @@ final class PlaybackController: ObservableObject {
     private var hasAudio: Bool?
     private var hasVideo = false
     private var title = "No video loaded"
+    /// Prototype launches must not touch the shared media-key or Now Playing centers.
+    private let integratesWithSystemPlayback: Bool
     private var remoteTargets: [(MPRemoteCommand, Any)] = []
     private var activity: NSObjectProtocol?
     // AVPlayer can briefly report paused during an active AirPlay session.
@@ -263,8 +281,9 @@ final class PlaybackController: ObservableObject {
     }, afterPlaybackBehavior: @escaping @MainActor () -> AfterPlaybackBehavior = {
         guard let raw = UserDefaults.standard.string(forKey: "afterPlaybackBehavior") else { return .keepConnected }
         return AfterPlaybackBehavior(rawValue: raw) ?? .keepConnected
-    }) {
+    }, integratesWithSystemPlayback: Bool = true) {
         self.player = player
+        self.integratesWithSystemPlayback = integratesWithSystemPlayback
         self.inspectVideoEvidence = inspectVideoEvidence
         self.inspectStreamingVideo = inspectStreamingVideo
         self.inspectFirstLiveInput = inspectFirstLiveInput
@@ -296,7 +315,7 @@ final class PlaybackController: ObservableObject {
         self.resolvePlaylist = resolvePlaylist
         self.prepareSource = prepareSource
         self.afterPlaybackBehavior = afterPlaybackBehavior
-        player.allowsExternalPlayback = true
+        player.allowsExternalPlayback = integratesWithSystemPlayback
         player.isMuted = true
         observations = [
             player.observe(\.isExternalPlaybackActive, options: [.new]) { [weak self] _, _ in
@@ -312,14 +331,49 @@ final class PlaybackController: ObservableObject {
         timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
-        installRemoteCommands()
-        updateNowPlaying()
+        if integratesWithSystemPlayback {
+            installRemoteCommands()
+            updateNowPlaying()
+        }
     }
 
     func load(_ input: String, autoplay: Bool = false) throws {
         let url = try MediaInput.source(input)
         sourceInput = input
         loadSource(url, autoplay: autoplay)
+    }
+
+    /// Appends a source after the current item. Playback keeps running.
+    /// An M3U playlist joins the library instead of the playback queue.
+    func enqueue(_ input: String) throws {
+        let url = try MediaInput.source(input)
+        sourceInput = input
+        if IPTVPlaylist.isCatalogSource(url) {
+            importIPTV(url: url)
+            return
+        }
+        let entry = PlaylistEntry(url: url, title: Self.queueTitle(for: url))
+        if let queue {
+            self.queue = QueueState(title: queue.title, entries: queue.entries + [entry],
+                                     truncated: queue.truncated, currentIndex: queue.currentIndex,
+                                     skipped: queue.skipped)
+        } else {
+            guard snapshot.state != .idle, let current = originalSourceURL else {
+                loadSource(url, autoplay: true)
+                return
+            }
+            let currentTitle = title == "No video loaded" ? Self.queueTitle(for: current) : title
+            let currentEntry = PlaylistEntry(url: current, title: currentTitle)
+            self.queue = QueueState(title: "Queue", entries: [currentEntry, entry],
+                                     truncated: false, currentIndex: 0)
+        }
+        inspectorPage = .playlist
+        notice = "Added to the queue. The video on the TV keeps playing."
+        refresh()
+    }
+
+    private static func queueTitle(for url: URL) -> String {
+        url.isFileURL ? url.deletingPathExtension().lastPathComponent : (url.host ?? "Video")
     }
 
     private func loadSource(_ url: URL, autoplay: Bool = false) {
@@ -366,9 +420,10 @@ final class PlaybackController: ObservableObject {
                 if library.listing.items.isEmpty && !library.loading { library.browse(library.section, categoryID: library.categoryID) }
             } else { try connectXtream(source, historyEntryID: id) }
         } else if entry.kind == .iptv {
-            if iptvSourceURL == source, let catalog = iptvCatalog {
+            if let existing = iptvPlaylists.first(where: { $0.source == source }) {
                 cancelIPTVImport()
                 historyStore.markOpened(id); history = historyStore.entries
+                selectedIPTVPlaylistID = existing.id
                 inspectorPage = .channels
             } else { importIPTV(url: source) }
         } else { loadSource(source) }
@@ -454,10 +509,8 @@ final class PlaybackController: ObservableObject {
             do {
                 let catalog = try await loader(url)
                 guard !Task.isCancelled, let self, self.iptvImportID == id else { return }
-                self.iptvCatalog = catalog
-                self.iptvSourceURL = url
+                self.storeImportedCatalog(catalog, source: url)
                 self.recordHistory(url, title: catalog.title, kind: .iptv)
-                self.inspectorPage = .channels
                 self.selectedIPTVChannelID = nil
                 self.iptvImporting = false; self.iptvImportTask = nil
             } catch {
@@ -481,6 +534,37 @@ final class PlaybackController: ObservableObject {
         xtreamSignInError = nil
     }
     func clearIPTVImportError() { iptvImportError = nil }
+
+    func selectIPTVPlaylist(_ id: UUID) {
+        guard iptvPlaylists.contains(where: { $0.id == id }) else { return }
+        selectedIPTVPlaylistID = id
+        selectedIPTVChannelID = nil
+        inspectorPage = .channels
+    }
+
+    func removeSelectedIPTVPlaylist() {
+        guard let id = selectedIPTVPlaylistID else { return }
+        iptvPlaylists.removeAll { $0.id == id }
+        selectedIPTVPlaylistID = iptvPlaylists.last?.id
+        selectedIPTVChannelID = nil
+        if selectedIPTVPlaylistID == nil { inspectorPage = .history }
+    }
+
+    private func storeImportedCatalog(_ catalog: IPTVCatalog, source url: URL) {
+        if let index = iptvPlaylists.firstIndex(where: { $0.source == url }) {
+            var playlists = iptvPlaylists
+            let id = playlists[index].id
+            playlists[index].title = catalog.title
+            playlists[index].catalog = catalog
+            iptvPlaylists = playlists
+            selectedIPTVPlaylistID = id
+        } else {
+            let entry = IPTVLibraryPlaylist(id: UUID(), source: url, title: catalog.title, catalog: catalog)
+            iptvPlaylists.append(entry)
+            selectedIPTVPlaylistID = entry.id
+        }
+        inspectorPage = .channels
+    }
 
     func selectIPTVChannel(_ id: UUID) throws {
         guard let channel = iptvCatalog?.channels.first(where: { $0.id == id }) else {
@@ -2587,6 +2671,7 @@ final class PlaybackController: ObservableObject {
     }
 
     private func updateNowPlaying() {
+        guard integratesWithSystemPlayback else { return }
         let center = MPRemoteCommandCenter.shared()
         let hasItem = mediaItem != nil && failure == nil
         center.playCommand.isEnabled = hasItem && !loading && snapshot.externalPlaybackActive && !probing && !probeRestoring

@@ -38,8 +38,17 @@ struct IPTVPanel: View, Equatable {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            InspectorHeader(title: "Channels", back: { controller.inspectorPage = .history })
             if let catalog = controller.iptvCatalog {
+                HStack(spacing: 8) {
+                    Text(catalog.title).font(.headline).lineLimit(1).help(catalog.title)
+                    Spacer(minLength: 8)
+                    Button("Remove") { controller.removeSelectedIPTVPlaylist() }
+                        .controlSize(.small)
+                        .help("Remove this playlist from the library")
+                        .accessibilityLabel("Remove \(catalog.title)")
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
                 VStack(alignment: .leading, spacing: 10) {
                     VStack(alignment: .leading, spacing: 6) {
                         ChannelCategoryField(selection: $category, categories: categories,

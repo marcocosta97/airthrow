@@ -27,13 +27,20 @@ enum SurfaceColor {
 
 @MainActor
 final class ControllerPresentation: ObservableObject {
-    @Published var playlistVisible = false
+    @Published var playlistVisible = true
+    /// The video field lives in the main window. The toolbar plus button shows and hides it.
+    @Published var sourceVisible = false
     @Published var settingsVisible = false
     @Published var xtreamPlaylistVisible = false
     /// Bumped by File ▸ Open… so the controller presents the file panel.
     @Published var openFileRequest = 0
     /// Bumped by File ▸ Open Location… once the source field can take focus.
     @Published var focusSourceRequest = 0
+}
+
+private struct WindowWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
 /// Keep the controller alive while Settings covers it, retaining source input
@@ -43,10 +50,77 @@ struct ControllerWindowView: View {
     @ObservedObject var cookieStatus: CookieStatusModel
     @ObservedObject var presentation: ControllerPresentation
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @StateObject private var receiverConnection: ReceiverConnectionState
+    @State private var width: CGFloat = 960
+
+    init(controller: PlaybackController, cookieStatus: CookieStatusModel, presentation: ControllerPresentation) {
+        self.controller = controller
+        self.cookieStatus = cookieStatus
+        self.presentation = presentation
+        _receiverConnection = StateObject(wrappedValue: ReceiverConnectionState(controller: controller))
+    }
+
+    private var compact: Bool { width < 720 }
+
+    @ToolbarContentBuilder private var windowToolbar: some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
+            Toggle(isOn: $presentation.playlistVisible) {
+                Image(systemName: "sidebar.left")
+            }
+            .toggleStyle(.button)
+            .help(presentation.playlistVisible ? "Hide sidebar" : "Show sidebar")
+            .accessibilityLabel(presentation.playlistVisible ? "Hide sidebar" : "Show sidebar")
+        }
+        if !compact, let label = receiverConnection.toolbarLabel {
+            ToolbarItem(placement: .principal) {
+                ReceiverToolbarTitle(label: label, connecting: receiverConnection.phase == .connecting)
+            }
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Toggle(isOn: sourceVisible) {
+                Image(systemName: "plus")
+            }
+            .toggleStyle(.button)
+            .help(presentation.sourceVisible ? "Hide the video field" : "Show the video field")
+            .accessibilityLabel(presentation.sourceVisible ? "Hide video field" : "Show video field")
+        }
+        ToolbarItem(placement: .primaryAction) {
+            ReceiverToolbarButton(controller: controller, connection: receiverConnection)
+                .frame(width: 32, height: 28)
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Toggle(isOn: settingsVisible) {
+                Image(systemName: "gearshape")
+            }
+            .toggleStyle(.button)
+            .help(presentation.settingsVisible ? "Leave Settings" : "Settings")
+            .accessibilityLabel(presentation.settingsVisible ? "Leave Settings" : "Settings")
+        }
+    }
+
+    private var sourceVisible: Binding<Bool> {
+        Binding(get: { presentation.sourceVisible }, set: { show in
+            if show {
+                presentation.settingsVisible = false
+                presentation.sourceVisible = true
+                DispatchQueue.main.async { presentation.focusSourceRequest += 1 }
+            } else {
+                NSApp.keyWindow?.makeFirstResponder(nil)
+                presentation.sourceVisible = false
+            }
+        })
+    }
+
+    private var settingsVisible: Binding<Bool> {
+        Binding(get: { presentation.settingsVisible }, set: { show in
+            NSApp.keyWindow?.makeFirstResponder(nil)
+            presentation.settingsVisible = show
+        })
+    }
 
     var body: some View {
         ZStack {
-            ControllerView(controller: controller, presentation: presentation)
+            LibraryShell(controller: controller, presentation: presentation)
                 .opacity(presentation.settingsVisible ? 0 : 1)
                 .allowsHitTesting(!presentation.settingsVisible)
                 .disabled(presentation.settingsVisible)
@@ -54,11 +128,20 @@ struct ControllerWindowView: View {
 
             if presentation.settingsVisible {
                 SettingsView(controller: controller, cookieStatus: cookieStatus)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(nsColor: SurfaceColor.window))
                     .transition(.opacity)
             }
         }
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(key: WindowWidthKey.self, value: proxy.size.width)
+            }
+        }
+        .onPreferenceChange(WindowWidthKey.self) { if $0 > 1 { width = $0 } }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.18),
                    value: presentation.settingsVisible)
+        .toolbar { windowToolbar }
         .sheet(item: sheetBinding) { sheet in
             switch sheet {
             case .http(let request):
@@ -119,12 +202,9 @@ struct ControllerWindowView: View {
 struct ControllerView: View {
     @ObservedObject var controller: PlaybackController
     @ObservedObject var presentation: ControllerPresentation
-    @ViewState private var url = ""
+    var wide: Bool
     @ViewState private var scrub: Double = 0
     @ViewState private var scrubbing = false
-    @ViewState private var dropTargeted = false
-    @FocusState private var urlFocused: Bool
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var status: PlaybackSnapshot { controller.snapshot }
     private var busy: Bool { PlaybackPolicy.isBusy(status) }
@@ -159,269 +239,157 @@ struct ControllerView: View {
 
     var body: some View {
         ZStack {
-            VStack(alignment: .leading, spacing: 10) {
-                section("Source") {
-                    VStack(alignment: .leading, spacing: 12) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack(spacing: 8) {
-                                TextField("Video or playlist URL", text: $url)
-                                    .textFieldStyle(.roundedBorder)
-                                    .focused($urlFocused)
-                                    .onSubmit(load)
-                                    .accessibilityLabel("Video source")
-                                    .accessibilityHint("Enter a URL or local file path. You can also drop a video file or link here.")
-                                    .help("A direct video URL, website video or playlist, or local video file")
-                                Button(action: chooseFile) { Image(systemName: "folder") }
-                                    .help("Choose a video or playlist file")
-                                    .accessibilityLabel("Choose video or playlist file")
-                                Button(controller.iptvImporting ? "Cancel" : "Load") {
-                                    if controller.iptvImporting { controller.cancelIPTVImport() } else { load() }
-                                }
-                                    .disabled(!controller.iptvImporting && url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                                    .help(controller.iptvImporting ? "Cancel loading the channel playlist" : "Load this source without starting playback")
-                            }
-                            Text(controller.iptvImporting ? "Loading channel playlist…" : "Video URL, website, playlist, or local file")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
+            VStack(alignment: .leading, spacing: 8) {
+                noticeBlock
+                if status.state == .idle {
+                    Text(status.receiverWaiting == true ? "Ready to play on TV" : "Nothing playing")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else {
+                    playback
                 }
-
-                section("Playback", height: 216) {
-                    VStack(alignment: .leading, spacing: 5) {
-                    if status.state != .idle {
-                        HStack(spacing: 8) {
-                            if status.state == .buffering || status.seekInProgress == true {
-                                ProgressView()
-                                    .controlSize(.small)
-                                    .accessibilityHidden(true)
-                            }
-                            Text(PlaybackPolicy.stateLabel(status)).font(.headline)
-                        }
-                    }
-                    Spacer(minLength: 2)
-                    if status.state == .idle {
-                        Label(status.receiverWaiting == true ? "Ready to play on TV" : "No video loaded",
-                              systemImage: status.receiverWaiting == true ? "tv" : "play.rectangle")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity)
-                    } else {
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text(status.title)
-                                .help(status.title)
-                                .font(.headline.weight(.semibold))
-                                .foregroundStyle(.primary)
-                                .multilineTextAlignment(.center)
-                                .lineLimit(2)
-                                .frame(maxWidth: .infinity, alignment: .center)
-                                .textSelection(.enabled)
-                            if showsVideoMenu {
-                                HStack(spacing: 8) {
-                                    if status.preparationInProgress == true,
-                                       let speed = status.preparationSpeed, speed.isFinite, speed > 0 {
-                                        Text(speed < 0.1 ? "<0.1×" : String(format: "%.1f×", speed))
-                                            .font(.caption.monospacedDigit())
-                                            .foregroundStyle(.secondary)
-                                            .help("Video seconds prepared per second, including fetching, conversion and verification. Above 1× is faster than playback.")
-                                            .accessibilityLabel("Preparation speed")
-                                            .accessibilityValue(String(format: "%.1f times playback speed", speed))
-                                    }
-                                    if !playbackDetail.isEmpty {
-                                        Text(playbackDetail)
-                                            .font(.caption).foregroundStyle(.secondary)
-                                            .lineLimit(1)
-                                            .help(playbackDetailHelp)
-                                            .accessibilityLabel("Playback: \(playbackDetail)")
-                                            .accessibilityHint(playbackDetailHelp)
-                                    }
-                                    Spacer(minLength: 0)
-                                    VideoMenuView(controller: controller)
-                                }
-                            }
-                            if !status.externalPlaybackActive &&
-                                (status.state == .awaitingReceiver || status.state == .connecting) {
-                                Text("Choose an AirPlay receiver to play. Video options are available above.")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            if status.hasAudio == false {
-                                Label("No audio track detected. Try a link that includes audio.", systemImage: "speaker.slash")
-                                    .font(.callout)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                    .accessibilityLabel("No audio track detected. Try a link that includes audio.")
-                            }
-                        }
-                    }
-                    Spacer(minLength: 0)
-                    VStack(spacing: 4) {
-                        PlaybackTimeline(controller: controller, scrub: $scrub, scrubbing: $scrubbing,
-                                         perform: perform)
-                            .frame(height: 34)
-                        HStack {
-                            Text(livePositionLabel)
-                            Spacer()
-                            if LivePolicy.supportsTimeShift(status), !LivePolicy.isAtLive(status), status.liveOffset != nil {
-                                Button("Go Live") { perform { try controller.goLive() } }
-                                    .buttonStyle(.link)
-                                    .disabled(!canControl)
-                            } else {
-                                Text(status.isLive ? "Live" : PlaybackFormat.time(status.duration))
-                            }
-                        }
-                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                    }
-
-                    HStack(spacing: 12) {
-                        if let queue = status.queue {
-                            Button { perform { try controller.previous() } } label: { Image(systemName: "backward.end.fill") }
-                                .disabled(queue.currentIndex == 0 || busy)
-                                .help("Previous playlist item").accessibilityLabel("Previous playlist item")
-                        }
-                        Button { perform { try controller.skip(by: -10) } } label: {
-                            Image(systemName: "gobackward.10")
-                        }
-                        .disabled(!PlaybackPolicy.canSkip(status, by: -10, position: controller.pendingSeek))
-                        .help("Back 10 seconds (←)").accessibilityLabel("Back 10 seconds")
-
-                        Button {
-                            if isPlaying { controller.pause() } else { perform { try controller.play() } }
-                        } label: {
-                            Label(isPlaying ? "Pause" : "Play", systemImage: isPlaying ? "pause.fill" : "play.fill")
-                                .frame(minWidth: 48)
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(!canControl)
-                        .help(isPlaying ? "Pause (Space)" : "Play (Space)")
-
-                        Button { controller.stop() } label: { Image(systemName: "stop.fill") }
-                            .disabled(status.state == .idle && status.receiverWaiting != true)
-                            .help("Stop and unload video").accessibilityLabel("Stop and unload video")
-
-                        Button { perform { try controller.skip(by: 10) } } label: {
-                            Image(systemName: "goforward.10")
-                        }
-                        .disabled(!PlaybackPolicy.canSkip(status, by: 10, position: controller.pendingSeek))
-                        .help("Forward 10 seconds (→)").accessibilityLabel("Forward 10 seconds")
-
-                        if let queue = status.queue {
-                            Button { perform { try controller.next() } } label: { Image(systemName: "forward.end.fill") }
-                                .disabled(queue.currentIndex + 1 >= queue.items.count || busy)
-                                .help("Next playlist item").accessibilityLabel("Next playlist item")
-                        }
-                    }
-                    .controlSize(.regular)
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 4)
-                    .padding(.bottom, 4)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                }
-
-                Group {
-                    if let message = status.error ?? controller.iptvImportError ?? controller.notice {
-                        ScrollView {
-                            HStack(alignment: .top, spacing: 8) {
-                                Image(systemName: status.error == nil && controller.iptvImportError == nil ? "info.circle" : "exclamationmark.triangle")
-                                    .accessibilityHidden(true)
-                                Text(message)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                    .help(message)
-                                    .textSelection(.enabled)
-                                Spacer(minLength: 0)
-                                if status.errorReason == .preparationStorageLimit {
-                                    Button("Settings…") {
-                                        NSApp.sendAction(NSSelectorFromString("showSettings"), to: NSApp.delegate, from: nil)
-                                    }
-                                    .controlSize(.small)
-                                }
-                                Button {
-                                    if status.error != nil { controller.dismissPlaybackError() }
-                                    controller.clearNotice()
-                                    controller.clearIPTVImportError()
-                                } label: { Image(systemName: "xmark") }
-                                    .buttonStyle(.plain)
-                                    .help("Dismiss message")
-                                    .accessibilityLabel("Dismiss message")
-                            }
-                            .font(.callout)
-                            .foregroundStyle(status.error == nil ? Color.secondary : Color.primary)
-                        }
-                    } else {
-                        Text(status.receiverWaiting == true
-                             ? "Load a video to replace the TV waiting screen."
-                             : (status.state == .idle ? "Load a video, then press Play when your receiver is ready." : "Playback continues when you close this window."))
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                // Preserve the compact layout while allowing the complete
-                // recovery message to scroll instead of truncating it.
-                .frame(maxWidth: .infinity, minHeight: 34, maxHeight: 34, alignment: .topLeading)
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .frame(minWidth: ControllerMetrics.minWidth, maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            if dropTargeted {
-                VStack(spacing: 10) {
-                    Image(systemName: "arrow.down.doc.fill")
-                        .font(.largeTitle)
-                        .symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(Color.accentColor)
-                    Text("Drop to load").font(.headline)
-                    Text("Video file or web link")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
-                .padding(8)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-                .transition(.opacity)
-            }
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Color(nsColor: SurfaceColor.window))
-        .contentShape(Rectangle())
-        .dropDestination(for: URL.self) { sources, _ in
-            acceptDrop(sources)
-        } isTargeted: {
-            if $0 { urlFocused = false }
-            dropTargeted = $0
-        }
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: dropTargeted)
-        .onAppear {
-            // An already loaded session should open ready for transport keys.
-            urlFocused = status.state == .idle && !dropTargeted
-        }
-        .onChange(of: canControl) { _, ready in
-            // Loads from the CLI, shared links and playlists also leave editing.
-            if ready { urlFocused = false }
-        }
-        .onReceive(controller.$sourceInput) { input in
-            if let input { url = input; urlFocused = false }
-        }
-        .onChange(of: presentation.openFileRequest) { _, _ in chooseFile() }
-        .onChange(of: presentation.focusSourceRequest) { _, _ in urlFocused = true }
     }
 
-    private func section<Content: View>(
-        _ title: String,
-        height: CGFloat? = nil,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.headline)
-                .padding(.leading, 8)
-            content()
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .frame(height: height, alignment: .top)
-                .background(
-                    Color(nsColor: SurfaceColor.section),
-                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-                )
+    private var playback: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center, spacing: 16) {
+                titleBlock(limit: wide ? 2 : 3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                transport
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+            timeline
+        }
+    }
+
+    private func titleBlock(limit: Int) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 8) {
+                if status.state == .buffering || status.seekInProgress == true {
+                    ProgressView().controlSize(.small).accessibilityHidden(true)
+                }
+                Text(status.title)
+                    .font(.headline)
+                    .lineLimit(limit)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .help(status.title)
+            }
+            if showsVideoMenu || !playbackDetail.isEmpty || status.hasAudio == false {
+                HStack(spacing: 8) {
+                    if !playbackDetail.isEmpty {
+                        Text(playbackDetail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .help(playbackDetailHelp)
+                    }
+                    if status.hasAudio == false {
+                        Label("No audio track detected. Try a link that includes audio.", systemImage: "speaker.slash")
+                            .font(.caption)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
+                    if showsVideoMenu { VideoMenuView(controller: controller) }
+                }
+            }
+            if !status.externalPlaybackActive &&
+                (status.state == .awaitingReceiver || status.state == .connecting) {
+                Text("Choose an AirPlay receiver to play. Video options are available above.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var timeline: some View {
+        VStack(spacing: 4) {
+            PlaybackTimeline(controller: controller, scrub: $scrub, scrubbing: $scrubbing, perform: perform)
+                .frame(height: 28)
+            HStack {
+                Text(livePositionLabel)
+                Spacer()
+                if LivePolicy.supportsTimeShift(status), !LivePolicy.isAtLive(status), status.liveOffset != nil {
+                    Button("Go Live") { perform { try controller.goLive() } }
+                        .buttonStyle(.link)
+                        .disabled(!canControl)
+                } else {
+                    Text(status.isLive ? "Live" : PlaybackFormat.time(status.duration))
+                }
+            }
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private var transport: some View {
+        HStack(spacing: 10) {
+            if let queue = status.queue {
+                Button { perform { try controller.previous() } } label: { Image(systemName: "backward.end.fill") }
+                    .disabled(queue.currentIndex == 0 || busy)
+                    .help("Previous playlist item").accessibilityLabel("Previous playlist item")
+            }
+            Button { perform { try controller.skip(by: -10) } } label: { Image(systemName: "gobackward.10") }
+                .disabled(!PlaybackPolicy.canSkip(status, by: -10, position: controller.pendingSeek))
+                .help("Back 10 seconds (←)").accessibilityLabel("Back 10 seconds")
+            Button {
+                if isPlaying { controller.pause() } else { perform { try controller.play() } }
+            } label: {
+                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+            }
+            .buttonStyle(.bordered)
+            .disabled(!canControl)
+            .accessibilityLabel(isPlaying ? "Pause" : "Play")
+            .help(isPlaying ? "Pause (Space)" : "Play (Space)")
+            Button { controller.stop() } label: { Image(systemName: "stop.fill") }
+                .disabled(status.state == .idle && status.receiverWaiting != true)
+                .help("Stop and unload video").accessibilityLabel("Stop and unload video")
+            Button { perform { try controller.skip(by: 10) } } label: { Image(systemName: "goforward.10") }
+                .disabled(!PlaybackPolicy.canSkip(status, by: 10, position: controller.pendingSeek))
+                .help("Forward 10 seconds (→)").accessibilityLabel("Forward 10 seconds")
+            if let queue = status.queue {
+                Button { perform { try controller.next() } } label: { Image(systemName: "forward.end.fill") }
+                    .disabled(queue.currentIndex + 1 >= queue.items.count || busy)
+                    .help("Next playlist item").accessibilityLabel("Next playlist item")
+            }
+        }
+        .controlSize(.regular)
+    }
+
+    @ViewBuilder private var noticeBlock: some View {
+        if let message = status.error ?? controller.iptvImportError ?? controller.notice {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: status.error == nil && controller.iptvImportError == nil ? "info.circle" : "exclamationmark.triangle")
+                    .accessibilityHidden(true)
+                Text(message)
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if status.errorReason == .preparationStorageLimit {
+                    Button("Settings…") {
+                        NSApp.sendAction(NSSelectorFromString("showSettings"), to: NSApp.delegate, from: nil)
+                    }
+                    .controlSize(.small)
+                }
+                Button {
+                    if status.error != nil { controller.dismissPlaybackError() }
+                    controller.clearNotice()
+                    controller.clearIPTVImportError()
+                } label: { Image(systemName: "xmark") }
+                    .buttonStyle(.plain)
+                    .help("Dismiss message")
+                    .accessibilityLabel("Dismiss message")
+            }
+            .foregroundStyle(status.error == nil ? Color.secondary : Color.primary)
         }
     }
 
@@ -432,36 +400,6 @@ struct ControllerView: View {
         return PlaybackFormat.time(scrubbing ? scrub : (controller.pendingSeek ?? status.position))
     }
 
-    private func load() { perform { try controller.load(url) }; urlFocused = false }
-    private func chooseFile() {
-        let panel = NSOpenPanel()
-        panel.title = "Choose a Video or M3U Playlist"
-        panel.prompt = "Choose"
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.allowsOtherFileTypes = false
-        panel.allowedContentTypes = ["mp4", "m4v", "mov", "mkv", "webm", "m3u", "m3u8"].compactMap {
-            UTType(filenameExtension: $0)
-        }
-        let completion: (NSApplication.ModalResponse) -> Void = { response in
-            guard response == .OK, let file = panel.url else { return }
-            url = file.path
-            load()
-        }
-        if let window = NSApp.keyWindow { panel.beginSheetModal(for: window, completionHandler: completion) }
-        else { panel.begin(completionHandler: completion) }
-    }
-    private func acceptDrop(_ sources: [URL]) -> Bool {
-        for source in sources {
-            let value = source.isFileURL ? source.path : source.absoluteString
-            guard (try? MediaInput.source(value)) != nil else { continue }
-            url = value
-            load()
-            return true
-        }
-        return false
-    }
     private func perform(_ action: () throws -> Void) {
         do { try action() } catch { controller.displayError(error) }
     }

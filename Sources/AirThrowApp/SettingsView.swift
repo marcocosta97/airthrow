@@ -185,7 +185,8 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
-        .contentMargins(.top, 0, for: .scrollContent)
+        .contentMargins(.top, 8, for: .scrollContent)
+        .background(Color(nsColor: SurfaceColor.window))
         .settingsScrollEdgeEffect()
         .padding(.horizontal, 8)
         .padding(.bottom, 8)

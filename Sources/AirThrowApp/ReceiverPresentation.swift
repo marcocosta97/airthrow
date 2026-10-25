@@ -3,17 +3,29 @@ import AVKit
 import Combine
 import SwiftUI
 
-/// Observe routing independently of playback progress. AVKit can retain a
-/// selected receiver after its session ends; that is not a new connection.
+/// The connected AirPlay device, shown as the window’s center title.
+/// The route picker itself stays on the AirPlay toolbar button.
+struct ReceiverToolbarTitle: View {
+    let label: String
+    var connecting = false
+
+    var body: some View {
+        Text(label)
+            .font(.headline)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .frame(maxWidth: 180)
+            .foregroundStyle(connecting ? Color.secondary : Color.primary)
+            .accessibilityLabel("AirPlay receiver")
+            .accessibilityValue(label)
+            .help(connecting ? "Connecting to the AirPlay receiver" : "Connected to \(label)")
+    }
+}
+
 struct ReceiverToolbarButton: View {
     let controller: PlaybackController
+    @ObservedObject var connection: ReceiverConnectionState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @StateObject private var connection: ReceiverConnectionState
-
-    init(controller: PlaybackController) {
-        self.controller = controller
-        _connection = StateObject(wrappedValue: ReceiverConnectionState(controller: controller))
-    }
 
     var body: some View {
         ReceiverRoutePicker(controller: controller)
@@ -25,14 +37,22 @@ struct ReceiverToolbarButton: View {
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
             }
-            .help(connection.phase == .connected
-                  ? "AirPlay connected — change receiver"
-                  : "Choose or change the AirPlay receiver")
-            .accessibilityValue(connection.phase.rawValue)
+            .help(help)
+            .accessibilityLabel("AirPlay receiver")
+            .accessibilityValue(connection.receiverName ?? connection.phase.rawValue)
+    }
+
+    private var help: String {
+        if let name = connection.receiverName {
+            return "Connected to \(name). Choose another receiver"
+        }
+        return connection.phase == .connecting
+            ? "Connecting to the AirPlay receiver"
+            : "Choose an AirPlay receiver"
     }
 }
 
-private enum ReceiverConnectionPhase: String {
+enum ReceiverConnectionPhase: String {
     case idle = "Not connected"
     case connecting = "Connecting"
     case connected = "Connected"
@@ -43,17 +63,98 @@ private enum ReceiverConnectionPhase: String {
 }
 
 @MainActor
-private final class ReceiverConnectionState: ObservableObject {
+final class ReceiverConnectionState: ObservableObject {
     @Published private(set) var phase: ReceiverConnectionPhase
+    /// Name of the receiver that is actually playing. Empty while the Mac is the output.
+    @Published private(set) var receiverName: String?
+    private let controller: PlaybackController
     private var observation: AnyCancellable?
+    private let routeWatcher = RouteNameWatcher()
+
+    /// Center title: the device name once AirPlay is up, “Connecting…” while it starts,
+    /// and nothing while the Mac is playing locally. The AirPlay button remains the picker.
+    var toolbarLabel: String? {
+        switch phase {
+        case .idle: nil
+        case .connecting: "Connecting…"
+        case .connected: receiverName
+        }
+    }
 
     init(controller: PlaybackController) {
+        self.controller = controller
         phase = ReceiverConnectionPhase(connected: controller.snapshot.externalPlaybackActive,
                                         connecting: controller.snapshot.state == .connecting)
         observation = controller.$snapshot
             .map { ReceiverConnectionPhase(connected: $0.externalPlaybackActive, connecting: $0.state == .connecting) }
             .removeDuplicates()
-            .sink { [weak self] in self?.phase = $0 }
+            .sink { [weak self] phase in
+                self?.phase = phase
+                self?.refreshName()
+            }
+        routeWatcher.onChange = { [weak self] in
+            Task { @MainActor in self?.refreshName() }
+        }
+        routeWatcher.watch(controller.player)
+        refreshName()
+    }
+
+    isolated deinit { routeWatcher.stop() }
+
+    private func refreshName() {
+        let name = Self.remoteReceiverName(player: controller.player)
+        if receiverName != name { receiverName = name }
+    }
+
+    /// `AVPlayer.outputContext.deviceName` names the active route. The SDK overlay does not
+    /// export that type, and the same property names the Mac when playback is local.
+    private static func remoteReceiverName(player: AVPlayer) -> String? {
+        guard player.isExternalPlaybackActive else { return nil }
+        guard let context = player.value(forKey: "outputContext") as? NSObject else { return nil }
+        if let name = displayName(context.value(forKey: "deviceName") as? String) { return name }
+        let devices = context.value(forKey: "outputDevices") as? [NSObject] ?? []
+        for device in devices {
+            if let name = displayName(device.value(forKey: "deviceName") as? String
+                                      ?? device.value(forKey: "name") as? String) {
+                return name
+            }
+        }
+        return nil
+    }
+
+    private static func displayName(_ raw: String?) -> String? {
+        let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return nil }
+        if let host = Host.current().localizedName, trimmed.caseInsensitiveCompare(host) == .orderedSame {
+            return nil
+        }
+        return trimmed
+    }
+}
+
+/// `outputContext.deviceName` changes when the route attaches, sometimes after
+/// `externalPlaybackActive` has already flipped.
+private final class RouteNameWatcher: NSObject, @unchecked Sendable {
+    private weak var player: AVPlayer?
+    var onChange: @Sendable () -> Void = {}
+
+    func watch(_ player: AVPlayer) {
+        self.player = player
+        player.addObserver(self, forKeyPath: "outputContext.deviceName", options: [.initial, .new], context: nil)
+    }
+
+    func stop() {
+        player?.removeObserver(self, forKeyPath: "outputContext.deviceName")
+        player = nil
+    }
+
+    override func observeValue(forKeyPath keyPath: String?, of object: Any?,
+                                change: [NSKeyValueChangeKey: Any]?, context: UnsafeMutableRawPointer?) {
+        guard keyPath == "outputContext.deviceName" else {
+            super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
+            return
+        }
+        onChange()
     }
 }
 

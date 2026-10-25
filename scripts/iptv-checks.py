@@ -109,7 +109,8 @@ try:
         binary = BUILD/'IPTVChecks'
         run(['swiftc', '-swift-version', '6', '-parse-as-library', '-module-cache-path', BUILD/'ModuleCache',
              *sorted((ROOT/'Sources/AirThrowCore').glob('*.swift')),
-             ROOT/'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT/'Sources/AirThrowApp/PlaybackController.swift',
+             ROOT/'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT/'Sources/AirThrowApp/InterfaceCopy.swift',
+             ROOT/'Sources/AirThrowApp/PlaybackController.swift',
              ROOT / 'Sources/AirThrowApp/XtreamLibrary.swift',
              ROOT/'Sources/AirThrowApp/ReceiverWaitingScreen.swift', ROOT/'Tests/IPTVChecks/main.swift', '-o', binary], timeout=180)
         # Foundation enforces the packaged app's transport policy, unlike a

@@ -12,22 +12,25 @@ struct AirThrowMain {
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
+        // The prototype stays a normal app so its window can be shown on Codex.
+        // It never calls activateIgnoringOtherApps. Placement uses the Codex screen.
         app.setActivationPolicy(.regular)
         withExtendedLifetime(delegate) { app.run() }
     }
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate, NSToolbarDelegate, NSMenuItemValidation {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate, NSMenuItemValidation {
     // Fixed playback surface reserves room for a two-line title and warning.
     private static let controllerHeight: CGFloat = 416
-    private let controller = PlaybackController()
+    private let controller = AppDelegate.makeController()
+    private var prototypeModel: PrototypeModel?
+    private var prototypeWindow: NSWindow?
     private let cookieStatus = CookieStatusModel()
     private let presentation = ControllerPresentation()
     private let server = CommandServer()
     private var window: NSWindow?
     private var aboutWindow: NSWindow?
-    private var windowControls: NSToolbarItemGroup?
     private var splitViewController: ControllerSplitViewController?
     private var mainHosting: NSHostingController<ControllerWindowView>?
     private var playlistHosting: NSHostingController<PlaylistPanel>?
@@ -49,6 +52,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var pendingOpenURLs: [URL] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if PrototypeLaunch.isActive {
+            makeMenu()
+            showWindow()
+            didFinishLaunching = true
+            return
+        }
         YouTubeCookies.removeAbandonedScratch()
         makeMenu()
         do {
@@ -104,8 +113,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 self?.window?.titlebarAppearsTransparent = !settingsVisible
                 self?.window?.titlebarSeparatorStyle = settingsVisible ? .automatic : .none
                 self?.setInspector(collapsed: !visible)
-                self?.windowControls?.setSelected(settingsVisible, at: 0)
-                self?.windowControls?.setSelected(visible, at: 1)
                 self?.updatePlaybackKeyEquivalents()
             }
         didFinishLaunching = true
@@ -182,9 +189,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         updatePlaybackKeyEquivalents()
     }
 
+    /// The prototype never reads the user's history, catalogs, or UserDefaults.
+    private static func makeController() -> PlaybackController {
+        guard PrototypeLaunch.isActive else { return PlaybackController() }
+        let scratch = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("airthrow-prototype-catalogs", isDirectory: true)
+        return PlaybackController(
+            showReceiverWaitingScreen: false,
+            historyStore: MediaHistoryStore(defaults: nil),
+            allowVideoConversion: false,
+            preferQuality: false,
+            xtreamCatalogStore: XtreamCatalogStore(directory: scratch, enabled: false),
+            xtreamCatalogDefaults: PrototypeLaunch.makePreferences(),
+            afterPlaybackBehavior: { .keepConnected },
+            integratesWithSystemPlayback: false)
+    }
+
+    @objc private func prototypePreviousChannel() { prototypeModel?.stepChannel(-1) }
+    @objc private func prototypeNextChannel() { prototypeModel?.stepChannel(1) }
+    @objc private func prototypeFindChannel() { prototypeModel?.focusSearch() }
+
+    private func showPrototypeWindow() {
+        if prototypeWindow == nil {
+            let model = PrototypeModel(scene: PrototypeLaunch.scene)
+            prototypeModel = model
+            guard let window = PrototypeChrome.makeWindow(model: model) else { return }
+            window.playbackKeyAction = { [weak model] key in
+                model?.handle(key) ?? false
+            }
+            prototypeWindow = window
+        }
+        prototypeWindow?.orderFrontRegardless()
+    }
+
     private func revealWindow() {
+        if PrototypeLaunch.isActive {
+            showPrototypeWindow()
+            return
+        }
         if window == nil {
-            let window = ControllerWindow(contentRect: NSRect(x: 0, y: 0, width: ControllerMetrics.width, height: Self.controllerHeight), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+            presentation.playlistVisible = true
+            let window = ControllerWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 640), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
             window.presentation = presentation
             window.playbackKeyAction = { [weak self] key in
                 guard let self, !self.presentation.settingsVisible else { return false }
@@ -214,140 +259,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             let mainHosting = NSHostingController(rootView: ControllerWindowView(
                 controller: controller, cookieStatus: cookieStatus, presentation: presentation))
             mainHosting.sizingOptions = []
-            mainHosting.preferredContentSize = NSSize(width: ControllerMetrics.width, height: Self.controllerHeight)
-            let playlistHosting = NSHostingController(rootView: PlaylistPanel(controller: controller))
-            playlistHosting.sizingOptions = []
-            playlistHosting.preferredContentSize = NSSize(width: ControllerMetrics.playlistWidth, height: Self.controllerHeight)
             self.mainHosting = mainHosting
-            self.playlistHosting = playlistHosting
+            (window as ControllerWindow).allowsVerticalGrowth = true
 
-            let split = ControllerSplitViewController()
-            split.minimumContentHeight = Self.controllerHeight
-            let contentItem = NSSplitViewItem(viewController: mainHosting)
-            contentItem.minimumThickness = ControllerMetrics.minWidth
-            contentItem.canCollapse = false
-            let inspectorItem = NSSplitViewItem(inspectorWithViewController: playlistHosting)
-            inspectorItem.minimumThickness = ControllerMetrics.playlistWidth
-            inspectorItem.maximumThickness = ControllerMetrics.playlistMaximumWidth
-            inspectorItem.isCollapsed = true
-            // Keep the controller at its size and let the window take on the
-            // inspector's width, matching the native inspector behavior.
-            inspectorItem.collapseBehavior = .preferResizingSplitViewWithFixedSiblings
-            split.addSplitViewItem(contentItem)
-            split.addSplitViewItem(inspectorItem)
-            splitViewController = split
-            self.inspectorItem = inspectorItem
-            // Keep the app's intent in step with the native toolbar toggle.
-            inspectorObservation = inspectorItem.observe(\.isCollapsed, options: [.new]) { [weak self] _, change in
-                guard let collapsed = change.newValue else { return }
-                Task { @MainActor [weak self] in
-                    self?.presentation.playlistVisible = !collapsed
-                    if collapsed { self?.controller.inspectorPage = .history }
-                }
-            }
-
-            let toolbar = NSToolbar(identifier: "AirThrowToolbar")
-            toolbar.delegate = self
-            toolbar.displayMode = .iconOnly
-            toolbar.allowsUserCustomization = false
-            window.toolbar = toolbar
             window.toolbarStyle = .unified
-
-            window.contentViewController = split
+            window.collectionBehavior.remove(.fullScreenNone)
+            window.contentViewController = mainHosting
+            window.setContentSize(NSSize(width: 960, height: 640))
+            applyLibraryWindowLimits()
             window.center()
-            window.standardWindowButton(.zoomButton)?.isEnabled = false
-            // The compact controller has no full-screen layout. The Window menu
-            // would otherwise offer Enter Full Screen.
-            window.collectionBehavior.insert(.fullScreenNone)
-            window.contentMinSize = NSSize(width: ControllerMetrics.minWidth, height: Self.controllerHeight)
-            window.contentMaxSize = NSSize(width: 12_000, height: Self.controllerHeight)
             self.window = window
         }
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
     }
 
-    // MARK: - Toolbar
-
-    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, NSToolbarItem.Identifier("AirPlayReceiver"), .space,
-         NSToolbarItem.Identifier("WindowControls")]
+    /// The hosting view must not pin the window to one size. Minimum 440×390, no maximum.
+    private func applyLibraryWindowLimits() {
+        guard let window else { return }
+        let minimum = NSSize(width: ControllerMetrics.minWidth, height: 390)
+        let maximum = NSSize(width: 12_000, height: 12_000)
+        if window.contentMinSize != minimum { window.contentMinSize = minimum }
+        if window.contentMaxSize != maximum { window.contentMaxSize = maximum }
+        window.minFullScreenContentSize = minimum
     }
 
-    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        toolbarDefaultItemIdentifiers(toolbar)
-    }
-
-    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
-                 willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
-        if itemIdentifier == NSToolbarItem.Identifier("AirPlayReceiver") {
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = "AirPlay"
-            item.paletteLabel = "AirPlay receiver"
-            item.toolTip = "Choose an AirPlay video receiver"
-            item.view = NSHostingView(rootView: ReceiverToolbarButton(controller: controller)
-                .frame(width: 40, height: 30))
-            return item
-        }
-        guard itemIdentifier == NSToolbarItem.Identifier("WindowControls"),
-              let settingsImage = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "Settings"),
-              let playlistImage = NSImage(systemSymbolName: "sidebar.right", accessibilityDescription: "History")
-        else { return nil }
-        let group = NSToolbarItemGroup(itemIdentifier: itemIdentifier,
-            images: [settingsImage, playlistImage], selectionMode: .selectAny,
-            labels: ["Settings", "History"], target: self,
-            action: #selector(toggleWindowControl(_:)))
-        group.label = "Window controls"
-        group.controlRepresentation = .expanded
-        group.setSelected(presentation.settingsVisible, at: 0)
-        group.setSelected(presentation.playlistVisible, at: 1)
-        if let control = group.view as? NSSegmentedControl {
-            control.setToolTip("Show or hide Settings (⌘,)", forSegment: 0)
-            control.setToolTip("Show or hide history", forSegment: 1)
-        }
-        windowControls = group
-        return group
-    }
-
-    @objc private func toggleWindowControl(_ sender: NSToolbarItemGroup) {
-        if sender.selectedIndex == 0 {
-            window?.makeFirstResponder(nil)
-            presentation.settingsVisible.toggle()
-        } else if sender.selectedIndex == 1 {
-            presentation.playlistVisible.toggle()
-        }
-    }
-
-    /// The compact controller keeps its height. With the inspector open, the
-    /// window can grow so a channel list is not stuck at 416 pt.
     func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
-        let inspectorOpen = !(inspectorItem?.isCollapsed ?? true)
-        let minimumWidth = ControllerMetrics.minWidth + (inspectorOpen ? ControllerMetrics.playlistWidth : 0)
-        let width = max(frameSize.width, minimumWidth)
-        let compactHeight = sender.frameRect(forContentRect: NSRect(x: 0, y: 0, width: width, height: Self.controllerHeight)).height
-        guard inspectorOpen else {
-            // Closing animates back to the designed height. Any other request
-            // stays put, so the compact controller cannot be dragged taller.
-            let height = abs(frameSize.height - compactHeight) < 1 ? compactHeight : sender.frame.height
-            return NSSize(width: width, height: height)
-        }
-        (sender as? ControllerWindow)?.allowsVerticalGrowth = true
-        sender.contentMaxSize = NSSize(width: 12_000, height: 12_000)
-        var height = max(frameSize.height, compactHeight)
-        // Layout asks for the hosting controllers' old preferred height after
-        // the drag has already been accepted. Ignore that snap-back. A real
-        // drag still has the mouse down and keeps the proposed height.
-        if NSEvent.pressedMouseButtons == 0, height + 1 < sender.frame.height {
-            height = sender.frame.height
-        }
-        let contentHeight = sender.contentRect(forFrameRect: NSRect(origin: .zero, size: NSSize(width: width, height: height))).height
-        syncInspectorPreferredHeight(to: contentHeight)
-        return NSSize(width: width, height: height)
+        let minimum = sender.frameRect(forContentRect: NSRect(x: 0, y: 0, width: ControllerMetrics.minWidth, height: 390))
+        return NSSize(width: max(frameSize.width, minimum.width), height: max(frameSize.height, minimum.height))
     }
 
     func windowDidResize(_ notification: Notification) {
-        guard let resized = notification.object as? NSWindow, resized === window,
-              inspectorItem?.isCollapsed == false,
+        guard let resized = notification.object as? NSWindow, resized === window else { return }
+        applyLibraryWindowLimits()
+        guard inspectorItem?.isCollapsed == false,
               (resized as? ControllerWindow)?.allowsVerticalGrowth == true else { return }
         let contentHeight = resized.contentRect(forFrameRect: resized.frame).height
         syncInspectorPreferredHeight(to: contentHeight)
@@ -437,6 +382,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     @objc private func showSettings() {
+        if PrototypeLaunch.isActive {
+            showPrototypeWindow()
+            prototypeModel?.showSettings = true
+            return
+        }
         revealWindow()
         window?.makeFirstResponder(nil)
         presentation.settingsVisible = true
@@ -537,16 +487,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     @objc private func openVideo() {
+        if PrototypeLaunch.isActive {
+            prototypeModel?.showOpen = true
+            return
+        }
         presentation.settingsVisible = false
         revealWindow()
         presentation.openFileRequest += 1
     }
 
     @objc private func openLocation() {
+        if PrototypeLaunch.isActive {
+            prototypeModel?.showOpen = true
+            return
+        }
         presentation.settingsVisible = false
+        presentation.sourceVisible = true
         revealWindow()
-        // The source field is disabled while Settings is on screen. Focus it
-        // after that page has been removed.
+        // The field is inserted after Settings closes. Focus it on the next turn.
         DispatchQueue.main.async { [weak self] in
             self?.presentation.focusSourceRequest += 1
         }
@@ -562,7 +520,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         playbackMenuItems[command] = item
     }
 
-    /// Space and the arrow keys stay with a focused field, list, or button.
+    /// Space and the arrow keys stay with a focused text field.
     /// The menu shows those shortcuts only while the window would handle them.
     private func updatePlaybackKeyEquivalents() {
         let live = playbackShortcutsLive()
@@ -658,6 +616,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         playback.addItem(.separator())
         addPlaybackItem(.previous, to: playback)
         addPlaybackItem(.next, to: playback)
+        if PrototypeLaunch.isActive {
+            playback.addItem(.separator())
+            let previousChannel = playback.addItem(withTitle: "Previous Channel", action: #selector(prototypePreviousChannel), keyEquivalent: "\u{F700}")
+            previousChannel.keyEquivalentModifierMask = .option
+            previousChannel.target = self
+            let nextChannel = playback.addItem(withTitle: "Next Channel", action: #selector(prototypeNextChannel), keyEquivalent: "\u{F701}")
+            nextChannel.keyEquivalentModifierMask = .option
+            nextChannel.target = self
+            let findChannel = playback.addItem(withTitle: "Find Channel", action: #selector(prototypeFindChannel), keyEquivalent: "f")
+            findChannel.target = self
+        }
         playbackItem.submenu = playback
         main.addItem(playbackItem)
         updatePlaybackKeyEquivalents()
@@ -676,6 +645,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         main.addItem(helpItem)
         NSApp.helpMenu = help
         NSApp.mainMenu = main
+        if PrototypeLaunch.isActive { return }
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = NSImage(systemSymbolName: "airplay.video", accessibilityDescription: "AirThrow")

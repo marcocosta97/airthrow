@@ -12,11 +12,14 @@ struct XtreamPanel: View, Equatable {
     /// Same library instance means a playback snapshot can skip rebuilding this panel.
     /// Library publishes its own changes through the observed object.
     let libraryIdentity: ObjectIdentifier
+    /// At the expanded width the catalog stays beside the selected title.
+    let placesDetailBesideList: Bool
 
-    init(library: XtreamLibrary, controller: PlaybackController) {
+    init(library: XtreamLibrary, controller: PlaybackController, placesDetailBesideList: Bool = false) {
         self.library = library
         self.controller = controller
         self.libraryIdentity = ObjectIdentifier(library)
+        self.placesDetailBesideList = placesDetailBesideList
     }
     @SwiftUI.State private var season: Int?
     @SwiftUI.State private var accountVisible = false
@@ -25,18 +28,34 @@ struct XtreamPanel: View, Equatable {
     private var items: [XtreamItem] { library.visibleItems }
 
     nonisolated static func == (lhs: XtreamPanel, rhs: XtreamPanel) -> Bool {
-        lhs.libraryIdentity == rhs.libraryIdentity
+        lhs.libraryIdentity == rhs.libraryIdentity && lhs.placesDetailBesideList == rhs.placesDetailBesideList
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            InspectorHeader(title: "Xtream", back: {
-                library.cancelLoading(); library.back(); controller.inspectorPage = .history
-            })
-            if library.selected != nil {
-                details
+        Group {
+            if placesDetailBesideList, library.selected != nil {
+                HStack(spacing: 0) {
+                    VStack(spacing: 0) {
+                        InspectorHeader(title: "Xtream", back: nil)
+                        catalog
+                    }
+                    .frame(width: 360)
+                    .frame(maxHeight: .infinity)
+                    Divider()
+                    details
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             } else {
-                catalog
+                VStack(alignment: .leading, spacing: 0) {
+                    InspectorHeader(title: "Xtream", back: library.selected == nil ? nil : {
+                        library.cancelLoading(); library.back()
+                    })
+                    if library.selected != nil {
+                        details
+                    } else {
+                        catalog
+                    }
+                }
             }
         }
         .onChange(of: library.selected?.id) { _, _ in season = nil }
