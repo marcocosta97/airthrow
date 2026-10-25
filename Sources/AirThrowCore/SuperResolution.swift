@@ -84,10 +84,18 @@ struct SuperResolutionLayout: Sendable {
         let factors: [Float]
         if backend == .standard {
             factors = VTSuperResolutionScalerConfiguration.supportedScaleFactors.map(Float.init)
-        } else if #available(macOS 27, *) {
-            factors = VTLowLatencySuperResolutionScalerConfiguration.supportedScaleFactors
         } else {
+            // The all-dimensions property is new in the macOS 27 SDK;
+            // older SDKs expose only the frame-specific method with this name.
+            #if compiler(>=6.4)
+            if #available(macOS 27, *) {
+                factors = VTLowLatencySuperResolutionScalerConfiguration.supportedScaleFactors
+            } else {
+                factors = [2]
+            }
+            #else
             factors = [2]
+            #endif
         }
         for factor in factors.filter({ $0 > 1 && Double($0) <= fit + 0.0001 }).sorted(by: >) {
             let outW = Int((Double(width) * fit).rounded(.down)) / 2 * 2
