@@ -11,10 +11,12 @@ public protocol MediaHistoryCredentials: AnyObject {
 public enum MediaHistoryCredentialFailure: Error {
     case unavailable
     case locked
+    case cancelled
     public var message: String {
         switch self {
         case .unavailable: "The saved credentials are unavailable in Keychain. Add the server again."
-        case .locked: "Keychain is locked. Unlock it and add the server again."
+        case .locked: "Keychain access is blocked. Unlock it, then open the playlist again."
+        case .cancelled: "Keychain access was cancelled. Open the playlist again to allow access."
         }
     }
 }
@@ -68,6 +70,7 @@ public final class KeychainMediaHistoryCredentials: MediaHistoryCredentials {
         var value: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &value)
         if status == errSecInteractionNotAllowed { throw MediaHistoryCredentialFailure.locked }
+        if status == errSecUserCanceled || status == errSecAuthFailed { throw MediaHistoryCredentialFailure.cancelled }
         guard status == errSecSuccess, let data = value as? Data, let text = String(data: data, encoding: .utf8),
               let url = try? MediaInput.url(text) else { throw MediaHistoryCredentialFailure.unavailable }
         sessionSources[reference] = url

@@ -84,6 +84,15 @@ final class PlaybackController: ObservableObject {
         iptvPlaylists.first { $0.id == selectedIPTVPlaylistID }?.source
     }
     @Published private(set) var xtreamLibrary: XtreamLibrary?
+    @Published private(set) var selectedXtreamSection: XtreamSection = .live
+    var savedXtreamPlaylists: [MediaHistoryEntry] { history.filter { $0.kind == .xtream } }
+    var xtreamPlaylists: [XtreamPlaylistSummary] {
+        var result = savedXtreamPlaylists.map { XtreamPlaylistSummary(id: $0.id, title: $0.title) }
+        if let library = xtreamLibrary, !result.contains(where: { $0.id == library.id }) {
+            result.append(XtreamPlaylistSummary(id: library.id, title: library.title))
+        }
+        return result
+    }
     @Published private(set) var saveXtreamCatalogs: Bool
     private let xtreamCatalogStore: XtreamCatalogStore
     private let xtreamCatalogDefaults: UserDefaults
@@ -439,6 +448,7 @@ final class PlaybackController: ObservableObject {
             if let library = xtreamLibrary, library.source == source {
                 cancelIPTVImport()
                 historyStore.markOpened(id); history = historyStore.entries
+                selectedXtreamSection = library.section
                 inspectorPage = .xtream
                 if library.listing.items.isEmpty && !library.loading { library.browse(library.section, categoryID: library.categoryID) }
             } else { try connectXtream(source, historyEntryID: id) }
@@ -468,8 +478,10 @@ final class PlaybackController: ObservableObject {
         if let error = historyStore.credentialError { notice = error }
     }
 
-    func connectXtream(_ source: URL, historyEntryID: UUID? = nil, reportInSheet: Bool = false) throws {
+    func connectXtream(_ source: URL, historyEntryID: UUID? = nil, reportInSheet: Bool = false,
+                       name: String? = nil, section: XtreamSection = .live) throws {
         let account = try XtreamAccount(source: source)
+        let cleanName = Self.playlistName(name)
         cancelIPTVImport()
         let id = iptvImportID
         iptvImporting = true; iptvImportError = nil
@@ -481,17 +493,25 @@ final class PlaybackController: ObservableObject {
                 let info = try await client.authenticate()
                 guard !Task.isCancelled, let self, self.iptvImportID == id else { return }
                 self.xtreamLibrary?.cancelLoading(); self.xtreamLibrary?.back()
-                let library = XtreamLibrary(client: client, accountInfo: info, catalogStore: self.xtreamCatalogStore)
-                self.xtreamLibrary = library
+                let entryID: UUID?
                 if let historyEntryID {
-                    self.historyStore.markOpened(historyEntryID); self.history = self.historyStore.entries
+                    self.historyStore.markOpened(historyEntryID)
+                    entryID = historyEntryID
                 } else {
-                    self.recordHistory(account.source, title: account.server.host ?? "Xtream", kind: .xtream)
+                    entryID = self.historyStore.record(account.source,
+                        title: cleanName ?? "Xtream playlist", kind: .xtream,
+                        preservingExistingTitle: cleanName == nil)
                 }
+                self.publishHistoryChange()
+                let title = self.history.first(where: { $0.id == entryID })?.title ?? cleanName ?? "Xtream playlist"
+                let library = XtreamLibrary(client: client, accountInfo: info, catalogStore: self.xtreamCatalogStore,
+                                            id: entryID ?? UUID(), title: title)
+                self.xtreamLibrary = library
+                self.selectedXtreamSection = section
                 self.inspectorPage = .xtream
                 self.iptvImporting = false; self.iptvImportTask = nil
                 self.xtreamSigningIn = false
-                library.browse(.live)
+                library.browse(section)
             } catch {
                 guard !Task.isCancelled, let self, self.iptvImportID == id else { return }
                 self.iptvImporting = false; self.iptvImportTask = nil
@@ -501,6 +521,50 @@ final class PlaybackController: ObservableObject {
                 else { self.iptvImportError = message }
             }
         }
+    }
+
+    /// Leave AppKit's list-selection callback before asking Keychain to show UI.
+    /// Both the sidebar and playlist overview enter through this user action.
+    func openXtreamPlaylist(_ id: UUID, section: XtreamSection) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            do { try self.selectXtreamPlaylist(id, section: section) }
+            catch { self.displayError(error) }
+        }
+    }
+
+    func selectXtreamPlaylist(_ id: UUID, section: XtreamSection) throws {
+        if let library = xtreamLibrary, library.id == id {
+            cancelIPTVImport()
+            selectedXtreamSection = section
+            inspectorPage = .xtream
+            library.switchSection(section)
+            return
+        }
+        guard let entry = savedXtreamPlaylists.first(where: { $0.id == id }) else { return }
+        try connectXtream(historyStore.source(for: entry), historyEntryID: id, section: section)
+    }
+
+    func selectXtreamSection(_ section: XtreamSection) {
+        guard let library = xtreamLibrary else { return }
+        selectedXtreamSection = section
+        library.switchSection(section)
+    }
+
+    func renameXtreamPlaylist(_ id: UUID, name: String) {
+        guard let name = Self.playlistName(name) else { return }
+        historyStore.rename(id, title: name)
+        history = historyStore.entries
+        if let library = xtreamLibrary, library.id == id {
+            library.title = history.first(where: { $0.id == id })?.title ?? name
+        }
+    }
+
+    private static func playlistName(_ name: String?) -> String? {
+        guard let name else { return nil }
+        let clean = String(name.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }.prefix(200))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return clean.isEmpty ? nil : clean
     }
 
     func clearXtreamSignInError() { xtreamSignInError = nil }
@@ -558,6 +622,11 @@ final class PlaybackController: ObservableObject {
         xtreamSignInError = nil
     }
     func clearIPTVImportError() { iptvImportError = nil }
+
+    func showPlaylists() {
+        selectedIPTVPlaylistID = nil
+        inspectorPage = .channels
+    }
 
     func selectIPTVPlaylist(_ id: UUID) {
         guard iptvPlaylists.contains(where: { $0.id == id }) else { return }

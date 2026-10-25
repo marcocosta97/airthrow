@@ -130,13 +130,14 @@ public struct XtreamProgramme: Identifiable, Sendable, Equatable {
     public let end: Date
 }
 public enum XtreamFailure: Error, Sendable {
-    case invalidAccount, rejectedAccount, inactiveAccount, invalidResponse, tooLarge, unsupportedLiveFormat, httpStatus(Int)
+    case catalogTooLarge, invalidAccount, rejectedAccount, inactiveAccount, invalidResponse, tooLarge, unsupportedLiveFormat, httpStatus(Int)
     public var message: String {
         switch self {
         case .invalidAccount: "Check the Xtream server address, username and password."
         case .rejectedAccount: "The Xtream server rejected the username or password."
         case .inactiveAccount: "This Xtream account is inactive or expired. Check it with your provider."
         case .invalidResponse: "The server returned an invalid Xtream API response. Try again or import its M3U playlist."
+        case .catalogTooLarge: "This catalog is too large to load at once. Select a category to load a smaller catalog."
         case .tooLarge: "This Xtream response exceeds the 64 MiB limit. Select a category to load a smaller catalog."
         case .unsupportedLiveFormat: "This account does not allow HLS or MPEG-TS live streams. Check its playback formats with your provider."
         case .httpStatus(let status): "The Xtream server returned HTTP \(status). Try again or check the server address."

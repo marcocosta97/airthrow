@@ -4,10 +4,26 @@ import Combine
 import AirThrowCore
 #endif
 
+struct XtreamPlaylistSummary: Identifiable {
+    let id: UUID
+    let title: String
+}
+
+extension XtreamSection {
+    var sidebarTitle: String {
+        switch self { case .live: "Live TV"; case .movies: "Films"; case .series: "TV Series" }
+    }
+    var sidebarSymbol: String {
+        switch self { case .live: "tv"; case .movies: "film"; case .series: "rectangle.stack" }
+    }
+}
+
 @MainActor
 final class XtreamLibrary: ObservableObject {
     let client: XtreamClient
     let accountInfo: XtreamAccountInfo
+    let id: UUID
+    @Published var title: String
     var source: URL { client.account.source }
     @Published private(set) var section: XtreamSection = .live
     @Published private(set) var categories: [XtreamCategory] = []
@@ -44,7 +60,9 @@ final class XtreamLibrary: ObservableObject {
     private var generation = UUID()
     private var detailGeneration = UUID()
 
-    init(client: XtreamClient, accountInfo: XtreamAccountInfo, catalogStore: XtreamCatalogStore? = nil) {
+    init(client: XtreamClient, accountInfo: XtreamAccountInfo, catalogStore: XtreamCatalogStore? = nil,
+         id: UUID = UUID(), title: String = "Xtream playlist") {
+        self.id = id; self.title = title
         self.catalogStore = catalogStore
         self.client = XtreamClient(account: client.account, timeZoneIdentifier: accountInfo.timeZoneIdentifier)
         self.accountInfo = accountInfo

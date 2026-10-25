@@ -70,6 +70,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.reply({'user_info': {'auth': '1', 'status': 'Expired' if prefix == 'expired' else 'Active',
                        'exp_date': '2000000000', 'active_cons': '1', 'max_connections': 2,
                        'allowed_output_formats': ['ts']}, 'server_info': {'timezone': 'Europe/Rome'}}); return
+        if prefix == 'over64' and action in ('get_live_streams', 'get_vod_streams', 'get_series'):
+            # More than 64 MiB, including a single category, without keeping the
+            # synthetic provider response in memory all at once.
+            key = 'series_id' if action == 'get_series' else 'stream_id'
+            start = ('{"' + key + '":').encode()
+            tail = b',"name":"Feature film","category_id":"1","padding":"' + b'x' * 8192 + b'"}'
+            length = 2 + sum(len(start) + len(str(n)) + len(tail) for n in range(1, 9001)) + 8999
+            self.send_response(200); self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(length)); self.end_headers()
+            try:
+                self.wfile.write(b'[')
+                for n in range(1, 9001):
+                    self.wfile.write((b',' if n > 1 else b'') + start + str(n).encode() + tail)
+                self.wfile.write(b']')
+            except (BrokenPipeError, ConnectionResetError): pass
+            return
         if prefix == 'scroll' and action in ('get_live_streams', 'get_vod_streams', 'get_series'):
             key = 'series_id' if action == 'get_series' else 'stream_id'
             self.reply([{key: str(n), 'name': f'Title {n:03d}', 'category_id': '1'} for n in range(1, 121)]); return
@@ -86,7 +102,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             category = query.get('category_id', [''])[0]
             if prefix == 'large': self.reply(LARGE, raw=True); return
             if prefix == 'filtered' and not category:
-                self.send_response(200); self.send_header('Content-Length', '70000000'); self.end_headers()
+                self.send_response(200); self.send_header('Content-Length', str(512 * 1024 * 1024 + 1)); self.end_headers()
                 try:
                     self.wfile.write(b'x' * 8192); self.wfile.flush(); time.sleep(0.3)
                 except (BrokenPipeError, ConnectionResetError): pass

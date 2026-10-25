@@ -36,18 +36,11 @@ public struct XtreamClient: Sendable {
 
     public func listing(_ section: XtreamSection, categoryID: String? = nil) async throws -> XtreamListing {
         let parameters = categoryID.map { [URLQueryItem(name: "category_id", value: $0)] } ?? []
-        let data = try await request(section.listingAction, parameters: parameters)
-        let rows = try XtreamParsing.rows(json(data))
-        var items = [XtreamItem](), seen = Set<String>(), skipped = 0
-        for row in rows {
-            guard let id = XtreamParsing.id(row[section.listingIDKey]),
-                  let name = XtreamParsing.text(row["name"]), seen.insert(id).inserted else { skipped += 1; continue }
-            items.append(XtreamItem(id: id, name: name, categoryID: XtreamParsing.id(row["category_id"]),
-                                    container: XtreamParsing.text(row["container_extension"]) ?? "mp4",
-                                    summary: XtreamParsing.text(row["plot"]), year: XtreamParsing.text(row["year"]),
-                                    rating: XtreamParsing.text(row["rating"])))
-        }
-        return XtreamListing(items: items, skipped: skipped, truncated: false)
+        let url = try account.apiURL(action: section.listingAction, parameters: parameters)
+        let decoder = XtreamListingDecoder(section: section)
+        _ = try await XtreamResponseTransfer(origin: account.server, maximumBytes: XtreamListingDecoder.maximumBytes,
+                                            consume: { try decoder.consume($0) }).load(url)
+        return try decoder.finish()
     }
 
     public func details(_ item: XtreamItem, section: XtreamSection) async throws -> XtreamDetails {

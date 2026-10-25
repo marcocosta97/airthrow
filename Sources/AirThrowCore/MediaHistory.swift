@@ -63,14 +63,15 @@ public final class MediaHistoryStore {
         persist()
     }
 
-    public func record(_ url: URL, title: String, kind: MediaHistoryEntry.Kind) {
+    @discardableResult
+    public func record(_ url: URL, title: String, kind: MediaHistoryEntry.Kind, preservingExistingTitle: Bool = false) -> UUID? {
         guard (try? MediaInput.source(url.absoluteString)) != nil,
-              url.absoluteString.utf8.count <= 16_384 else { return }
+              url.absoluteString.utf8.count <= 16_384 else { return nil }
         credentialError = nil
         let protected = Self.containsCredentials(url)
         let storedURL = protected ? Self.sanitized(url) : url
         // A failed redaction must not fall back to the original secret URL.
-        if protected && Self.containsCredentials(storedURL) { return }
+        if protected && Self.containsCredentials(storedURL) { return nil }
         let previous = entries.first { entry in
             guard entry.url == storedURL else { return false }
             if !protected { return entry.credentialReference == nil }
@@ -83,19 +84,22 @@ public final class MediaHistoryStore {
         let reference = protected ? (previous?.credentialReference ?? UUID().uuidString) : nil
         if let reference {
             do { try credentials.save(url, reference: reference); resolvedSources[reference] = url }
-            catch let error as MediaHistoryCredentialFailure { credentialError = error.message; return }
-            catch { credentialError = MediaHistoryCredentialFailure.unavailable.message; return }
+            catch let error as MediaHistoryCredentialFailure { credentialError = error.message; return nil }
+            catch { credentialError = MediaHistoryCredentialFailure.unavailable.message; return nil }
         }
         let id = previous?.id ?? UUID()
         let cleanTitle = String(title.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }.prefix(200))
         let fallback = url.isFileURL ? url.lastPathComponent : (url.host ?? "Video")
+        let proposedTitle = cleanTitle.isEmpty ? fallback : cleanTitle
+        let displayTitle = preservingExistingTitle ? (previous?.title ?? proposedTitle) : proposedTitle
         entries.removeAll { $0.id == previous?.id }
-        entries.insert(MediaHistoryEntry(id: id, url: storedURL, title: cleanTitle.isEmpty ? fallback : cleanTitle,
+        entries.insert(MediaHistoryEntry(id: id, url: storedURL, title: displayTitle,
                                          kind: kind, openedAt: Date(), isPinned: previous?.isPinned ?? false, credentialReference: reference), at: 0)
         let sorted = entries.sorted(by: Self.precedes)
         entries = Array(sorted.prefix(Self.maximumEntries))
         deleteCredentials(for: Array(sorted.dropFirst(Self.maximumEntries)))
         persist()
+        return id
     }
 
     public func source(for entry: MediaHistoryEntry) throws -> URL {
@@ -107,6 +111,8 @@ public final class MediaHistoryStore {
             }
             resolvedSources[reference] = source
             return source
+        } catch let error as MediaHistoryCredentialFailure {
+            throw AppFailure(.invalidRequest, error.message)
         } catch { throw AppFailure(.invalidRequest, MediaHistoryCredentialFailure.unavailable.message) }
     }
 
@@ -120,6 +126,17 @@ public final class MediaHistoryStore {
         entries.sort(by: Self.precedes)
         persist()
     }
+    /// Rename metadata without retrieving or rewriting the saved credentials.
+    public func rename(_ id: UUID, title: String) {
+        let clean = String(title.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }.prefix(200))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty, let index = entries.firstIndex(where: { $0.id == id }) else { return }
+        let entry = entries[index]
+        entries[index] = MediaHistoryEntry(id: entry.id, url: entry.url, title: clean,
+            kind: entry.kind, openedAt: entry.openedAt, isPinned: entry.isPinned, credentialReference: entry.credentialReference)
+        persist()
+    }
+
     public func remove(_ id: UUID) {
         credentialError = nil
         let removed = entries.filter { $0.id == id }

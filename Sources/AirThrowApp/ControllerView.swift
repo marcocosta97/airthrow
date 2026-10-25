@@ -162,8 +162,8 @@ struct ControllerWindowView: View {
             case .xtream:
                 XtreamPlaylistView(signingIn: controller.xtreamSigningIn,
                                    serverError: controller.xtreamSignInError,
-                                   submit: { url in
-                    try controller.connectXtream(url, reportInSheet: true)
+                                   submit: { url, name in
+                    try controller.connectXtream(url, reportInSheet: true, name: name)
                 }, cancel: { presentation.xtreamPlaylistVisible = false },
                                    clearServerError: { controller.clearXtreamSignInError() })
             }

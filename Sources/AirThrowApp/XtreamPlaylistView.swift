@@ -8,22 +8,27 @@ private typealias XtreamState<Value> = SwiftUI.State<Value>
 struct XtreamPlaylistView: View {
     let signingIn: Bool
     let serverError: String?
-    let submit: (URL) throws -> Void
+    let submit: (URL, String) throws -> Void
     let cancel: () -> Void
     let clearServerError: () -> Void
+    @XtreamState private var name = ""
     @XtreamState private var server = ""
     @XtreamState private var username = ""
     @XtreamState private var password = ""
     @XtreamState private var format: XtreamPlaylist.StreamFormat = .hls
     @XtreamState private var error: String?
     @FocusState private var focus: Field?
-    private enum Field { case server, username, password }
+    private enum Field { case name, server, username, password }
     private var presentedError: String? { error ?? serverError }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Add Xtream Server").font(.headline)
             Form {
+                TextField("Name", text: $name, prompt: Text("My TV"))
+                    .focused($focus, equals: .name)
+                    .disabled(signingIn)
+                    .onSubmit { focus = .server }
                 TextField("Server", text: $server, prompt: Text("https://server:port"))
                     .focused($focus, equals: .server)
                     .disabled(signingIn)
@@ -60,7 +65,7 @@ struct XtreamPlaylistView: View {
                     .foregroundStyle(.primary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Text("Browse live TV, films, series and programme guides. The server is saved in History; credentials are stored in Keychain.")
+            Text("Browse live TV, films, series and programme guides. The playlist appears in the sidebar and History; credentials are stored in Keychain.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             HStack {
@@ -72,7 +77,7 @@ struct XtreamPlaylistView: View {
             }
         }
         .padding(24).frame(width: 380)
-        .task { focus = .server }
+        .task { focus = .name }
         .onDisappear { password = "" }
     }
 
@@ -91,7 +96,7 @@ struct XtreamPlaylistView: View {
         clearError()
         do {
             let url = try XtreamPlaylist.url(server: server, username: username, password: password, format: format)
-            try submit(url)
+            try submit(url, name)
         } catch let failure as AppFailure { error = failure.message }
         catch { self.error = "Could not add the server. Check the details, then try again." }
     }

@@ -14,12 +14,14 @@ struct XtreamPanel: View, Equatable {
     let libraryIdentity: ObjectIdentifier
     /// At the expanded width the catalog stays beside the selected title.
     let placesDetailBesideList: Bool
+    let showsSectionPicker: Bool
 
-    init(library: XtreamLibrary, controller: PlaybackController, placesDetailBesideList: Bool = false) {
+    init(library: XtreamLibrary, controller: PlaybackController, placesDetailBesideList: Bool = false, showsSectionPicker: Bool = true) {
         self.library = library
         self.controller = controller
         self.libraryIdentity = ObjectIdentifier(library)
         self.placesDetailBesideList = placesDetailBesideList
+        self.showsSectionPicker = showsSectionPicker
     }
     @SwiftUI.State private var season: Int?
     @SwiftUI.State private var accountVisible = false
@@ -28,7 +30,7 @@ struct XtreamPanel: View, Equatable {
     private var items: [XtreamItem] { library.visibleItems }
 
     nonisolated static func == (lhs: XtreamPanel, rhs: XtreamPanel) -> Bool {
-        lhs.libraryIdentity == rhs.libraryIdentity && lhs.placesDetailBesideList == rhs.placesDetailBesideList
+        lhs.libraryIdentity == rhs.libraryIdentity && lhs.placesDetailBesideList == rhs.placesDetailBesideList && lhs.showsSectionPicker == rhs.showsSectionPicker
     }
 
     var body: some View {
@@ -36,7 +38,7 @@ struct XtreamPanel: View, Equatable {
             if placesDetailBesideList, library.selected != nil {
                 HStack(spacing: 0) {
                     VStack(spacing: 0) {
-                        InspectorHeader(title: "Xtream", back: nil)
+                        InspectorHeader(title: "\(library.title) · \(library.section.sidebarTitle)", back: nil)
                         catalog
                     }
                     .frame(width: 360)
@@ -47,7 +49,7 @@ struct XtreamPanel: View, Equatable {
                 }
             } else {
                 VStack(alignment: .leading, spacing: 0) {
-                    InspectorHeader(title: "Xtream", back: nil)
+                    InspectorHeader(title: "\(library.title) · \(library.section.sidebarTitle)", back: nil)
                     if library.selected != nil {
                         details
                     } else {
@@ -63,9 +65,11 @@ struct XtreamPanel: View, Equatable {
         let key = library.catalogKey
         return VStack(alignment: .leading, spacing: 0) {
             VStack(spacing: 8) {
-                Picker("Catalog", selection: Binding(get: { library.section }, set: { library.switchSection($0) })) {
+                if showsSectionPicker {
+                Picker("Catalog", selection: Binding(get: { library.section }, set: { controller.selectXtreamSection($0) })) {
                     ForEach(XtreamSection.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                 }.pickerStyle(.segmented).labelsHidden().accessibilityLabel("Catalog")
+                }
                 CategoryPopUpField(selection: Binding(get: { library.categoryID }, set: { library.browse(library.section, categoryID: $0) }),
                                    options: [.init(title: "All categories", value: nil)] + library.categories.map { .init(title: $0.name, value: $0.id) },
                                    accessibilityLabel: "Category")

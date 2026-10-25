@@ -4,6 +4,16 @@ import Foundation
 /// All mutable state is protected because Swift task cancellation can race callbacks.
 final class XtreamResponseTransfer: XtreamRedirectDelegate, URLSessionDataDelegate, @unchecked Sendable {
     private let lock = NSLock()
+    private let maximumBytes: Int
+    private let consume: (@Sendable (Data) throws -> Void)?
+    private var receivedBytes = 0
+    private var sizeFailure: XtreamFailure { consume == nil ? .tooLarge : .catalogTooLarge }
+
+    init(origin: URL, maximumBytes: Int = XtreamClient.maximumResponseBytes,
+         consume: (@Sendable (Data) throws -> Void)? = nil) {
+        self.maximumBytes = maximumBytes; self.consume = consume
+        super.init(origin: origin)
+    }
     private var session: URLSession?
     private var task: URLSessionDataTask?
     private var continuation: CheckedContinuation<Data, Error>?
@@ -48,7 +58,7 @@ final class XtreamResponseTransfer: XtreamRedirectDelegate, URLSessionDataDelega
         if let http = response as? HTTPURLResponse {
             if http.statusCode == 401 || http.statusCode == 403 { failure = .rejectedAccount }
             else if http.statusCode != 200 { failure = .httpStatus(http.statusCode) }
-            else if response.expectedContentLength > XtreamClient.maximumResponseBytes { failure = .tooLarge }
+            else if response.expectedContentLength > maximumBytes { failure = sizeFailure }
             else { failure = nil }
         } else { failure = .invalidResponse }
         if let failure {
@@ -58,15 +68,17 @@ final class XtreamResponseTransfer: XtreamRedirectDelegate, URLSessionDataDelega
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        let tooLarge = lock.withLock { () -> Bool in
-            guard !finished else { return false }
-            // Enforce received/decoded bytes as well as Content-Length, including
-            // compressed, chunked and lengthless responses.
-            guard data.count <= XtreamClient.maximumResponseBytes - body.count else { return true }
-            body.append(data)
-            return false
+        let failure = lock.withLock { () -> Error? in
+            guard !finished else { return nil }
+            guard data.count <= maximumBytes - receivedBytes else { return sizeFailure }
+            receivedBytes += data.count
+            do {
+                if let consume { try consume(data) }
+                else { body.append(data) }
+                return nil
+            } catch { return error }
         }
-        if tooLarge { finish(.failure(XtreamFailure.tooLarge)) }
+        if let failure { finish(.failure(failure)) }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {

@@ -2,6 +2,19 @@ import Foundation
 import AVFoundation
 
 private struct CheckFailure: Error { let message: String }
+@MainActor private final class CountingHistoryCredentials: MediaHistoryCredentials {
+    private let storage = MemoryMediaHistoryCredentials()
+    var reads = 0
+    var writes = 0
+    func save(_ source: URL, reference: String) throws { writes += 1; try storage.save(source, reference: reference) }
+    func source(reference: String) throws -> URL { reads += 1; return try storage.source(reference: reference) }
+    func remove(reference: String) throws { try storage.remove(reference: reference) }
+}
+@MainActor private final class UnavailableHistoryCredentials: MediaHistoryCredentials {
+    func save(_ source: URL, reference: String) throws { throw MediaHistoryCredentialFailure.locked }
+    func source(reference: String) throws -> URL { throw MediaHistoryCredentialFailure.locked }
+    func remove(reference: String) throws { }
+}
 @main struct XtreamChecks {
     @MainActor static func main() async {
         do { try await run() } catch { print("FAIL", error); exit(1) }
@@ -56,10 +69,46 @@ private struct CheckFailure: Error { let message: String }
         let largeList = try await largeClient.listing(.movies)
         try check(largeList.items.count == 12_000 && largeList.items.last?.id == "12000" && !largeList.truncated,
                   "Catalog larger than 8 MiB retains all 12,000 titles")
+        let over64 = try await XtreamClient(account: account("/over64")).listing(.movies, categoryID: "1")
+        try check(over64.items.count == 9_000 && over64.items.last?.id == "9000" && !over64.truncated,
+                  "Film category above 64 MiB loads every title without retaining unused provider metadata")
+        let splitDecoder = XtreamListingDecoder(section: .movies)
+        let splitData = try JSONSerialization.data(withJSONObject: [
+            ["stream_id": "11", "name": "Film \"quoted\" · café", "unused": ["nested": ["[{}]", "back\\slash"]]],
+            NSNull(), ["stream_id": "11", "name": "Duplicate"], 7,
+            ["stream_id": "12", "name": "Second"]] as [Any])
+        for byte: UInt8 in [0xEF, 0xBB, 0xBF] { try splitDecoder.consume(Data([byte])) }
+        for byte in splitData { try splitDecoder.consume(Data([byte])) }
+        let splitListing = try splitDecoder.finish()
+        try check(splitListing.items.map(\.id) == ["11", "12"] && splitListing.skipped == 3,
+                  "Streaming handles a UTF-8 BOM and every UTF-8, quote and nested JSON boundary and skips invalid rows")
+        for bad in ["[{]", "[{},]", "[] trailing", "[\"unterminated", "{\"bad\":1}", "]", "[1e, {}]"] {
+            do {
+                let decoder = XtreamListingDecoder(section: .movies)
+                try decoder.consume(Data(bad.utf8)); _ = try decoder.finish()
+                throw CheckFailure(message: "Malformed streamed JSON accepted")
+            } catch XtreamFailure.invalidResponse { }
+        }
+        try check(true, "Malformed or incomplete catalogs never return a partial success")
+        do {
+            let decoder = XtreamListingDecoder(section: .movies)
+            try decoder.consume(Data(("[{\"name\":\"" + String(repeating: "x", count: 2 * 1024 * 1024 + 1)).utf8))
+            throw CheckFailure(message: "Unbounded per-title metadata accepted")
+        } catch XtreamFailure.catalogTooLarge { try check(true, "Per-title buffering remains bounded") }
+        for prefix in ["/chunked", "/compressed"] {
+            let boundedAccount = try account(prefix)
+            do {
+                _ = try await XtreamResponseTransfer(origin: boundedAccount.server, maximumBytes: 1024 * 1024,
+                                                     consume: { _ in }).load(boundedAccount.apiURL())
+                throw CheckFailure(message: "Streamed decoded-byte budget bypassed")
+            } catch XtreamFailure.catalogTooLarge {
+                try check(true, "Streamed \(prefix) transfer bounds decoded bytes independently of response length")
+            }
+        }
         let filteredLibrary = XtreamLibrary(client: XtreamClient(account: try account("/filtered")), accountInfo: info)
         filteredLibrary.browse(.movies)
         try await wait { !filteredLibrary.loading }
-        try check(filteredLibrary.categories.count == 2 && filteredLibrary.error == XtreamFailure.tooLarge.message,
+        try check(filteredLibrary.categories.count == 2 && filteredLibrary.error == XtreamFailure.catalogTooLarge.message,
                   "Over-budget all-titles response retains usable category menu")
         filteredLibrary.browse(.movies, categoryID: "1")
         try await wait { !filteredLibrary.loading }
@@ -213,17 +262,53 @@ private struct CheckFailure: Error { let message: String }
         try check(await restartedStore.load(account: savedAccount, section: .movies, categoryID: "1") == nil && !FileManager.default.fileExists(atPath: savedDirectory.path),
                   "Disabling persistence deletes saved catalogs and blocks later reads and writes")
         let defaults = UserDefaults(suiteName: "app.airthrow.xtream-checks.\(UUID().uuidString)")!
-        let historyCredentials = MemoryMediaHistoryCredentials()
+        let historyCredentials = CountingHistoryCredentials()
         let store = MediaHistoryStore(defaults: defaults, credentials: historyCredentials)
-        let controller = PlaybackController(historyStore: store, xtreamCatalogStore: XtreamCatalogStore(directory: savedDirectory), xtreamCatalogDefaults: defaults)
+        let controller = PlaybackController(historyStore: store, xtreamCatalogStore: XtreamCatalogStore(directory: savedDirectory), xtreamCatalogDefaults: defaults, integratesWithSystemPlayback: false)
         let player = controller.player
-        try controller.connectXtream(credentials.source)
+        try controller.connectXtream(credentials.source, name: "Cinema & TV")
         try await wait { !controller.iptvImporting }
         try await wait { controller.xtreamLibrary?.loading == false }
         try check(controller.player === player && controller.snapshot.state == .idle, "Xtream sign-in/catalog browsing preserve the mounted playback session")
         try check(controller.inspectorPage == .xtream && controller.history.first?.kind == .xtream, "Successful account opens API catalog and records Xtream history")
         let saved = MediaHistoryStore(defaults: defaults, credentials: historyCredentials)
         try check(saved.entries.count == 1 && saved.entries[0].kind == .xtream && (try saved.source(for: saved.entries[0])) == credentials.source && saved.entries[0].credentialReference != nil, "Xtream history persists account and kind across store reload")
+        let playlistID = controller.history[0].id
+        try check(controller.xtreamPlaylists.first?.title == "Cinema & TV" && controller.xtreamLibrary?.id == playlistID,
+                  "Named Xtream account appears in the playlist inventory with a stable identity")
+        let reads = historyCredentials.reads, writes = historyCredentials.writes
+        controller.renameXtreamPlaylist(playlistID, name: "Home TV")
+        try check(controller.xtreamLibrary?.title == "Home TV" && controller.xtreamPlaylists.first?.title == "Home TV"
+                  && historyCredentials.reads == reads && historyCredentials.writes == writes,
+                  "Rename updates the sidebar and open catalog without reading or rewriting credentials")
+        let renamedStore = MediaHistoryStore(defaults: defaults, credentials: historyCredentials)
+        try check(renamedStore.entries.first?.title == "Home TV" && renamedStore.entries.first?.id == playlistID,
+                  "Playlist name and identity survive a store reload")
+        controller.showPlaylists()
+        try check(controller.inspectorPage == .channels && controller.xtreamPlaylists.count == 1 && controller.iptvCatalog == nil,
+                  "Playlists overview includes Xtream even without an M3U catalog")
+        try controller.selectXtreamPlaylist(playlistID, section: .movies)
+        try await wait { controller.xtreamLibrary?.loading == false }
+        try check(controller.inspectorPage == .xtream && controller.selectedXtreamSection == .movies
+                  && controller.xtreamLibrary?.section == .movies && controller.player === player,
+                  "Sidebar opens Films on the same session without changing playback")
+        controller.selectXtreamSection(.series)
+        try await wait { controller.xtreamLibrary?.loading == false }
+        try check(controller.selectedXtreamSection == .series && controller.xtreamLibrary?.section == .series,
+                  "Series navigation stays synchronized with sidebar selection")
+        let restored = PlaybackController(historyStore: renamedStore,
+            xtreamCatalogStore: XtreamCatalogStore(directory: savedDirectory, enabled: false),
+            xtreamCatalogDefaults: defaults, integratesWithSystemPlayback: false)
+        try check(restored.xtreamLibrary == nil && restored.xtreamPlaylists.first?.id == playlistID,
+                  "Saved Xtream playlist is discoverable before reopening its account")
+        let beforeOpeningReads = historyCredentials.reads
+        restored.openXtreamPlaylist(playlistID, section: .movies)
+        try check(historyCredentials.reads == beforeOpeningReads,
+                  "Sidebar defers credential access until the selection callback returns")
+        try await wait { historyCredentials.reads > beforeOpeningReads }
+        try await wait { !restored.iptvImporting && restored.xtreamLibrary?.loading == false }
+        try check(restored.xtreamLibrary?.title == "Home TV" && restored.xtreamLibrary?.section == .movies,
+                  "Reopening a saved playlist honors both its name and the requested section")
         controller.toggleHistoryPin(controller.history[0].id); controller.clearHistory()
         try check(controller.history.count == 1 && controller.history[0].isPinned, "Pinned Xtream accounts survive Clear History")
         let previous = controller.xtreamLibrary
@@ -248,6 +333,16 @@ private struct CheckFailure: Error { let message: String }
                   "Turning setting off removes disk cache without clearing session catalog")
         controller.stop()
         try check(controller.xtreamLibrary === previous, "Stop retains Xtream browsing session")
+        let temporary = PlaybackController(historyStore: MediaHistoryStore(defaults: nil, credentials: UnavailableHistoryCredentials()),
+            xtreamCatalogStore: XtreamCatalogStore(directory: savedDirectory, enabled: false),
+            xtreamCatalogDefaults: defaults, integratesWithSystemPlayback: false)
+        try temporary.connectXtream(credentials.source, name: "Temporary TV")
+        try await wait { !temporary.iptvImporting && temporary.xtreamLibrary?.loading == false }
+        try check(temporary.history.isEmpty && temporary.xtreamPlaylists.first?.title == "Temporary TV" && temporary.notice != nil,
+                  "Failed credential storage keeps the named session usable and reports the save failure")
+        temporary.renameXtreamPlaylist(temporary.xtreamLibrary!.id, name: "Session TV")
+        try check(temporary.xtreamPlaylists.first?.title == "Session TV" && temporary.history.isEmpty,
+                  "An unsaved active playlist can still be renamed for this session")
         print("Xtream checks: \(count) passed; physical receiver untested.")
     }
 }

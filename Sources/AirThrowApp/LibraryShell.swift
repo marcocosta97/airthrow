@@ -6,7 +6,8 @@ import AirThrowCore
 #endif
 
 private enum LibrarySelection: Hashable {
-    case queue, history, tv, xtream
+    case queue, history, tv
+    case xtream(UUID, XtreamSection)
     case iptv(UUID)
 }
 
@@ -18,12 +19,14 @@ struct LibraryShell: View {
     @State private var width: CGFloat = 960
     @State private var sourceDraft = ""
     @State private var regularSidebarVisible = true
+    @State private var renamingPlaylist: XtreamPlaylistSummary?
+    @State private var collapsedPlaylists: Set<UUID> = []
 
     private var sizeClass: LibrarySizeClass { LibrarySizeClass(width: width) }
     private var selection: LibrarySelection {
         switch controller.inspectorPage {
         case .playlist: .queue
-        case .xtream: .xtream
+        case .xtream: controller.xtreamLibrary.map { .xtream($0.id, controller.selectedXtreamSection) } ?? .tv
         case .channels:
             if let id = controller.selectedIPTVPlaylistID { .iptv(id) } else { .tv }
         case .history: .history
@@ -83,6 +86,12 @@ struct LibraryShell: View {
         }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: presentation.sourceVisible)
         .background(Color(nsColor: SurfaceColor.window))
+        .sheet(item: $renamingPlaylist) { playlist in
+            PlaylistNameSheet(name: playlist.title) { name in
+                controller.renameXtreamPlaylist(playlist.id, name: name)
+                renamingPlaylist = nil
+            } cancel: { renamingPlaylist = nil }
+        }
         .dropDestination(for: URL.self) { sources, _ in
             acceptDrop(sources)
         } isTargeted: { presentationDrop in
@@ -114,7 +123,7 @@ struct LibraryShell: View {
     private var importStrip: some View {
         HStack(spacing: 8) {
             ProgressView().controlSize(.small)
-            Text("Loading channel playlist…")
+            Text("Loading playlist…")
                 .font(.callout)
                 .foregroundStyle(.secondary)
             Spacer(minLength: 8)
@@ -159,22 +168,39 @@ struct LibraryShell: View {
             Section {
                 Label("Queue", systemImage: "list.bullet").tag(LibrarySelection.queue)
                 Label("History", systemImage: "clock").tag(LibrarySelection.history)
+                Label("Playlists", systemImage: "rectangle.stack").tag(LibrarySelection.tv)
             }
-            Section("TV") {
-                if controller.iptvPlaylists.isEmpty {
-                    Label("Playlists", systemImage: "tv").tag(LibrarySelection.tv)
-                } else {
+            if !controller.iptvPlaylists.isEmpty {
+                Section("TV") {
                     ForEach(controller.iptvPlaylists) { playlist in
                         Label(playlist.title, systemImage: "tv")
                             .tag(LibrarySelection.iptv(playlist.id))
                             .help(playlist.title)
-                            .accessibilityLabel(playlist.title)
                     }
                 }
             }
-            if controller.xtreamLibrary != nil {
+            ForEach(controller.xtreamPlaylists) { playlist in
                 Section {
-                    Label("Xtream", systemImage: "film").tag(LibrarySelection.xtream)
+                    DisclosureGroup(isExpanded: Binding(
+                        get: { !collapsedPlaylists.contains(playlist.id) },
+                        set: { expanded in
+                            if expanded { collapsedPlaylists.remove(playlist.id) }
+                            else { collapsedPlaylists.insert(playlist.id) }
+                        })) {
+                        ForEach(XtreamSection.allCases, id: \.self) { section in
+                            Label(section.sidebarTitle, systemImage: section.sidebarSymbol)
+                                .tag(LibrarySelection.xtream(playlist.id, section))
+                                .contextMenu {
+                                    Button("Rename Playlist…") { renamingPlaylist = playlist }
+                                }
+                        }
+                    } label: {
+                        Label(playlist.title, systemImage: "rectangle.stack")
+                            .lineLimit(1).help(playlist.title)
+                    }
+                    .contextMenu {
+                        Button("Rename Playlist…") { renamingPlaylist = playlist }
+                    }
                 }
             }
         }
@@ -191,9 +217,9 @@ struct LibraryShell: View {
             switch next {
             case .queue: controller.inspectorPage = .playlist
             case .history: controller.inspectorPage = .history
-            case .tv:
-                controller.inspectorPage = .channels
-            case .xtream: controller.inspectorPage = .xtream
+            case .tv: controller.showPlaylists()
+            case .xtream(let id, let section):
+                controller.openXtreamPlaylist(id, section: section)
             case .iptv(let id): controller.selectIPTVPlaylist(id)
             }
             if sizeClass == .compact { presentation.playlistVisible = false }
@@ -218,11 +244,13 @@ struct LibraryShell: View {
             if controller.iptvCatalog != nil {
                 IPTVPanel(controller: controller, catalogID: controller.iptvCatalog?.id,
                           selectedID: controller.selectedIPTVChannelID).equatable()
+            } else if !controller.xtreamPlaylists.isEmpty || !controller.iptvPlaylists.isEmpty {
+                playlistOverview
             } else {
                 ContentUnavailableView {
                     Label("No playlists", systemImage: "tv")
                 } description: {
-                    Text("Add an M3U playlist to browse its channels. Saved playlists appear in the sidebar.")
+                    Text("Add an M3U playlist or Xtream account. Your playlists appear here and in the sidebar.")
                 } actions: {
                     Button("Add Playlist…", action: openSource)
                     Button("Add Xtream Server…") { presentation.xtreamPlaylistVisible = true }
@@ -231,12 +259,46 @@ struct LibraryShell: View {
         case .xtream:
             if let library = controller.xtreamLibrary {
                 XtreamPanel(library: library, controller: controller,
-                            placesDetailBesideList: sizeClass == .expanded).equatable()
+                            placesDetailBesideList: sizeClass == .expanded, showsSectionPicker: false).equatable()
             }
         case .history:
             HistoryPanel(controller: controller, openSource: openSource)
         }
     }
+    private var playlistOverview: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Playlists").font(.headline)
+                Spacer()
+                Menu("Add Playlist", systemImage: "plus") {
+                    Button("M3U Playlist…", action: openSource)
+                    Button("Xtream Account…") { presentation.xtreamPlaylistVisible = true }
+                }
+            }.padding(16)
+            List {
+                ForEach(controller.xtreamPlaylists) { playlist in
+                    HStack {
+                        Button {
+                            controller.openXtreamPlaylist(playlist.id, section: .live)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Label(playlist.title, systemImage: "rectangle.stack")
+                                Text("Xtream · Live TV, Films and TV Series").font(.caption).foregroundStyle(.secondary)
+                            }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                        }.buttonStyle(.plain)
+                        Button("Rename…") { renamingPlaylist = playlist }.buttonStyle(.bordered).controlSize(.small)
+                    }.padding(.vertical, 6)
+                }
+                ForEach(controller.iptvPlaylists) { playlist in
+                    Button { controller.selectIPTVPlaylist(playlist.id) } label: {
+                        Label(playlist.title, systemImage: "tv")
+                            .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                    }.buttonStyle(.plain).padding(.vertical, 6)
+                }
+            }.scrollContentBackground(.hidden)
+        }
+    }
+
     private var openSourceButton: some View {
         Button("Open Video…", systemImage: "plus", action: openSource)
     }
@@ -268,7 +330,7 @@ private struct SourceBar: View {
                 HStack(spacing: 6) {
                     if controller.iptvImporting {
                         ProgressView().controlSize(.small)
-                        Text("Loading channel playlist…")
+                        Text("Loading playlist…")
                     } else if somethingPlaying {
                         Text("Play replaces playback. Add to Queue leaves the current video running.")
                     } else {
@@ -374,4 +436,24 @@ private enum LibrarySizeClass: Equatable {
 private struct LibraryWidthKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+private struct PlaylistNameSheet: View {
+    @State var name: String
+    let save: (String) -> Void
+    let cancel: () -> Void
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Rename Playlist").font(.headline)
+            TextField("Name", text: $name).textFieldStyle(.roundedBorder).focused($focused)
+            HStack {
+                Spacer()
+                Button("Cancel", action: cancel).keyboardShortcut(.cancelAction)
+                Button("Save") { save(name) }.keyboardShortcut(.defaultAction)
+                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }.padding(24).frame(width: 340).task { focused = true }
+    }
 }

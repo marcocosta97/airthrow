@@ -10,8 +10,13 @@ private struct Failure: Error { let message: String }
     let memory = MemoryMediaHistoryCredentials()
     var reads = 0
     var writes = 0
+    var readFailure: MediaHistoryCredentialFailure?
     func save(_ source: URL, reference: String) throws { writes += 1; try memory.save(source, reference: reference) }
-    func source(reference: String) throws -> URL { reads += 1; return try memory.source(reference: reference) }
+    func source(reference: String) throws -> URL {
+        reads += 1
+        if let readFailure { throw readFailure }
+        return try memory.source(reference: reference)
+    }
     func remove(reference: String) throws { try memory.remove(reference: reference) }
 }
 @main struct HistoryCredentialChecks {
@@ -30,6 +35,17 @@ private struct Failure: Error { let message: String }
         let counting = CountingCredentials()
         let recent = MediaHistoryStore(defaults: nil, credentials: counting)
         recent.record(url, title: "Account one", kind: .xtream)
+        for failure in [MediaHistoryCredentialFailure.locked, .cancelled] {
+            counting.readFailure = failure
+            do {
+                _ = try recent.source(for: recent.entries[0])
+                throw Failure(message: "Denied credential access was ignored")
+            } catch let error as AppFailure {
+                try check(error.message == failure.message,
+                          "Keychain denial retains its retry instruction instead of asking to replace the account")
+            }
+        }
+        counting.readFailure = nil
         recent.record(URL(string: url.absoluteString.replacingOccurrences(of: "private%2Buser", with: "another-user"))!, title: "Account two", kind: .xtream)
         let first = recent.entries.last!
         recent.togglePin(first.id)
