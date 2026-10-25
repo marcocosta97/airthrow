@@ -274,7 +274,7 @@ struct LibraryShell: View {
                     Button("M3U Playlist…", action: openSource)
                     Button("Xtream Account…") { presentation.xtreamPlaylistVisible = true }
                 }
-            }.padding(16)
+            }.padding(.horizontal, 16).padding(.vertical, 12)
             List {
                 ForEach(controller.xtreamPlaylists) { playlist in
                     HStack {
@@ -295,7 +295,11 @@ struct LibraryShell: View {
                             .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                     }.buttonStyle(.plain).padding(.vertical, 6)
                 }
-            }.scrollContentBackground(.hidden)
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .contentMargins(.horizontal, 0, for: .scrollContent)
+            .contentMargins(.top, 0, for: .scrollContent)
         }
     }
 

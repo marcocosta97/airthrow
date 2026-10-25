@@ -111,7 +111,9 @@ struct HistoryPanel: View {
                             }
                         }
                 }.listStyle(.plain)
+                    .scrollContentBackground(.hidden)
                     .contentMargins(.horizontal, 0, for: .scrollContent)
+                    .contentMargins(.top, 0, for: .scrollContent)
             }
         }
         .confirmationDialog("Clear history?", isPresented: $confirmClear, titleVisibility: .visible) {
