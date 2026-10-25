@@ -377,22 +377,40 @@ struct SourceChoiceChecks {
 
     static func nativeSourceHeight(base: URL) async throws {
         let url = base.appendingPathComponent("fullhd.mp4")
-        let controller = PlaybackController(resolveCandidates: { _ in
-            [MediaCandidate(source: ResolvedSource(url: url), id: "native-unknown")]
+        let controller = PlaybackController(resolveCandidates: { source in
+            [MediaCandidate(source: ResolvedSource(url: source), id: "native-unknown")]
         }, prepareSource: nil)
         try controller.load(url.absoluteString)
         _ = try await settle(controller)
         let deadline = Date().addingTimeInterval(5)
-        while controller.sourceHeight() == nil, Date() < deadline {
+        while (controller.sourceHeight() == nil || controller.snapshot.diagnostics?.videoWidth != 1920), Date() < deadline {
             try await Task.sleep(for: .milliseconds(50))
             controller.refresh()
         }
         try check(controller.sourceHeight() == 1080 && controller.snapshot.quality == "1080p",
                   "Native inspection did not discover the original source height")
+        try check(controller.snapshot.diagnostics?.videoWidth == 1920
+                  && controller.snapshot.diagnostics?.videoHeight == 1080
+                  && controller.snapshot.diagnostics?.videoCodecTypes?.isEmpty == false,
+                  "Asynchronous format inspection lost codec or picture dimensions")
         try check(!controller.canUpscale(output4K: false) && controller.canUpscale(output4K: true),
                   "A direct 1080p source offered redundant 1080p upscale")
+        try controller.load(base.appendingPathComponent("video.mp4").absoluteString)
+        try check(controller.snapshot.diagnostics?.videoWidth != 1920,
+                  "Replacing a source retained the previous item's format sample")
+        _ = try await settle(controller)
+        let replacementDeadline = Date().addingTimeInterval(5)
+        while controller.snapshot.diagnostics?.videoWidth != 320, Date() < replacementDeadline {
+            try await Task.sleep(for: .milliseconds(50))
+            controller.refresh()
+        }
+        try check(controller.snapshot.diagnostics?.videoWidth == 320 && controller.snapshot.diagnostics?.videoHeight == 180,
+                  "Replacement item did not publish its own asynchronous format sample")
         controller.stop()
+        try await Task.sleep(for: .milliseconds(100))
+        controller.refresh()
         try check(controller.sourceHeight() == nil, "Stop retained source inspection")
+        try check(controller.snapshot.diagnostics?.videoWidth == nil, "Stopped item republished format diagnostics")
         await controller.shutdownAndWait()
         print("PASS native source resolution disables redundant upscale and clears on Stop")
     }

@@ -134,6 +134,7 @@ final class PlaybackController: ObservableObject {
     private var diagnosticsCacheItem: ObjectIdentifier?
     private var diagnosticsCacheStatus: AVPlayerItem.Status?
     private var diagnosticsCacheTime: ContinuousClock.Instant?
+    private var diagnosticsFormatTask: Task<Void, Never>?
     private var cachedSourceOptions: [SourceOptionSnapshot]?
     private var cachedSourceOptionsToken = ""
     private var loadingLiveChannel = false
@@ -2081,6 +2082,9 @@ final class PlaybackController: ObservableObject {
     }
 
     private func resetItem(keepPlayerItem: Bool = false, preserveQueue: Bool = false) {
+        diagnosticsFormatTask?.cancel(); diagnosticsFormatTask = nil
+        diagnosticsCache = nil; diagnosticsCacheItem = nil
+        diagnosticsCacheStatus = nil; diagnosticsCacheTime = nil
         pendingHistoryURL = nil
         waitingScreen.stop(keepingItemForReplacement: keepPlayerItem)
         clearHTTPLogin()
@@ -2607,6 +2611,13 @@ final class PlaybackController: ObservableObject {
         let reuse = diagnosticsCacheItem == ObjectIdentifier(item) && diagnosticsCacheStatus == item.status
             && diagnosticsCacheTime.map { now < $0.advanced(by: .seconds(5)) } == true
         var diagnostics = reuse ? (diagnosticsCache ?? PlaybackDiagnostics()) : PlaybackDiagnostics()
+        // Keep the last completed format sample while the next asynchronous
+        // read is in flight, but never carry it across player items.
+        if !reuse, diagnosticsCacheItem == ObjectIdentifier(item) {
+            diagnostics.videoCodecTypes = diagnosticsCache?.videoCodecTypes
+            diagnostics.videoWidth = diagnosticsCache?.videoWidth
+            diagnostics.videoHeight = diagnosticsCache?.videoHeight
+        }
         diagnostics.itemStatus = switch item.status {
         case .unknown: "unknown"
         case .readyToPlay: "ready"
@@ -2639,14 +2650,6 @@ final class PlaybackController: ObservableObject {
         diagnostics.likelyToKeepUp = item.isPlaybackLikelyToKeepUp
         diagnostics.itemErrorCode = (item.error as NSError?)?.code
         if !reuse {
-            let videoFormats = item.tracks.compactMap(\.assetTrack)
-                .filter { $0.mediaType == .video }
-                .flatMap { $0.formatDescriptions as? [CMFormatDescription] ?? [] }
-            if !videoFormats.isEmpty {
-                diagnostics.videoCodecTypes = Array(Set(videoFormats.map(CMFormatDescriptionGetMediaSubType))).sorted()
-                diagnostics.videoWidth = videoFormats.map { Int(CMVideoFormatDescriptionGetDimensions($0).width) }.max()
-                diagnostics.videoHeight = videoFormats.map { Int(CMVideoFormatDescriptionGetDimensions($0).height) }.max()
-            }
             if let errors = item.errorLog()?.events, !errors.isEmpty {
                 diagnostics.errorStatusCodes = errors.suffix(8).map(\.errorStatusCode)
             }
@@ -2659,8 +2662,30 @@ final class PlaybackController: ObservableObject {
             diagnosticsCacheItem = ObjectIdentifier(item)
             diagnosticsCacheStatus = item.status
             diagnosticsCacheTime = now
+            refreshDiagnosticFormats(for: item)
         }
         return diagnostics
+    }
+
+    private func refreshDiagnosticFormats(for item: AVPlayerItem) {
+        guard diagnosticsFormatTask == nil else { return }
+        let tracks = item.tracks.compactMap(\.assetTrack).filter { $0.mediaType == .video }
+        let id = generation
+        diagnosticsFormatTask = Task { [weak self, weak item] in
+            var formats: [CMFormatDescription] = []
+            for track in tracks {
+                guard !Task.isCancelled else { return }
+                if let loaded = try? await track.load(.formatDescriptions) { formats += loaded }
+            }
+            guard !Task.isCancelled, let self, let item,
+                  self.generation == id, self.mediaItem === item else { return }
+            self.diagnosticsFormatTask = nil
+            guard self.diagnosticsCacheItem == ObjectIdentifier(item) else { return }
+            self.diagnosticsCache?.videoCodecTypes = formats.isEmpty ? nil : Array(Set(formats.map(CMFormatDescriptionGetMediaSubType))).sorted()
+            self.diagnosticsCache?.videoWidth = formats.map { Int(CMVideoFormatDescriptionGetDimensions($0).width) }.max()
+            self.diagnosticsCache?.videoHeight = formats.map { Int(CMVideoFormatDescriptionGetDimensions($0).height) }.max()
+            self.refresh()
+        }
     }
 
     /// The system advances elapsed time from the last rate. Rewriting Now Playing

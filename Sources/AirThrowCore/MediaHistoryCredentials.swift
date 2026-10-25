@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import LocalAuthentication
 
 @MainActor
 public protocol MediaHistoryCredentials: AnyObject {
@@ -36,7 +37,11 @@ public final class KeychainMediaHistoryCredentials: MediaHistoryCredentials {
         var result: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service, kSecAttrAccount as String: reference,
             kSecAttrSynchronizable as String: false]
-        if !allowInteraction { result[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail }
+        if !allowInteraction {
+            let context = LAContext()
+            context.interactionNotAllowed = true
+            result[kSecUseAuthenticationContext as String] = context
+        }
         return result
     }
     public func save(_ source: URL, reference: String) throws {
