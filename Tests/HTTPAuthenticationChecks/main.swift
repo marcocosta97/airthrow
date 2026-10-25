@@ -101,7 +101,8 @@ struct HTTPAuthenticationChecks {
         catch HTTPLoginFailure.accessDenied { try check(true, "401 without authentication header reports denied access") }
         do { _ = try await HTTPAuthentication.challenge(for: source("/bearer/video.mp4")); throw CheckFailure(message: "Bearer 401 accepted") }
         catch HTTPLoginFailure.unsupported { try check(true, "Unsupported advertised authentication is distinct from expired-link denial") }
-        let denied = PlaybackController(showReceiverWaitingScreen: false)
+        let denied = PlaybackController(showReceiverWaitingScreen: false, historyStore: MediaHistoryStore(defaults: nil),
+                                        integratesWithSystemPlayback: false)
         try denied.load(source("/denied/video.mp4?token=expired").absoluteString)
         for _ in 0..<200 {
             if denied.snapshot.state == .failed { break }
@@ -181,6 +182,19 @@ struct HTTPAuthenticationChecks {
         let fixedVariants = try await fixedAsset.load(.variants)
         try check(fixedVariants.count == 1 && fixedVariants[0].videoAttributes?.presentationSize.height == 180,
                   "AVFoundation sees only the requested quality through the authenticated relay")
+        let iframeLine = fixedMaster.components(separatedBy: "\n").first { $0.hasPrefix("#EXT-X-I-FRAME-STREAM-INF:") }
+        let iframeURI = iframeLine.flatMap { HLSMaster.attributes(String($0.dropFirst("#EXT-X-I-FRAME-STREAM-INF:".count)))?["URI"] }
+        try check(iframeURI != nil, "Manual quality retains an I-frame rendition")
+        let iframeURL = URL(string: iframeURI!, relativeTo: qualityRelay.url!)!.absoluteURL
+        let (iframeBytes, _) = try await fetch(iframeURL)
+        let iframeManifest = String(decoding: iframeBytes, as: UTF8.self)
+        try check(iframeManifest.contains("#EXT-X-I-FRAMES-ONLY") && !iframeManifest.contains("/basic/"),
+                  "Trick-play manifest is authenticated and rewritten")
+        let iframeSegment = iframeManifest.components(separatedBy: "\n").first { !$0.isEmpty && !$0.hasPrefix("#") }!
+        let (iframeData, iframeResponse) = try await fetch(URL(string: iframeSegment, relativeTo: iframeURL)!.absoluteURL,
+                                                         range: "bytes=0-187")
+        try check(iframeResponse.statusCode == 206 && iframeData.count == 188,
+                  "Authenticated trick-play segments preserve byte-range delivery")
         qualityRelay.stop()
         let attributes = try await HTTPMediaRelay.start(source: source("/basic/attributes.m3u8"), credentials: basic, host: "127.0.0.1")
         let (attributeBytes, _) = try await fetch(attributes.url!)
@@ -246,7 +260,8 @@ struct HTTPAuthenticationChecks {
         try check(audioPrepared.playbackPath == .audioConversion, "Authenticated audio conversion through existing pipeline")
         audioPrepared.stop(); await audioPrepared.waitForProducer(); audioRelay.stop()
 
-        let controller = PlaybackController(showReceiverWaitingScreen: false)
+        let controller = PlaybackController(showReceiverWaitingScreen: false, historyStore: MediaHistoryStore(defaults: nil),
+                                            integratesWithSystemPlayback: false)
         try controller.load(basicURL.absoluteString)
         try await wait { controller.httpLoginRequest != nil }
         let stale = controller.httpLoginRequest!.id
@@ -263,7 +278,8 @@ struct HTTPAuthenticationChecks {
         try check(controller.player === persistent && controller.httpLoginRequest == nil && controller.snapshot.state != .failed, "Source change reuses authenticated session and player")
         let hlsController = PlaybackController(showReceiverWaitingScreen: false, resolveCandidates: { url in
             try await HLSRenditions.expand(DirectSourceAdapter.candidates(url))
-        }, checkHTTPAuthentication: { try await HTTPAuthentication.challenge(for: $0, credentials: $1) })
+        }, checkHTTPAuthentication: { try await HTTPAuthentication.challenge(for: $0, credentials: $1) },
+           integratesWithSystemPlayback: false)
         try hlsController.load(source("/basic/controller-qualities.m3u8").absoluteString)
         try await wait { hlsController.httpLoginRequest != nil }
         hlsController.submitHTTPLogin(id: hlsController.httpLoginRequest!.id, username: "fixture-user", password: "fixture-pass")

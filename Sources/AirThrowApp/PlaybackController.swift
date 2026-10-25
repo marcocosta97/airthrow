@@ -2,6 +2,8 @@ import Foundation
 import AVFoundation
 import MediaPlayer
 import Combine
+import AppKit
+import ImageIO
 #if SWIFT_PACKAGE
 import AirThrowCore
 #endif
@@ -261,6 +263,8 @@ final class PlaybackController: ObservableObject {
     /// Prototype launches must not touch the shared media-key or Now Playing centers.
     private let integratesWithSystemPlayback: Bool
     private var remoteTargets: [(MPRemoteCommand, Any)] = []
+    private(set) var nowPlayingLanguages = NowPlayingLanguages()
+    private let nowPlayingArtwork = NowPlayingArtworkLoader()
     private var activity: NSObjectProtocol?
     // AVPlayer can briefly report paused during an active AirPlay session.
     // Keep idle sleep prevention tied to the requested session, not that sample.
@@ -1365,12 +1369,11 @@ final class PlaybackController: ObservableObject {
                 self.hasAudio = detectedAudio
                 if source.title == nil, let metadataTitle { self.title = metadataTitle }
                 let item = self.makePlayerItem(asset)
-                self.nativeAudioGroup = nil
+                self.nativeAudioGroup = audibleGroup?.options.isEmpty == false ? audibleGroup : nil
                 self.selectedNativeAudioID = nil
                 self.nativeSubtitleGroup = legibleGroup?.options.isEmpty == false ? legibleGroup : nil
                 if source.delivery == .hls, source.playbackPath == .direct,
                    let group = audibleGroup, !source.hlsAudioOptions.isEmpty {
-                    self.nativeAudioGroup = group
                     // YouTube can mark both the original and a dub DEFAULT=NO.
                     // Prefer the explicitly identified original over the Mac's
                     // system language, then the manifest's default if present.
@@ -1473,20 +1476,23 @@ final class PlaybackController: ObservableObject {
                 ) { [weak self] _ in
                     Task { @MainActor in
                         guard let self, self.generation == id else { return }
-                        if item.status == .readyToPlay, self.mediaItem === item,
-                           let group = self.nativeSubtitleGroup {
-                            if let option = item.currentMediaSelection.selectedMediaOption(in: group) {
-                                self.subtitlePreference = .track(language: option.locale?.identifier,
-                                                                 name: option.displayName)
-                            } else if group.allowsEmptySelection {
-                                self.subtitlePreference = .off
-                            }
+                        if item.status == .readyToPlay, self.mediaItem === item {
+                            self.synchronizeNativeMediaSelection(in: item)
                         }
                         self.refresh()
                     }
                 })
                 self.mediaItem = item
+                self.nowPlayingLanguages = NowPlayingLanguages(audio: self.nativeAudioGroup,
+                    subtitles: self.nativeSubtitleGroup, generation: id)
                 self.player.replaceCurrentItem(with: item)
+                if self.integratesWithSystemPlayback, !source.isLive {
+                    let fileBased = source.delivery != .hls && playbackURL.pathExtension.lowercased() != "m3u8"
+                    self.nowPlayingArtwork.load(url: playbackURL, allowVideoFrame: fileBased) { [weak self, weak item] in
+                        guard let self, self.generation == id, self.mediaItem === item else { return }
+                        self.updateNowPlaying()
+                    }
+                }
                 self.refresh()
             } catch {
                 guard let self, !Task.isCancelled, self.generation == id else { return }
@@ -2082,6 +2088,8 @@ final class PlaybackController: ObservableObject {
     }
 
     private func resetItem(keepPlayerItem: Bool = false, preserveQueue: Bool = false) {
+        nowPlayingArtwork.cancel()
+        nowPlayingLanguages = NowPlayingLanguages()
         diagnosticsFormatTask?.cancel(); diagnosticsFormatTask = nil
         diagnosticsCache = nil; diagnosticsCacheItem = nil
         diagnosticsCacheStatus = nil; diagnosticsCacheTime = nil
@@ -2237,6 +2245,7 @@ final class PlaybackController: ObservableObject {
         variantMediaRelay?.stop(); variantMediaRelay = nil
         failureReason = reason
         failure = message ?? reason.message
+        nowPlayingArtwork.cancel()
         playbackErrorDismissed = false
         loadTask?.cancel(); loadTask = nil
         sampledVideo = nil
@@ -2767,6 +2776,23 @@ final class PlaybackController: ObservableObject {
         register(center.stopCommand, command: .stop)
         register(center.previousTrackCommand, command: .previous)
         register(center.nextTrackCommand, command: .next)
+        for (command, forward) in [(center.skipForwardCommand, true), (center.skipBackwardCommand, false)] {
+            command.preferredIntervals = [10]
+            let target = command.addTarget { [weak self] event in
+                guard let event = event as? MPSkipIntervalCommandEvent else { return .commandFailed }
+                let interval = event.interval
+                return Self.onMain { self?.performRemoteSkip(interval: interval, forward: forward) ?? .commandFailed }
+            }
+            remoteTargets.append((command, target))
+        }
+        for (command, enabled) in [(center.enableLanguageOptionCommand, true), (center.disableLanguageOptionCommand, false)] {
+            let target = command.addTarget { [weak self] event in
+                guard let event = event as? MPChangeLanguageOptionCommandEvent else { return .commandFailed }
+                let option = event.languageOption
+                return Self.onMain { self?.selectRemoteLanguage(option, enabled: enabled) ?? .commandFailed }
+            }
+            remoteTargets.append((command, target))
+        }
         let target = center.togglePlayPauseCommand.addTarget { [weak self] _ in
             Self.onMain {
                 guard let self else { return .commandFailed }
@@ -2786,6 +2812,44 @@ final class PlaybackController: ObservableObject {
             }
         }
         remoteTargets.append((center.changePlaybackPositionCommand, seekTarget))
+    }
+
+    func performRemoteSkip(interval: Double, forward: Bool) -> MPRemoteCommandHandlerStatus {
+        guard interval.isFinite, interval > 0 else { return .commandFailed }
+        do { try skip(by: forward ? interval : -interval); return .success }
+        catch { return .commandFailed }
+    }
+
+    func selectRemoteLanguage(_ option: MPNowPlayingInfoLanguageOption, enabled: Bool) -> MPRemoteCommandHandlerStatus {
+        guard !loadInProgress, failure == nil, !probing, !probeRestoring,
+              let item = mediaItem, item.status == .readyToPlay,
+              let entry = nowPlayingLanguages.entry(for: option),
+              enabled || entry.group.allowsEmptySelection else { return .commandFailed }
+        // A delayed disable for an option that is no longer selected must not
+        // turn off a newer selection in the same group.
+        if !enabled, item.currentMediaSelection.selectedMediaOption(in: entry.group) != entry.native {
+            return .commandFailed
+        }
+        if entry.option.languageOptionType == .audible { player.appliesMediaSelectionCriteriaAutomatically = false }
+        item.select(enabled ? entry.native : nil, in: entry.group)
+        synchronizeNativeMediaSelection(in: item)
+        refresh()
+        return .success
+    }
+
+    private func synchronizeNativeMediaSelection(in item: AVPlayerItem) {
+        if let group = nativeAudioGroup {
+            if let selected = item.currentMediaSelection.selectedMediaOption(in: group) {
+                selectedNativeAudioID = selectedSource?.hlsAudioOptions.first {
+                    Self.matchAudio($0, in: group) == selected
+                }?.id
+            } else { selectedNativeAudioID = nil }
+        }
+        if let group = nativeSubtitleGroup {
+            if let option = item.currentMediaSelection.selectedMediaOption(in: group) {
+                subtitlePreference = .track(language: option.locale?.identifier, name: option.displayName)
+            } else if group.allowsEmptySelection { subtitlePreference = .off }
+        }
     }
 
     private func register(_ remote: MPRemoteCommand, command: Command) {
@@ -2822,6 +2886,12 @@ final class PlaybackController: ObservableObject {
         center.stopCommand.isEnabled = hasItem || loading || waitingScreen.isActive
         center.togglePlayPauseCommand.isEnabled = center.playCommand.isEnabled
         center.changePlaybackPositionCommand.isEnabled = center.playCommand.isEnabled && !snapshot.seekableRanges.isEmpty
+        center.skipForwardCommand.isEnabled = center.playCommand.isEnabled && PlaybackPolicy.canSeek(snapshot)
+        center.skipBackwardCommand.isEnabled = center.skipForwardCommand.isEnabled
+        let canSelectLanguage = hasItem && !loadInProgress && !probing && !probeRestoring
+            && mediaItem?.status == .readyToPlay
+        center.enableLanguageOptionCommand.isEnabled = canSelectLanguage && !nowPlayingLanguages.entries.isEmpty
+        center.disableLanguageOptionCommand.isEnabled = canSelectLanguage && nowPlayingLanguages.entries.contains { $0.group.allowsEmptySelection }
         center.previousTrackCommand.isEnabled = queue.map { $0.currentIndex > 0 } ?? false
         center.nextTrackCommand.isEnabled = queue.map { $0.currentIndex + 1 < $0.entries.count } ?? false
         let info = MPNowPlayingInfoCenter.default()
@@ -2832,6 +2902,11 @@ final class PlaybackController: ObservableObject {
                 MPNowPlayingInfoPropertyIsLiveStream: snapshot.isLive]
             if let position = snapshot.position { metadata[MPNowPlayingInfoPropertyElapsedPlaybackTime] = position }
             if let duration = snapshot.duration { metadata[MPMediaItemPropertyPlaybackDuration] = duration }
+            if let artwork = nowPlayingArtwork.artwork { metadata[MPMediaItemPropertyArtwork] = artwork }
+            if let item = mediaItem {
+                metadata[MPNowPlayingInfoPropertyAvailableLanguageOptions] = nowPlayingLanguages.groups
+                metadata[MPNowPlayingInfoPropertyCurrentLanguageOptions] = nowPlayingLanguages.current(in: item)
+            }
             if let queue {
                 metadata[MPNowPlayingInfoPropertyPlaybackQueueIndex] = queue.currentIndex
                 metadata[MPNowPlayingInfoPropertyPlaybackQueueCount] = queue.entries.count
@@ -2857,6 +2932,134 @@ final class PlaybackController: ObservableObject {
             ProcessInfo.processInfo.endActivity(activity)
             self.activity = nil
         }
+    }
+}
+
+/// Session-scoped identifiers prevent commands for a retired item from selecting
+/// an unrelated track in its replacement. Only native media groups are exposed.
+@MainActor
+struct NowPlayingLanguages {
+    struct Entry {
+        let option: MPNowPlayingInfoLanguageOption
+        let native: AVMediaSelectionOption
+        let group: AVMediaSelectionGroup
+    }
+    private(set) var entries: [Entry] = []
+    private(set) var groups: [MPNowPlayingInfoLanguageOptionGroup] = []
+
+    init(audio: AVMediaSelectionGroup? = nil, subtitles: AVMediaSelectionGroup? = nil, generation: UUID = UUID()) {
+        for (type, group) in [(MPNowPlayingInfoLanguageOptionType.audible, audio), (.legible, subtitles)] {
+            guard let group else { continue }
+            let choices = group.options.enumerated().compactMap { index, native -> Entry? in
+                guard let supplied = native.makeNowPlayingInfoLanguageOption() else { return nil }
+                let label = native.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+                let safeLabel = label.isEmpty || label.count > 80 || label.contains("://")
+                    ? (type == .audible ? "Audio" : "Subtitles") + " \(index + 1)" : label
+                let option = MPNowPlayingInfoLanguageOption(type: type,
+                    languageTag: supplied.languageTag ?? "und", characteristics: supplied.languageOptionCharacteristics,
+                    displayName: safeLabel, identifier: "\(generation.uuidString)-\(type.rawValue)-\(index)")
+                return Entry(option: option, native: native, group: group)
+            }
+            guard !choices.isEmpty else { continue }
+            entries += choices
+            groups.append(MPNowPlayingInfoLanguageOptionGroup(languageOptions: choices.map(\.option),
+                defaultLanguageOption: choices.first { $0.native == group.defaultOption }?.option,
+                allowEmptySelection: group.allowsEmptySelection))
+        }
+    }
+
+    func entry(for option: MPNowPlayingInfoLanguageOption) -> Entry? {
+        guard let identifier = option.identifier else { return nil }
+        return entries.first { $0.option.identifier == identifier && $0.option.languageOptionType == option.languageOptionType }
+    }
+
+    func current(in item: AVPlayerItem) -> [MPNowPlayingInfoLanguageOption] {
+        entries.filter { item.currentMediaSelection.selectedMediaOption(in: $0.group) == $0.native }.map(\.option)
+    }
+}
+
+/// One optional poster per finite item. Its independent asset and decoder can
+/// be cancelled without cancelling AVPlayer's asset or changing its position.
+@MainActor
+final class NowPlayingArtworkLoader {
+    private(set) var artwork: MPMediaItemArtwork?
+    private var task: Task<Void, Never>?
+    private var deadline: Task<Void, Never>?
+    private var asset: AVURLAsset?
+    private var generator: AVAssetImageGenerator?
+    private var requestID = UUID()
+    private let timeout: Duration
+
+    init(timeout: Duration = .seconds(5)) { self.timeout = timeout }
+
+    func cancel() {
+        requestID = UUID()
+        deadline?.cancel(); deadline = nil
+        task?.cancel(); task = nil
+        generator?.cancelAllCGImageGeneration(); generator = nil
+        asset?.cancelLoading(); asset = nil
+        artwork = nil
+    }
+
+    func load(url: URL, allowVideoFrame: Bool, changed: @escaping @MainActor () -> Void) {
+        cancel()
+        let id = requestID
+        let asset = AVURLAsset(url: url)
+        self.asset = asset
+        task = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.requestID == id {
+                    self.deadline?.cancel(); self.deadline = nil
+                    self.task = nil; self.asset = nil; self.generator = nil
+                }
+            }
+            do {
+                let duration = try await asset.load(.duration).seconds
+                guard duration.isFinite, duration > 0 else { return }
+                var image: CGImage?
+                let metadata = (try? await asset.load(.commonMetadata)) ?? []
+                for item in metadata.prefix(64) where item.commonKey == .commonKeyArtwork {
+                    try Task.checkCancellation()
+                    guard let data = try? await item.load(.dataValue), data.count <= 4 * 1024 * 1024 else { continue }
+                    image = await Task.detached(priority: .utility) { Self.decode(data) }.value
+                    if image != nil { break }
+                }
+                try Task.checkCancellation()
+                if image == nil, allowVideoFrame {
+                    let generator = AVAssetImageGenerator(asset: asset)
+                    generator.appliesPreferredTrackTransform = true
+                    generator.maximumSize = CGSize(width: 640, height: 640)
+                    generator.requestedTimeToleranceBefore = .positiveInfinity
+                    generator.requestedTimeToleranceAfter = .positiveInfinity
+                    self.generator = generator
+                    let time = CMTime(seconds: min(1, duration / 10), preferredTimescale: 600)
+                    image = await withCheckedContinuation { continuation in
+                        generator.generateCGImagesAsynchronously(forTimes: [NSValue(time: time)]) { _, image, _, result, _ in
+                            continuation.resume(returning: result == .succeeded ? image : nil)
+                        }
+                    }
+                }
+                guard !Task.isCancelled, self.requestID == id, let image else { return }
+                let poster = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+                self.artwork = MPMediaItemArtwork(boundsSize: poster.size) { _ in poster }
+                changed()
+            } catch { /* Optional metadata must never fail playback or expose source errors. */ }
+        }
+        deadline = Task { [weak self, timeout] in
+            do { try await Task.sleep(for: timeout) } catch { return }
+            guard let self, self.requestID == id else { return }
+            self.cancel()
+        }
+    }
+
+    nonisolated private static func decode(_ data: Data) -> CGImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 640
+        ] as CFDictionary)
     }
 }
 

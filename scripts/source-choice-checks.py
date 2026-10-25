@@ -4,6 +4,7 @@
 Default checks inject candidates while exercising real AVPlayer loading.
 --yt-dlp adds generic extraction over local pages using the installed helper.
 --controller runs playback lifecycle and simulated AirPlay handoff regressions.
+--system-playback checks remote navigation, native language options and artwork.
 This suite shares system media services with the native/preparation/controller
 suites, so run it sequentially with those.
 """
@@ -25,7 +26,9 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--compile-only', action='store_true',
                     help='Build the checks without starting AVPlayer')
 parser.add_argument('--yt-dlp', help='Optional installed yt-dlp path for generic extraction over local fixture pages')
-parser.add_argument('--controller', action='store_true', help='Run ControllerChecks using the same fixtures')
+suite = parser.add_mutually_exclusive_group()
+suite.add_argument('--controller', action='store_true', help='Run ControllerChecks using the same fixtures')
+suite.add_argument('--system-playback', action='store_true', help='Run SystemPlaybackChecks with isolated media controls')
 args = parser.parse_args()
 
 (ROOT / 'build').mkdir(exist_ok=True)
@@ -42,7 +45,7 @@ def run(command, timeout=180):
 
 # Original synthetic fixtures only; never reuse a user-owned file. FFmpeg's
 # software encoder keeps this test independent of AVAssetWriter's hardware path.
-fixture_seconds = '10' if args.controller else '2'
+fixture_seconds = '10' if args.controller or args.system_playback else '2'
 ffmpeg = shutil.which('ffmpeg') or '/opt/homebrew/bin/ffmpeg'
 run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-n', '-f', 'lavfi',
      '-i', 'testsrc2=size=320x180:rate=24', '-t', fixture_seconds, '-c:v', 'libx264',
@@ -62,6 +65,22 @@ if args.controller:
          '-movflags', '+faststart', out / 'long-video.mp4'])
     FILES['/long-video.mp4'] = (out / 'long-video.mp4').read_bytes()
 CONTENT_TYPES = {}
+if args.system_playback:
+    (out / 'captions.srt').write_text('1\n00:00:00,000 --> 00:00:09,000\nSynthetic caption\n')
+    run([ffmpeg, '-v', 'error', '-nostdin', '-i', out / 'audio.mp4', '-i', out / 'captions.srt',
+         '-map', '0:v', '-map', '0:a', '-map', '0:a', '-map', '1:0', '-map', '1:0',
+         '-c:v', 'copy', '-c:a', 'copy', '-c:s', 'mov_text', '-movflags', '+faststart',
+         '-metadata:s:a:0', 'language=eng', '-metadata:s:a:1', 'language=ita',
+         '-disposition:a:0', 'default', '-disposition:a:1', '0',
+         '-metadata:s:s:0', 'language=eng', '-metadata:s:s:1', 'language=ita',
+         '-disposition:s:0', '0', '-disposition:s:1', '0', out / 'tracks.mp4'])
+    run([ffmpeg, '-v', 'error', '-nostdin', '-f', 'lavfi', '-i', 'color=red:size=64x64',
+         '-frames:v', '1', out / 'cover.jpg'])
+    run([ffmpeg, '-v', 'error', '-nostdin', '-i', out / 'audio.mp4', '-i', out / 'cover.jpg',
+         '-map', '0', '-map', '1', '-c', 'copy', '-disposition:v:1', 'attached_pic',
+         '-movflags', '+faststart', out / 'artwork.mp4'])
+    for name in ['tracks.mp4', 'artwork.mp4']:
+        FILES['/' + name] = (out / name).read_bytes()
 run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-n', '-f', 'lavfi',
      '-i', 'testsrc2=size=1920x1080:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
      '-t', '1', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
@@ -136,7 +155,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 pass
 
 
-checks = 'ControllerChecks' if args.controller else 'SourceChoiceChecks'
+checks = 'SystemPlaybackChecks' if args.system_playback else 'ControllerChecks' if args.controller else 'SourceChoiceChecks'
 binary = build / checks
 server = None
 try:
@@ -155,15 +174,15 @@ try:
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f'http://127.0.0.1:{server.server_port}'
-    arguments = [binary, base] if args.controller else [binary, base, out / 'video.mp4']
-    if args.yt_dlp and not args.controller:
+    arguments = [binary, base] if args.controller or args.system_playback else [binary, base, out / 'video.mp4']
+    if args.yt_dlp and not args.controller and not args.system_playback:
         arguments.append(args.yt_dlp)
     result = run(arguments, timeout=300)
     print(result.stdout, end='')
     print(result.stderr, end='')
     (out / 'results.json').write_text(json.dumps(
         dict(checks='passed', suite=checks,
-             genericExtractor='passed' if args.yt_dlp and not args.controller else 'not run',
+             genericExtractor='passed' if args.yt_dlp and not args.controller and not args.system_playback else 'not run',
              receiver='untested'), indent=2) + '\n')
     print(f'Report: {out / "results.json"}')
 except subprocess.CalledProcessError as error:

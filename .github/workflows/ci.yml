@@ -107,6 +107,8 @@ jobs:
 
       - name: Playback lifecycle checks
         run: python3 scripts/source-choice-checks.py --controller
+      - name: System playback controls and artwork
+        run: python3 scripts/source-choice-checks.py --system-playback
 
       - name: IPTV catalog and channel checks
         run: python3 scripts/iptv-checks.py

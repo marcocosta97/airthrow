@@ -78,8 +78,8 @@ public enum HLSRenditions {
         return result
     }
 
-    /// Preserve rendition groups, keys and session attributes. Only the chosen
-    /// STREAM-INF/URI pair remains; resource rewriting belongs to the relay.
+    /// Preserve rendition groups, keys, session attributes and compatible trick
+    /// play tracks. Only the chosen normal STREAM-INF/URI pair remains.
     public static func selecting(_ selected: HLSVariantSelection, in data: Data) throws -> Data {
         let variants = variants(data)
         guard variants.filter({ $0 == selected }).count == 1,
@@ -101,11 +101,37 @@ public enum HLSRenditions {
                     index += 1
                 }
             } else {
-                if !line.hasPrefix("#EXT-X-I-FRAME-STREAM-INF:") { output.append(lines[index]) }
+                if !line.hasPrefix("#EXT-X-I-FRAME-STREAM-INF:") || compatibleIFrame(line, with: selected) {
+                    output.append(lines[index])
+                }
                 index += 1
             }
         }
         return Data(output.joined(separator: "\n").utf8)
+    }
+
+    private static func compatibleIFrame(_ line: String, with selected: HLSVariantSelection) -> Bool {
+        guard let attributes = HLSMaster.attributes(String(line.dropFirst("#EXT-X-I-FRAME-STREAM-INF:".count))),
+              let uri = attributes["URI"], !uri.isEmpty else { return false }
+        let normal = videoCodecs(selected.codecs)
+        let trickPlay = videoCodecs(attributes["CODECS"] ?? "")
+        // Missing codec declarations cannot establish incompatibility. Image
+        // sequences are also permitted by Apple's AirPlay authoring rules.
+        return normal.isEmpty || trickPlay.isEmpty || trickPlay.contains("mjpg")
+            || !normal.isDisjoint(with: trickPlay)
+    }
+
+    private static func videoCodecs(_ codecs: String) -> Set<String> {
+        Set(codecs.split(separator: ",").compactMap { codec in
+            switch codec.trimmingCharacters(in: .whitespaces).lowercased().split(separator: ".").first {
+            case "avc1", "avc3": "avc"
+            case "hvc1", "hev1": "hevc"
+            case "dvh1", "dvhe": "dolby-vision"
+            case "av01": "av1"
+            case "mjpg": "mjpg"
+            default: nil
+            }
+        })
     }
 
     static func candidates(_ data: Data, for adaptive: MediaCandidate) -> [MediaCandidate] {

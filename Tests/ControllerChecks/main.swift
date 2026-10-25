@@ -83,7 +83,7 @@ private final class HandoffPlayer: AVPlayer, @unchecked Sendable {
 struct ControllerChecks {
     @MainActor static func main() async throws {
         let base = CommandLine.arguments[1]
-        let controller = PlaybackController()
+        let controller = PlaybackController(historyStore: MediaHistoryStore(defaults: nil), integratesWithSystemPlayback: false)
         defer { controller.shutdown() }
         let player = controller.player
 
@@ -163,7 +163,7 @@ struct ControllerChecks {
                 PlaylistEntry(url: URL(string: "https://www.youtube.com/watch?v=BaW_jenozKc"), title: "First"),
                 PlaylistEntry(url: URL(string: "https://www.youtube.com/watch?v=jNQXAC9IVRw"), title: "Second")
             ], truncated: false)
-        }, prepareSource: nil)
+        }, prepareSource: nil, integratesWithSystemPlayback: false)
         defer { queueController.shutdown() }
         func waitForQueue(_ index: Int, seconds: Double = 10) async throws {
             let deadline = Date().addingTimeInterval(seconds)
@@ -200,7 +200,7 @@ struct ControllerChecks {
                 return ResolvedPlaylist(title: "Stale", entries: [
                     PlaylistEntry(url: URL(string: "https://www.youtube.com/watch?v=BaW_jenozKc"), title: "Stale")
                 ], truncated: false)
-            }, prepareSource: nil)
+            }, prepareSource: nil, integratesWithSystemPlayback: false)
         defer { replacementController.shutdown() }
         try replacementController.load("https://www.youtube.com/playlist?list=PL12345678")
         try replacementController.load(base + "/audio.mp4")
@@ -237,7 +237,7 @@ struct ControllerChecks {
                 PlaylistEntry(url: nil, title: "Unavailable", unavailableReason: "Unavailable"),
                 PlaylistEntry(url: URL(string: "https://www.youtube.com/watch?v=first"), title: "First")
             ], truncated: false)
-        }, prepareSource: nil)
+        }, prepareSource: nil, integratesWithSystemPlayback: false)
         defer { sendController.shutdown() }
         func waitForSend(_ state: PlaybackState, seconds: Double = 10) async throws {
             let deadline = Date().addingTimeInterval(seconds)
@@ -337,7 +337,8 @@ struct ControllerChecks {
         print("PASS playlist send propagates play intent and Stop cancels pending replacement")
 
         let handoffPlayer = HandoffPlayer()
-        let handoffController = PlaybackController(player: handoffPlayer, prepareSource: nil)
+        let handoffController = PlaybackController(player: handoffPlayer, historyStore: MediaHistoryStore(defaults: nil),
+                                                  prepareSource: nil, integratesWithSystemPlayback: false)
         defer { handoffController.shutdown() }
         func waitForHandoff(_ state: PlaybackState, seconds: Double = 12) async throws {
             let deadline = Date().addingTimeInterval(seconds)
@@ -424,7 +425,7 @@ struct ControllerChecks {
             if await qualityLoads.next() == 4 { try await Task.sleep(for: .seconds(35)) }
             return [MediaCandidate(source: ResolvedSource(url: qualityURL), id: "low", height: 720),
                     MediaCandidate(source: ResolvedSource(url: qualityURL), id: "high", height: 1080)]
-        }, allowVideoConversion: true, prepareSource: nil)
+        }, allowVideoConversion: true, prepareSource: nil, integratesWithSystemPlayback: false)
         defer { qualityController.shutdown() }
         func waitForQuality(_ state: PlaybackState) async throws {
             let deadline = Date().addingTimeInterval(10)

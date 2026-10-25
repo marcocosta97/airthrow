@@ -263,6 +263,10 @@ let tests: [(String, () throws -> Void)] = [
         #EXT-X-VERSION:6
         #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",URI="audio.m3u8"
         #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",URI="subs.m3u8"
+        #EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=40000,CODECS="avc1.64001f",URI="avc-iframes.m3u8"
+        #EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=40000,CODECS="hvc1.1.6.L93.B0",URI="hevc-iframes.m3u8"
+        #EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=40000,CODECS="mjpg",URI="image-iframes.m3u8"
+        #EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=40000,URI="unknown-iframes.m3u8"
         #EXT-X-STREAM-INF:BANDWIDTH=600000,RESOLUTION=426x240,FRAME-RATE=30,CODECS="avc1.64001f,mp4a.40.2",AUDIO="audio",SUBTITLES="subs"
         low.m3u8?token=fixture
         #EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=426x240,FRAME-RATE=30,CODECS="avc1.64001f,mp4a.40.2",AUDIO="audio",SUBTITLES="subs"
@@ -276,6 +280,12 @@ let tests: [(String, () throws -> Void)] = [
         let pinned = String(decoding: try HLSRenditions.selecting(variants[0], in: data), as: UTF8.self)
         try check(pinned.contains("low.m3u8") && !pinned.contains("medium.m3u8") && !pinned.contains("high.m3u8")
                   && pinned.contains("audio.m3u8") && pinned.contains("subs.m3u8"), "Manual master lost its selected video, audio or subtitles")
+        try check(pinned.contains("avc-iframes.m3u8") && pinned.contains("image-iframes.m3u8")
+                  && pinned.contains("unknown-iframes.m3u8") && !pinned.contains("hevc-iframes.m3u8"),
+                  "Manual quality lost compatible trick play or retained an incompatible codec")
+        let undeclared = Data(master.replacingOccurrences(of: "CODECS=\"avc1.64001f,mp4a.40.2\",", with: "").utf8)
+        let undeclaredPinned = String(decoding: try HLSRenditions.selecting(HLSRenditions.variants(undeclared)[0], in: undeclared), as: UTF8.self)
+        try check(undeclaredPinned.contains("hevc-iframes.m3u8"), "Absent normal codec declarations incorrectly removed trick play")
         let renewed = HLSRenditions.variants(Data(master.replacingOccurrences(of: "token=fixture", with: "token=renewed").utf8))
         try check(renewed.map(\.id) == variants.map(\.id), "Manual rendition identity depended on expiring addresses")
         try check(HLSRenditions.variants(Data(repeating: 65, count: 1_048_577)).isEmpty, "Unbounded master metadata accepted")
