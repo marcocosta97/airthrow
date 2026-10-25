@@ -545,6 +545,14 @@ struct IPTVChecks {
                   && controller.snapshot.diagnostics?.videoHeight == 180,
                   "Native video diagnostics expose only codec identifiers and encoded dimensions")
         let player = controller.player, retainedItem = player.currentItem
+        try controller.enqueue(base.appendingPathComponent("slow.mp4").absoluteString)
+        try check(controller.snapshot.queue?.items.count == 2 && controller.player === player
+                  && player.currentItem === retainedItem,
+                  "Enqueue starts a queue without replacing the current player item")
+        try controller.enqueue(base.appendingPathComponent("video.mp4").absoluteString)
+        try check(controller.snapshot.queue?.items.count == 3 && controller.snapshot.queue?.currentIndex == 0
+                  && player.currentItem === retainedItem,
+                  "Appending another source preserves the current queue position and media")
         try controller.load(xtreamURL.absoluteString)
         try await wait { !controller.iptvImporting }
         try check(controller.iptvCatalog?.channels.count == 3 && controller.iptvImportError == nil
