@@ -244,17 +244,8 @@ struct LibraryShell: View {
             if controller.iptvCatalog != nil {
                 IPTVPanel(controller: controller, catalogID: controller.iptvCatalog?.id,
                           selectedID: controller.selectedIPTVChannelID).equatable()
-            } else if !controller.xtreamPlaylists.isEmpty || !controller.iptvPlaylists.isEmpty {
-                playlistOverview
             } else {
-                ContentUnavailableView {
-                    Label("No playlists", systemImage: "tv")
-                } description: {
-                    Text("Add an M3U playlist or Xtream account. Your playlists appear here and in the sidebar.")
-                } actions: {
-                    Button("Add Playlist…", action: openSource)
-                    Button("Add Xtream Server…") { presentation.xtreamPlaylistVisible = true }
-                }
+                playlistOverview
             }
         case .xtream:
             if let library = controller.xtreamLibrary {
@@ -267,39 +258,43 @@ struct LibraryShell: View {
     }
     private var playlistOverview: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Playlists").font(.headline)
-                Spacer()
+            LibraryHeader(title: "Playlists") {
                 Menu("Add Playlist", systemImage: "plus") {
                     Button("M3U Playlist…", action: openSource)
                     Button("Xtream Account…") { presentation.xtreamPlaylistVisible = true }
                 }
-            }.padding(.horizontal, 16).padding(.vertical, 12)
-            List {
-                ForEach(controller.xtreamPlaylists) { playlist in
-                    HStack {
-                        Button {
-                            controller.openXtreamPlaylist(playlist.id, section: .live)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Label(playlist.title, systemImage: "rectangle.stack")
-                                Text("Xtream · Live TV, Films and TV Series").font(.caption).foregroundStyle(.secondary)
-                            }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-                        }.buttonStyle(.plain)
-                        Button("Rename…") { renamingPlaylist = playlist }.buttonStyle(.bordered).controlSize(.small)
-                    }.padding(.vertical, 6)
-                }
-                ForEach(controller.iptvPlaylists) { playlist in
-                    Button { controller.selectIPTVPlaylist(playlist.id) } label: {
-                        Label(playlist.title, systemImage: "tv")
-                            .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-                    }.buttonStyle(.plain).padding(.vertical, 6)
-                }
             }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .contentMargins(.horizontal, 0, for: .scrollContent)
-            .contentMargins(.top, 0, for: .scrollContent)
+            if controller.xtreamPlaylists.isEmpty && controller.iptvPlaylists.isEmpty {
+                ContentUnavailableView {
+                    Label("No playlists", systemImage: "rectangle.stack")
+                } description: {
+                    Text("Add an M3U playlist or Xtream account. Your playlists appear here and in the sidebar.")
+                } actions: {
+                    Button("Add Playlist…", action: openSource)
+                    Button("Add Xtream Server…") { presentation.xtreamPlaylistVisible = true }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List {
+                    ForEach(controller.xtreamPlaylists) { playlist in
+                        HStack(spacing: 8) {
+                            Button {
+                                controller.openXtreamPlaylist(playlist.id, section: .live)
+                            } label: {
+                                LibraryItemLabel(title: playlist.title,
+                                    subtitle: "Xtream · Live TV, Films and TV Series", kind: .xtream)
+                            }.buttonStyle(.plain)
+                            Button("Rename…") { renamingPlaylist = playlist }.buttonStyle(.bordered).controlSize(.small)
+                        }.libraryRowStyle()
+                    }
+                    ForEach(controller.iptvPlaylists) { playlist in
+                        Button { controller.selectIPTVPlaylist(playlist.id) } label: {
+                            LibraryItemLabel(title: playlist.title, subtitle: "Channel playlist", kind: .iptv)
+                        }.buttonStyle(.plain).libraryRowStyle()
+                    }
+                }
+                .libraryListStyle()
+            }
         }
     }
 

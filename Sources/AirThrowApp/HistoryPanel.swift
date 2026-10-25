@@ -30,23 +30,18 @@ struct HistoryPanel: View {
     @FocusState private var focusedRemovalID: UUID?
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("History").font(.headline)
-                Spacer(minLength: 8)
-                Menu {
+            LibraryHeader(title: "History") {
+                Menu("Options", systemImage: "ellipsis") {
+                    if controller.snapshot.queue != nil {
+                        Button("Show Queue", systemImage: "list.bullet") { controller.inspectorPage = .playlist }
+                        Divider()
+                    }
                     Button("Clear History", role: .destructive) { confirmClear = true }
                         .disabled(!controller.history.contains(where: { !$0.isPinned }))
                         .help("Remove all unpinned entries")
-                } label: { Image(systemName: "ellipsis.circle") }
-                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                }
                     .help("History options").accessibilityLabel("History options")
-            }.padding(.horizontal, 16).padding(.vertical, 12)
-            if controller.snapshot.queue != nil {
-                Button { controller.inspectorPage = .playlist } label: {
-                    Label("Current playlist", systemImage: "list.bullet")
-                }.padding(.horizontal, 16).padding(.bottom, 12)
             }
-            Divider()
             if controller.history.isEmpty {
                 ContentUnavailableView {
                     Label("No recent sources", systemImage: "clock")
@@ -62,19 +57,9 @@ struct HistoryPanel: View {
                         Button {
                             controller.perform { try controller.selectHistoryEntry(entry.id) }
                         } label: {
-                            HStack(spacing: 8) {
-                                Image(systemName: entry.kind == .iptv || entry.kind == .xtream ? "tv" : entry.kind == .playlist ? "list.bullet" : "play.rectangle")
-                                    .foregroundStyle(.secondary).frame(width: 18).accessibilityHidden(true)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(entry.title).lineLimit(2)
-                                    Text(entry.kind == .xtream ? "Xtream · \(entry.location)" : entry.kind == .iptv ? "Channel playlist · \(entry.location)" : entry.location)
-                                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                                }
-                                Spacer(minLength: 0)
-                                if entry.isPinned {
-                                    Image(systemName: "pin.fill").font(.caption).foregroundStyle(.secondary).accessibilityHidden(true)
-                                }
-                            }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                            LibraryItemLabel(title: entry.title,
+                                subtitle: entry.kind == .xtream ? "Xtream · \(entry.location)" : entry.kind == .iptv ? "Channel playlist · \(entry.location)" : entry.location,
+                                kind: entry.kind, isPinned: entry.isPinned)
                         }.buttonStyle(.plain).help("Open \(entry.title)").accessibilityLabel("Open \(entry.title)")
                             .accessibilityValue(entry.isPinned ? "Pinned" : "")
                             .accessibilityAction(named: Text("Remove from History")) { controller.removeHistoryEntry(entry.id) }
@@ -90,14 +75,11 @@ struct HistoryPanel: View {
                                 .allowsHitTesting(removalVisible(for: entry))
                                 .help("Remove from history").accessibilityLabel("Remove \(entry.title) from history")
                         }.frame(width: 18)
-                    }.frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
+                    }.libraryRowStyle()
                         .onHover { inside in
                             if inside { hoveredEntryID = entry.id }
                             else if hoveredEntryID == entry.id { hoveredEntryID = nil }
                         }
-                        .listRowInsets(EdgeInsets(top: 5, leading: 8, bottom: 5, trailing: 8))
-                        .listRowSeparator(.hidden)
                         .contextMenu {
                             Button(entry.isPinned ? "Unpin" : "Pin", systemImage: entry.isPinned ? "pin.slash" : "pin") {
                                 controller.toggleHistoryPin(entry.id)
@@ -110,10 +92,7 @@ struct HistoryPanel: View {
                                 controller.removeHistoryEntry(entry.id)
                             }
                         }
-                }.listStyle(.plain)
-                    .scrollContentBackground(.hidden)
-                    .contentMargins(.horizontal, 0, for: .scrollContent)
-                    .contentMargins(.top, 0, for: .scrollContent)
+                }.libraryListStyle()
             }
         }
         .confirmationDialog("Clear history?", isPresented: $confirmClear, titleVisibility: .visible) {
