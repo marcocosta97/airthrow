@@ -55,7 +55,7 @@ def config_list(name, extra):
 project_configs = config_list('Project', {})
 app_configs = config_list('App', dict(PRODUCT_NAME='AirThrow', PRODUCT_MODULE_NAME='AirThrowApp', EXECUTABLE_NAME='AirThrowApp', INFOPLIST_FILE='Resources/Info.plist', PRODUCT_BUNDLE_IDENTIFIER='it.mcosta.airthrow', CODE_SIGN_STYLE='Automatic', ENABLE_HARDENED_RUNTIME='YES', COMBINE_HIDPI_IMAGES='YES', ENABLE_USER_SCRIPT_SANDBOXING='NO', ASSETCATALOG_COMPILER_APPICON_NAME='AppIcon'))
 cli_configs = config_list('CLI', dict(PRODUCT_NAME='athrow', PRODUCT_MODULE_NAME='AirThrowCLI', CODE_SIGN_STYLE='Automatic', ENABLE_HARDENED_RUNTIME='YES', SKIP_INSTALL='YES'))
-share_configs = config_list('Share', dict(PRODUCT_NAME='AirThrowShare', PRODUCT_MODULE_NAME='AirThrowShare', INFOPLIST_FILE='Resources/ShareExtension-Info.plist', PRODUCT_BUNDLE_IDENTIFIER='it.mcosta.airthrow.share', CODE_SIGN_STYLE='Automatic', CODE_SIGN_ENTITLEMENTS='Resources/ShareExtension.entitlements', ENABLE_HARDENED_RUNTIME='YES', APPLICATION_EXTENSION_API_ONLY='YES', SKIP_INSTALL='YES', ASSETCATALOG_COMPILER_APPICON_NAME='AppIcon'))
+share_configs = config_list('Share', dict(PRODUCT_NAME='AirThrowShare', PRODUCT_MODULE_NAME='AirThrowShare', ENABLE_USER_SCRIPT_SANDBOXING='NO', INFOPLIST_FILE='Resources/ShareExtension-Info.plist', PRODUCT_BUNDLE_IDENTIFIER='it.mcosta.airthrow.share', CODE_SIGN_STYLE='Automatic', CODE_SIGN_ENTITLEMENTS='Resources/ShareExtension.entitlements', ENABLE_HARDENED_RUNTIME='YES', APPLICATION_EXTENSION_API_ONLY='YES', SKIP_INSTALL='YES', ASSETCATALOG_COMPILER_APPICON_NAME='AppIcon'))
 
 def source_phase(name, folders, individual=()):
     builds = []
@@ -77,15 +77,19 @@ share_embedded = add('EmbeddedShare', dict(isa='PBXBuildFile', fileRef=share_pro
 share_copy = add('CopyShare', dict(isa='PBXCopyFilesBuildPhase', buildActionMask='2147483647', dstPath='', dstSubfolderSpec='13', files=[share_embedded], name='Embed Share Extension', runOnlyForDeploymentPostprocessing='0'))
 share_icon = add('ShareIconBuild', dict(isa='PBXBuildFile', fileRef=icon))
 share_resources = add('ShareResources', dict(isa='PBXResourcesBuildPhase', buildActionMask='2147483647', files=[share_icon], runOnlyForDeploymentPostprocessing='0'))
-add('ShareTarget', dict(isa='PBXNativeTarget', buildConfigurationList=share_configs, buildPhases=[source_phase('Share', ['AirThrowShareExtension'], ['Sources/AirThrowCore/Protocol.swift', 'Sources/AirThrowCore/MediaHandoff.swift']), share_resources], buildRules=[], dependencies=[], name='AirThrowShare', productName='AirThrowShare', productReference=share_product, productType='com.apple.product-type.app-extension'))
+share_version = add('ShareVersion', dict(isa='PBXShellScriptBuildPhase', buildActionMask='2147483647', files=[],
+    name='Stamp extension version', inputPaths=['$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)'], outputPaths=[],
+    alwaysOutOfDate='1', runOnlyForDeploymentPostprocessing='0', shellPath='/bin/bash',
+    shellScript='bash "$SRCROOT/scripts/write-build-version.sh" "$TARGET_BUILD_DIR/$INFOPLIST_PATH"\n'))
+add('ShareTarget', dict(isa='PBXNativeTarget', buildConfigurationList=share_configs, buildPhases=[source_phase('Share', ['AirThrowShareExtension'], ['Sources/AirThrowCore/Protocol.swift', 'Sources/AirThrowCore/MediaHandoff.swift']), share_resources, share_version], buildRules=[], dependencies=[], name='AirThrowShare', productName='AirThrowShare', productReference=share_product, productType='com.apple.product-type.app-extension'))
 icon_build = add('IconBuild', dict(isa='PBXBuildFile', fileRef=icon))
 waiting_build = add('ReadyToPlayBuild', dict(isa='PBXBuildFile', fileRef=waiting))
 catalog_build = add('LocalizableBuild', dict(isa='PBXBuildFile', fileRef=catalog))
 resources = add('AppResources', dict(isa='PBXResourcesBuildPhase', buildActionMask='2147483647', files=[icon_build, waiting_build, catalog_build], runOnlyForDeploymentPostprocessing='0'))
 commit_phase = add('BuildCommit', dict(isa='PBXShellScriptBuildPhase', buildActionMask='2147483647', files=[],
-    name='Stamp version and commit', inputPaths=[], outputPaths=['$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/BuildCommit.txt'],
+    name='Stamp version and commit', inputPaths=['$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)'], outputPaths=['$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/BuildCommit.txt'],
     alwaysOutOfDate='1', runOnlyForDeploymentPostprocessing='0', shellPath='/bin/bash',
-    shellScript='bash "$SRCROOT/scripts/write-build-commit.sh" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/BuildCommit.txt"\nbash "$SRCROOT/scripts/write-build-version.sh" "$TARGET_BUILD_DIR/$INFOPLIST_PATH" "$BUILT_PRODUCTS_DIR/AirThrowShare.appex/Contents/Info.plist"\n'))
+    shellScript='bash "$SRCROOT/scripts/write-build-commit.sh" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/BuildCommit.txt"\nbash "$SRCROOT/scripts/write-build-version.sh" "$TARGET_BUILD_DIR/$INFOPLIST_PATH"\n'))
 app_target = add('AppTarget', dict(isa='PBXNativeTarget', buildConfigurationList=app_configs, buildPhases=[source_phase('App', ['AirThrowCore', 'AirThrowApp']), resources, copy, share_copy, commit_phase], buildRules=[], dependencies=[dependency, share_dependency], name='AirThrow', productName='AirThrow', productReference=app_product, productType='com.apple.product-type.application'))
 add('Project', dict(isa='PBXProject', attributes=dict(LastUpgradeCheck='1600'), buildConfigurationList=project_configs, compatibilityVersion='Xcode 14.0', developmentRegion='en', hasScannedForEncodings='0', knownRegions=['en', 'Base'], mainGroup=main_group, productRefGroup=products, projectDirPath='', projectRoot='', targets=[app_target, cli_target, share_target]))
 project = root / 'AirThrow.xcodeproj'
