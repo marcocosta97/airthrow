@@ -17,7 +17,8 @@ AirPlay receivers. A compact native Mac app controls playback without mirroring
 your screen.
 
 <p align="center">
-  <img src="docs/images/controller.png" width="530" alt="AirThrow with a Remotion sample video loaded, ready to choose an AirPlay receiver">
+  <img src="docs/images/controller.png" width="760" alt="AirThrow queue with illustrative YouTube, Twitch, IPTV film, live TV and local file titles">
+  <br><sub>Illustrative titles from YouTube, Twitch, IPTV and local files.</sub>
 </p>
 
 - **Links and files** — direct video URLs, website streams (e.g. Youtube, Twitch), local videos and playlists.
@@ -54,8 +55,8 @@ This produces a locally signed app, a ZIP archive, and the `build/athrow` CLI.
 
 ## Play a video
 
-1. Paste a direct video URL, a website link, or a local file path, or drop a
-   file onto the source area, then click **Load**.
+1. Click **+**, paste a video URL or file path, then click **Play**.
+   You can also drop a file onto the window.
 2. In **Video options**, choose the source quality, enhancement and output resolution,
    then close the menu to apply your changes. Audio and supported subtitles
    can be selected under **Source**.
@@ -94,12 +95,16 @@ its path to `athrow open`.
 
 ## IPTV and Xtream
 
-Load an M3U/M3U8 channel playlist link or local playlist from **Source**, then
-choose a channel in the sidebar. For Xtream, use **File → Add Xtream Server…**
-and enter your server address and account details.
+Click **+** to load an M3U/M3U8 playlist, then choose a channel from its sidebar entry.
+For Xtream, use **File → Add Xtream Server…** and enter your server address and account details.
 
 Browse Xtream live TV, films and series by category or search. Programme guides
 are available when provided by the server.
+
+<p align="center">
+  <img src="docs/images/live-tv.png" width="760" alt="AirThrow live TV library with category filtering, channel search and playback controls">
+  <br><sub>Live TV with an example channel playlist.</sub>
+</p>
 
 ## Limitations
 
