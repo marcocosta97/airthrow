@@ -22,7 +22,7 @@ your screen.
 </p>
 
 - **Links and files** — direct video URLs, website streams (e.g. Youtube, Twitch), local videos and playlists.
-- **IPTV and Xtream** — channel playlists, plus Xtream live TV, films and series.
+- **IPTV and Xtream** *(experimental)* — channel playlists, plus Xtream live TV, films and series.
 - **Playback options** — video and audio sources, supported subtitles, and optional
   clean up and upscaling to 1080p or 4K.
 - **One session** — control playback from the app, menu bar or `athrow` CLI.
