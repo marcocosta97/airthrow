@@ -73,8 +73,15 @@ struct ControllerWindowView: View {
             .accessibilityLabel(presentation.playlistVisible ? "Hide sidebar" : "Show sidebar")
         }
         if !compact, let label = receiverConnection.toolbarLabel {
-            ToolbarItem(placement: .principal) {
-                ReceiverToolbarTitle(label: label, connecting: receiverConnection.phase == .connecting)
+            if #available(macOS 26, *) {
+                ToolbarItem(placement: .principal) {
+                    ReceiverToolbarTitle(label: label, connecting: receiverConnection.phase == .connecting)
+                }
+                .sharedBackgroundVisibility(.hidden)
+            } else {
+                ToolbarItem(placement: .principal) {
+                    ReceiverToolbarTitle(label: label, connecting: receiverConnection.phase == .connecting)
+                }
             }
         }
         ToolbarItem(placement: .primaryAction) {

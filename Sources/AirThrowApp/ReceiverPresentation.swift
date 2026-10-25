@@ -11,10 +11,11 @@ struct ReceiverToolbarTitle: View {
 
     var body: some View {
         Text(label)
-            .font(.headline)
+            .font(.subheadline.weight(.medium))
             .lineLimit(1)
             .truncationMode(.tail)
-            .frame(maxWidth: 180)
+            .fixedSize()
+            .padding(.horizontal, 8)
             .foregroundStyle(connecting ? Color.secondary : Color.primary)
             .accessibilityLabel("AirPlay receiver")
             .accessibilityValue(label)

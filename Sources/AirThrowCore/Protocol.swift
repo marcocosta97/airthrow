@@ -835,7 +835,7 @@ public struct MenuControlState: Equatable, Sendable {
 /// One row of the status-item menu. AppKit renders these values but does not
 /// independently decide control availability.
 public enum MenuElement: Equatable, Sendable {
-    case card(title: String, status: String)
+    case card(title: String, status: String, detail: String)
     case separator
     case controls(MenuControlState)
     case command(MenuCommand)
@@ -848,8 +848,9 @@ public enum MenuModel {
     public static func controlCommands(for controls: MenuControlState) -> [MenuCommand] {
         var commands: [MenuCommand] = []
         if controls.playlist != nil { commands.append(.previous) }
-        commands += [.skipBackward, .togglePlayback, .stop, .skipForward]
+        commands += [.skipBackward, .togglePlayback, .skipForward]
         if controls.playlist != nil { commands.append(.next) }
+        commands.append(.stop)
         return commands
     }
 
@@ -870,7 +871,7 @@ public enum MenuModel {
             canSkipForward: PlaybackPolicy.canSkip(snapshot, by: skipInterval)
         )
         return [
-            .card(title: snapshot.title, status: statusText(snapshot)),
+            .card(title: snapshot.title, status: statusText(snapshot), detail: detailText(snapshot)),
             .separator,
             .controls(controls),
             .separator,
@@ -880,22 +881,21 @@ public enum MenuModel {
     }
 
     private static func statusText(_ snapshot: PlaybackSnapshot) -> String {
-        let state = PlaybackPolicy.stateLabel(snapshot)
-        guard snapshot.externalPlaybackActive else {
-            return snapshot.state == .idle || snapshot.state == .awaitingReceiver
-                ? "AirPlay not connected"
-                : "\(state) · AirPlay not connected"
-        }
+        if snapshot.receiverWaiting == true { return "Ready for your next video" }
+        // Connection is reported separately, and only from confirmed player state.
+        return snapshot.state == .playing ? "Playing" : PlaybackPolicy.stateLabel(snapshot)
+    }
+
+    private static func detailText(_ snapshot: PlaybackSnapshot) -> String {
+        guard snapshot.externalPlaybackActive else { return "AirPlay not connected" }
+        if snapshot.receiverWaiting == true { return "AirPlay connected" }
         if snapshot.isLive {
-            let position = LivePolicy.positionLabel(snapshot)
-            return "\(state) · \(position)"
+            return "AirPlay connected · \(LivePolicy.positionLabel(snapshot))"
         }
-        guard snapshot.position != nil || snapshot.duration != nil else {
-            return "\(state) · AirPlay connected"
-        }
+        guard snapshot.position != nil || snapshot.duration != nil else { return "AirPlay connected" }
         let position = PlaybackFormat.time(snapshot.position)
-        guard let duration = snapshot.duration else { return "\(state) · \(position)" }
-        return "\(state) · \(position) / \(PlaybackFormat.time(duration))"
+        guard let duration = snapshot.duration else { return "AirPlay connected · \(position)" }
+        return "AirPlay connected · \(position) / \(PlaybackFormat.time(duration))"
     }
 }
 

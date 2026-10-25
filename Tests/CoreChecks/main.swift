@@ -382,7 +382,7 @@ let tests: [(String, () throws -> Void)] = [
         snapshot.title = "clip.mp4"
         var elements = MenuModel.elements(for: snapshot)
         try check(elements.count == 6, "Unexpected menu element count")
-        try check(elements[0] == .card(title: "clip.mp4", status: "AirPlay not connected"),
+        try check(elements[0] == .card(title: "clip.mp4", status: "Ready for your next video", detail: "AirPlay not connected"),
                   "Idle menu card was wrong")
         guard case .controls(let idle) = elements[2] else {
             throw CheckFailure(message: "Menu control row was missing")
@@ -407,7 +407,7 @@ let tests: [(String, () throws -> Void)] = [
                     QueueItemSnapshot(title: "Two", state: .current),
                     QueueItemSnapshot(title: "Three", state: .pending)], truncated: false)
         elements = MenuModel.elements(for: snapshot)
-        try check(elements[0] == .card(title: "clip.mp4", status: "Paused · 1:23 / 4:56"),
+        try check(elements[0] == .card(title: "clip.mp4", status: "Paused", detail: "AirPlay connected · 1:23 / 4:56"),
                   "Paused menu card was wrong")
         guard case .controls(let paused) = elements[2] else {
             throw CheckFailure(message: "Playlist control row was missing")
@@ -415,8 +415,19 @@ let tests: [(String, () throws -> Void)] = [
         try check(paused.playlist == MenuPlaylistControls(canPrevious: true, canNext: true),
                   "Playlist navigation enablement was wrong")
         try check(MenuModel.controlCommands(for: paused) ==
-                  [.previous, .skipBackward, .togglePlayback, .stop, .skipForward, .next],
+                  [.previous, .skipBackward, .togglePlayback, .skipForward, .next, .stop],
                   "Playlist control order was wrong")
+        snapshot.externalPlaybackActive = false
+        snapshot.state = .playing
+        try check(MenuModel.elements(for: snapshot)[0] ==
+                  .card(title: "clip.mp4", status: "Playing", detail: "AirPlay not connected"),
+                  "Menu inferred an AirPlay connection from playback state")
+        snapshot.externalPlaybackActive = true
+        snapshot.receiverWaiting = true
+        try check(MenuModel.elements(for: snapshot)[0] ==
+                  .card(title: "clip.mp4", status: "Ready for your next video", detail: "AirPlay connected"),
+                  "Receiver waiting screen exposed its playback time as user media")
+        snapshot.receiverWaiting = nil
         snapshot.state = .loading
         elements = MenuModel.elements(for: snapshot)
         guard case .controls(let loading) = elements[2] else {

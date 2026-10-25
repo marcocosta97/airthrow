@@ -47,6 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var menuIsOpen = false
     private var playbackMenuItems: [MenuCommand: NSMenuItem] = [:]
     private var menuCardView: MenuCardView?
+    private var menuCardItem: NSMenuItem?
     private var menuControlRow: MenuControlRow?
     private var menuControlsItem: NSMenuItem?
     private var terminating = false
@@ -666,13 +667,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menu.removeAllItems()
         for element in MenuModel.elements(for: controller.snapshot) {
             switch element {
-            case .card(let title, let status):
+            case .card(let title, let status, let detail):
                 let item = NSMenuItem()
-                let card = MenuCardView(title: title, status: status)
+                let card = MenuCardView(title: title, status: status, detail: detail)
                 item.view = card
-                item.setAccessibilityLabel("\(title). \(status)")
+                item.setAccessibilityLabel("\(title). \(status). \(detail)")
                 menu.addItem(item)
                 menuCardView = card
+                menuCardItem = item
             case .separator:
                 menu.addItem(.separator())
             case .controls(let controls):
@@ -691,7 +693,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                     menu.addItem(settings)
                 }
                 let item = NSMenuItem(title: menuTitle(command),
-                    action: #selector(runMenuCommand(_:)), keyEquivalent: "")
+                    action: #selector(runMenuCommand(_:)),
+                    keyEquivalent: command == .showController ? "0" : command == .quit ? "q" : "")
                 item.target = self
                 item.representedObject = command.rawValue
                 menu.addItem(item)
@@ -708,6 +711,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         guard menu === statusItem?.menu else { return }
         menuIsOpen = false
         menuCardView = nil
+        menuCardItem = nil
         menuControlRow = nil
         menuControlsItem = nil
     }
@@ -718,8 +722,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         guard menuIsOpen else { return }
         for element in MenuModel.elements(for: snapshot) {
             switch element {
-            case .card(let title, let status):
-                menuCardView?.update(title: title, status: status)
+            case .card(let title, let status, let detail):
+                menuCardView?.update(title: title, status: status, detail: detail)
+                menuCardItem?.setAccessibilityLabel("\(title). \(status). \(detail)")
             case .controls(let controls):
                 if menuControlRow?.commands != MenuModel.controlCommands(for: controls) {
                     let row = MenuControlRow(controls: controls, target: self,
@@ -743,8 +748,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         case .stop: "Stop"
         case .skipForward: "Forward 10 Seconds"
         case .next: "Next Playlist Item"
-        case .showController: "Show Controller"
-        case .quit: "Quit"
+        case .showController: "Open AirThrow"
+        case .quit: "Quit AirThrow"
         }
     }
 
@@ -835,154 +840,4 @@ private final class ControllerWindow: PlaybackKeyboardWindow {
             super.cancelOperation(sender)
         }
     }
-}
-
-@MainActor
-private enum MenuMetrics {
-    static let width: CGFloat = 168
-}
-
-/// Compact playback context at the top of the status-item menu.
-@MainActor
-private final class MenuCardView: NSView {
-    private let titleLabel: NSTextField
-    private let statusLabel: NSTextField
-
-    init(title: String, status: String) {
-        titleLabel = NSTextField(labelWithString: title)
-        statusLabel = NSTextField(labelWithString: status)
-        super.init(frame: NSRect(x: 0, y: 0, width: MenuMetrics.width, height: 46))
-        titleLabel.font = .preferredFont(forTextStyle: .headline)
-        titleLabel.lineBreakMode = .byTruncatingMiddle
-        titleLabel.toolTip = title
-        statusLabel.font = .preferredFont(forTextStyle: .subheadline)
-        statusLabel.textColor = .secondaryLabelColor
-        statusLabel.lineBreakMode = .byTruncatingTail
-        statusLabel.toolTip = status
-        let stack = NSStackView(views: [titleLabel, statusLabel])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 1
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
-        let labelWidth = MenuMetrics.width - 26
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 13),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -13),
-            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            titleLabel.widthAnchor.constraint(lessThanOrEqualToConstant: labelWidth),
-            statusLabel.widthAnchor.constraint(lessThanOrEqualToConstant: labelWidth),
-        ])
-    }
-
-    required init?(coder: NSCoder) { nil }
-
-    func update(title: String, status: String) {
-        titleLabel.stringValue = title
-        statusLabel.stringValue = status
-        titleLabel.toolTip = title
-        statusLabel.toolTip = status
-    }
-}
-
-/// Inline transport controls. Playlist navigation appears only for a queue.
-@MainActor
-private final class MenuControlRow: NSView {
-    private var buttons: [MenuCommand: MenuControlButton] = [:]
-    let commands: [MenuCommand]
-
-    init(controls: MenuControlState, target: AnyObject, action: Selector) {
-        commands = MenuModel.controlCommands(for: controls)
-        let controlsWidth = CGFloat(commands.count) * Self.buttonWidth
-        super.init(frame: NSRect(x: 0, y: 0, width: max(MenuMetrics.width, controlsWidth), height: 36))
-        let stack = NSStackView()
-        stack.orientation = .horizontal
-        stack.distribution = .fillEqually
-        stack.alignment = .centerY
-        stack.spacing = 0
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        for command in commands {
-            let spec = Self.spec(for: command, controls: controls)
-            let button = MenuControlButton()
-            button.isBordered = false
-            button.imagePosition = .imageOnly
-            button.image = Self.symbol(spec.symbol)
-            button.toolTip = spec.label
-            button.setAccessibilityLabel(spec.label)
-            button.identifier = NSUserInterfaceItemIdentifier(command.rawValue)
-            button.target = target
-            button.action = action
-            button.isEnabled = spec.enabled
-            buttons[command] = button
-            stack.addArrangedSubview(button)
-        }
-        addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.centerXAnchor.constraint(equalTo: centerXAnchor),
-            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            stack.widthAnchor.constraint(equalToConstant: controlsWidth),
-        ])
-    }
-
-    required init?(coder: NSCoder) { nil }
-
-    /// Re-applies the current state to the existing buttons so an open menu
-    /// tracks playback without being torn down and rebuilt.
-    func update(controls: MenuControlState) {
-        for (command, button) in buttons {
-            let spec = Self.spec(for: command, controls: controls)
-            button.image = Self.symbol(spec.symbol)
-            button.toolTip = spec.label
-            button.setAccessibilityLabel(spec.label)
-            button.isEnabled = spec.enabled
-            if !spec.enabled { button.contentTintColor = nil }
-        }
-    }
-
-    private static let buttonWidth: CGFloat = 30
-
-    private static func spec(for command: MenuCommand, controls: MenuControlState)
-        -> (symbol: String, label: String, enabled: Bool) {
-        switch command {
-        case .previous:
-            ("backward.end.fill", "Previous Playlist Item", controls.playlist?.canPrevious == true)
-        case .skipBackward: ("gobackward.10", "Back 10 Seconds", controls.canSkipBackward)
-        case .togglePlayback:
-            (controls.isPlaying ? "pause.fill" : "play.fill",
-             controls.isPlaying ? "Pause" : "Play", controls.canToggle)
-        case .stop: ("stop.fill", "Stop", controls.canStop)
-        case .skipForward: ("goforward.10", "Forward 10 Seconds", controls.canSkipForward)
-        case .next:
-            ("forward.end.fill", "Next Playlist Item", controls.playlist?.canNext == true)
-        case .showController, .quit: ("", "", false)
-        }
-    }
-
-    private static func symbol(_ name: String) -> NSImage? {
-        NSImage(systemSymbolName: name, accessibilityDescription: nil)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(textStyle: .title3, scale: .medium))
-    }
-}
-
-/// Borderless menu button that paints a subtle rounded highlight while the
-/// pointer is over it, so the passive-looking glyphs read as targets.
-@MainActor
-private final class MenuControlButton: NSButton {
-    private var hoverArea: NSTrackingArea?
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let hoverArea { removeTrackingArea(hoverArea) }
-        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways],
-                                  owner: self, userInfo: nil)
-        addTrackingArea(area)
-        hoverArea = area
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        guard isEnabled else { return }
-        contentTintColor = .controlAccentColor
-    }
-
-    override func mouseExited(with event: NSEvent) { contentTintColor = nil }
 }
