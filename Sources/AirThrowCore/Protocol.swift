@@ -1,7 +1,7 @@
 import Foundation
 
 public enum Command: String, Codable, Sendable {
-    case open, play, pause, stop, seek, previous, next, status, show, sources, source, conversion
+    case open, play, pause, stop, seek, previous, next, status, show, sources, source, conversion, enhance
 }
 
 public struct Request: Codable, Sendable {
@@ -11,6 +11,8 @@ public struct Request: Codable, Sendable {
     public var seconds: Double?
     public var sourceID: String?
     public var allowVideoConversion: Bool?
+    public var enhancement: VideoEnhancement?
+    public var upscaler: VideoUpscaler?
     /// An explicit open-and-play request; absent preserves paused loading.
     public var autoplay: Bool?
     public init(_ command: Command, url: String? = nil, seconds: Double? = nil, autoplay: Bool? = nil) {
@@ -90,9 +92,9 @@ public enum VideoEnhancement: String, Codable, Sendable, CaseIterable {
         switch self {
         case .original: "Original"
         case .upscale1080: "Upscale to 1080p"
-        case .cleanup1080: "Clean up & upscale to 1080p"
+        case .cleanup1080: "Clean up · 1080p"
         case .upscale4K: "Upscale to 4K"
-        case .cleanup4K: "Clean up & upscale to 4K"
+        case .cleanup4K: "Clean up · 4K"
         }
     }
     public var targetHeight: Int? {
@@ -103,6 +105,27 @@ public enum VideoEnhancement: String, Codable, Sendable, CaseIterable {
         }
     }
     public var cleansUp: Bool { self == .cleanup1080 || self == .cleanup4K }
+}
+
+/// An explicit processing backend, independent of output size and cleanup.
+public enum VideoUpscaler: String, Codable, Sendable, CaseIterable {
+    case automatic
+    case lanczos
+    case lowLatency = "ai_low_latency"
+    case standard = "ai_standard"
+    public var label: String {
+        switch self {
+        case .automatic: "Automatic"
+        case .lanczos: "Lanczos"
+        case .lowLatency: "AI Super Resolution · Low Latency"
+        case .standard: "AI Super Resolution · Standard"
+        }
+    }
+    public var isAI: Bool { self == .lowLatency || self == .standard }
+    public static let preferenceKey = "videoUpscaler"
+    public static func preferred(_ defaults: UserDefaults = .standard) -> Self {
+        Self(rawValue: defaults.string(forKey: preferenceKey) ?? "") ?? .automatic
+    }
 }
 
 public struct SeekRange: Codable, Sendable, Equatable {
@@ -322,7 +345,7 @@ public enum MediaFailureReason: String, Codable, Sendable {
         case .httpAuthenticationRequired: "This server requires a username and password. Load the link again to sign in."
         case .signInRequired: "YouTube asked for sign-in verification. Add or refresh cookies in Settings → YouTube access, then load again. A cookies file is a snapshot and can expire; a browser source stays current."
         case .liveUnsupported: "This live stream has no supported presentation. Protected media, unsafe tracks and some delivery methods are unsupported."
-        case .preparationRequired: "This source cannot use the current preparation settings. Allow video re-encoding for supported SDR sources, or choose another source. HDR, protected media and some delivery methods are unsupported."
+        case .preparationRequired: "This source cannot use the current preparation settings. Allow video re-encoding for supported SDR sources, or choose Original for a compatible HDR10/HLG/Dolby Vision source. Re-encoding HDR, protected media and some delivery methods are unsupported."
         case .preparerUnavailable: "Preparing this video needs FFmpeg and ffprobe. Install FFmpeg with Homebrew, then load the link again."
         case .preparationFailed: "Could not prepare the video. Check the source, connection and available disk space, then load it again."
         case .preparationLimit: "Preparation exceeded a size, duration or time limit, or there is insufficient disk space. Try a smaller or lower-bitrate source."
@@ -400,6 +423,7 @@ public struct PlaybackSnapshot: Codable, Sendable, Equatable {
     public var allowVideoConversion: Bool?
     /// Per-item request, absent when no item is loaded.
     public var videoEnhancement: VideoEnhancement?
+    public var videoUpscaler: VideoUpscaler?
     public init() {}
 }
 
@@ -520,13 +544,25 @@ public struct Response: Codable, Sendable {
     }
 }
 
+extension String {
+    var containsControlCharacters: Bool {
+        unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
+    }
+    var removingControlCharacters: String {
+        String(String.UnicodeScalarView(unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }))
+    }
+}
+
 public enum MediaInput {
+    private static func isPlausibleInput(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 16_384 && !value.containsControlCharacters
+    }
+
     /// Accepts the existing HTTP(S) inputs plus a local POSIX path or file URL.
     /// Local files have their own validator so the network URL rules stay strict.
     public static func source(_ input: String) throws -> URL {
         let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty, value.utf8.count <= 16_384,
-              !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+        guard isPlausibleInput(value) else {
             throw AppFailure(.invalidRequest, "Enter an HTTP or HTTPS video URL, or choose a readable local video file.")
         }
         if value.hasPrefix("/") || value.hasPrefix("~") || value.hasPrefix(".") {
@@ -542,8 +578,7 @@ public enum MediaInput {
 
     public static func url(_ input: String) throws -> URL {
         let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty, value.utf8.count <= 16_384,
-              !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+        guard isPlausibleInput(value),
               let components = URLComponents(string: value),
               let scheme = components.scheme?.lowercased(), ["https", "http"].contains(scheme),
               let host = components.host, !host.isEmpty,
@@ -556,8 +591,7 @@ public enum MediaInput {
 
     public static func localFile(_ input: String) throws -> URL {
         let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty, value.utf8.count <= 16_384,
-              !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+        guard isPlausibleInput(value) else {
             throw AppFailure(.invalidRequest, "Choose a readable local video file.")
         }
         let file: URL
@@ -589,7 +623,7 @@ public enum MediaInput {
         let file = input.standardizedFileURL.resolvingSymlinksInPath()
         // A dropped link may percent-encode control characters that a typed path
         // cannot contain. Keep both forms equivalent after resolution.
-        guard !file.path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+        guard !file.path.containsControlCharacters else {
             throw AppFailure(.invalidRequest, "Choose a readable local video file.")
         }
         let attributes: [FileAttributeKey: Any]

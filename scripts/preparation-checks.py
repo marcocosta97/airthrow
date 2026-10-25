@@ -140,7 +140,134 @@ if not (OUT / 'hevc-main10-sdr.mkv').exists():
     ffmpeg('-i', OUT / 'combined.mkv', '-c:v', 'libx265', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p10le',
            '-x265-params', 'log-level=error:pools=1:colorprim=1:transfer=1:colormatrix=1',
            '-c:a', 'copy', OUT / 'hevc-main10-sdr.mkv')
-FILES = {f'/{name}': (OUT / name).read_bytes() for name in ['hevc-main10-sdr.mkv', 'odd-width.mkv', 'combined.mp4', 'combined.mkv', 'subtitles.mkv', 'video.mp4', 'audio.m4a',
+# A Main 10 base layer with PQ transfer and BT.2020 primaries: real-world
+# HDR10/HDR10+ and a Dolby Vision profile 8.1/8.2/8.4 base layer look the same
+# here. This is copied unmodified at Original quality; it is still refused for
+# any re-encode (tone mapping stays out of scope).
+if not (OUT / 'hevc-main10-hdr10.mkv').exists():
+    ffmpeg('-i', OUT / 'combined.mkv', '-c:v', 'libx265', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p10le',
+           '-x265-params', 'log-level=error:pools=1:colorprim=9:transfer=16:colormatrix=9:hdr10=1:'
+           'master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400',
+           '-c:a', 'copy', OUT / 'hevc-main10-hdr10.mkv')
+# A Main 10 base layer with the HLG transfer and BT.2020 primaries.
+if not (OUT / 'hevc-main10-hlg.mkv').exists():
+    ffmpeg('-i', OUT / 'combined.mkv', '-c:v', 'libx265', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p10le',
+           '-x265-params', 'log-level=error:pools=1:colorprim=9:transfer=18:colormatrix=9',
+           '-c:a', 'copy', OUT / 'hevc-main10-hlg.mkv')
+# A non-backward-compatible Dolby Vision layer (profile 5 style): Main 10 with
+# BT.2020 primaries but no standard PQ/HLG transfer tag. This stays
+# unsupported; reconstructing it needs the RPU, which this app does not apply.
+if not (OUT / 'hevc-main10-dv5.mkv').exists():
+    ffmpeg('-i', OUT / 'combined.mkv', '-c:v', 'libx265', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p10le',
+           '-x265-params', 'log-level=error:pools=1:colorprim=9:transfer=2:colormatrix=9',
+           '-c:a', 'copy', OUT / 'hevc-main10-dv5.mkv')
+
+
+def inject_dvcc(path, track_index, profile, level, rpu, el, bl, compat):
+    """Patch a synthetic Dolby Vision 'dvcC' configuration record into the
+    Nth HEVC sample entry of an mp4 file, in place. Real multi-layer/RPU
+    content needs Dolby's own tools to produce and isn't available here; this
+    exercises MediaPreparer's container-level DOVI side-data detection
+    (profile/layer-presence flags) against the real ffprobe output those
+    flags actually produce, without needing a genuine dual-layer bitstream.
+    Only safe on an mp4 whose moov comes after mdat (ffmpeg's default without
+    -movflags +faststart): growing moov in place then never shifts any
+    sample data that stco/co64 point into."""
+    def header(data, pos):
+        size, kind = __import__('struct').unpack('>I4s', data[pos:pos + 8])
+        return size, kind.decode('ascii')
+
+    def child(data, start, end, want):
+        pos = start
+        while pos < end:
+            size, kind = header(data, pos)
+            if kind == want:
+                return pos, size
+            pos += size
+        raise ValueError(f'{want!r} not found')
+
+    def grow(data, box_start, delta):
+        size, _ = header(data, box_start)
+        __import__('struct').pack_into('>I', data, box_start, size + delta)
+
+    data = bytearray(path.read_bytes())
+    pos = 0
+    moov_start = None
+    while pos < len(data):
+        size, kind = header(data, pos)
+        if kind == 'moov':
+            moov_start = pos
+            break
+        pos += size
+    moov_size, _ = header(data, moov_start)
+    pos, seen = moov_start + 8, 0
+    entry = None
+    while pos < moov_start + moov_size:
+        size, kind = header(data, pos)
+        if kind == 'trak':
+            trak_start = pos
+            mdia_start, mdia_size = child(data, trak_start + 8, trak_start + size, 'mdia')
+            minf_start, minf_size = child(data, mdia_start + 8, mdia_start + mdia_size, 'minf')
+            stbl_start, stbl_size = child(data, minf_start + 8, minf_start + minf_size, 'stbl')
+            stsd_start, stsd_size = child(data, stbl_start + 8, stbl_start + stbl_size, 'stsd')
+            entry_start = stsd_start + 16
+            entry_size, entry_type = header(data, entry_start)
+            if entry_type in ('hev1', 'hvc1'):
+                if seen == track_index:
+                    entry = (entry_start, entry_size,
+                             [trak_start, mdia_start, minf_start, stbl_start, stsd_start])
+                    break
+                seen += 1
+        pos += size
+    if entry is None:
+        raise ValueError(f'HEVC sample entry #{track_index} not found in {path}')
+    entry_start, entry_size, ancestors = entry
+    hvcc_start, hvcc_size = child(data, entry_start + 8 + 78, entry_start + entry_size, 'hvcC')
+    insert_at = hvcc_start + hvcc_size
+
+    payload = bytearray([1, 0])
+    bits = (profile & 0x7F) << 41 | (level & 0x3F) << 35 | (rpu & 1) << 34 \
+        | (el & 1) << 33 | (bl & 1) << 32 | (compat & 0xF) << 28
+    payload += bits.to_bytes(6, 'big')
+    payload += bytes(16)
+    dvcc = __import__('struct').pack('>I4s', 8 + len(payload), b'dvcC') + bytes(payload)
+
+    data[insert_at:insert_at] = dvcc
+    for box_start in ancestors + [entry_start, moov_start]:
+        grow(data, box_start, len(dvcc))
+    path.write_bytes(data)
+
+
+# A profile 7 "single-track" Dolby Vision file: the base layer, enhancement
+# layer and RPU are all multiplexed into one HEVC stream. The base layer
+# itself is an ordinary, independently valid HDR10 picture; AirThrow copies
+# it unmodified but strips the extra NAL units (`dovi_split`) since an
+# AirPlay receiver can't use them. No tool here can synthesize a genuine
+# multi-layer/RPU bitstream, so this models only the container-level
+# signaling (the DOVI configuration record) that drives that decision; the
+# actual NAL-stripping step is separately verified to be a safe no-op on a
+# single-layer stream like this one (ref. AirThrow's own test coverage).
+if not (OUT / 'hevc-main10-dv7-single.mp4').exists():
+    ffmpeg('-i', OUT / 'hevc-main10-hdr10.mkv', '-c', 'copy', '-tag:v', 'hvc1',
+           OUT / 'hevc-main10-dv7-single.mp4')
+    inject_dvcc(OUT / 'hevc-main10-dv7-single.mp4', 0, profile=7, level=6, rpu=1, el=1, bl=1, compat=1)
+# A profile 7 "dual-track" Dolby Vision file: the enhancement layer is muxed
+# as its own, separate video track (track 0, deliberately a different, wrong
+# resolution here so a mistaken selection is caught) alongside the real base
+# layer (track 1, the same HDR10 fixture as above). Only the base layer may
+# ever be selected.
+if not (OUT / 'hevc-main10-dv7-dual.mp4').exists():
+    ffmpeg('-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=24', '-t', '2',
+           '-c:v', 'libx265', '-preset', 'ultrafast', '-tag:v', 'hvc1', OUT / 'dv7-fake-el.mp4')
+    ffmpeg('-i', OUT / 'dv7-fake-el.mp4', '-i', OUT / 'hevc-main10-hdr10.mkv',
+           '-map', '0:v:0', '-map', '1:v:0', '-map', '1:a:0', '-c', 'copy',
+           '-tag:v:0', 'hvc1', '-tag:v:1', 'hvc1', OUT / 'hevc-main10-dv7-dual.mp4')
+    inject_dvcc(OUT / 'hevc-main10-dv7-dual.mp4', 0, profile=7, level=6, rpu=0, el=1, bl=0, compat=0)
+    inject_dvcc(OUT / 'hevc-main10-dv7-dual.mp4', 1, profile=7, level=6, rpu=0, el=0, bl=1, compat=1)
+FILES = {f'/{name}': (OUT / name).read_bytes() for name in ['hevc-main10-sdr.mkv', 'hevc-main10-hdr10.mkv',
+                                                            'hevc-main10-hlg.mkv', 'hevc-main10-dv5.mkv',
+                                                            'hevc-main10-dv7-single.mp4', 'hevc-main10-dv7-dual.mp4',
+                                                            'odd-width.mkv', 'combined.mp4', 'combined.mkv', 'subtitles.mkv', 'video.mp4', 'audio.m4a',
                                                             'flac.mkv', 'multitrack.mkv', 'long.mp4', 'vp9-opus.mkv',
                                                             'hdr.mkv', 'uhd.mkv', 'hevc-sdr.mkv', 'highfps.mkv', 'tenbit.mkv',
                                                             'long-vp9.mkv', 'long-flac.mkv']}
@@ -261,7 +388,8 @@ try:
     if '--live-hevc-only' in sys.argv or ("--progressive-only" not in sys.argv and "--cache-only" not in sys.argv and "--network-continuity-only" not in sys.argv):
         binary = OUT / 'PreparationChecks'
         run(['swiftc', '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
-             ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
+             ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/InterfaceCopy.swift',
+             ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
              ROOT / 'Sources/AirThrowApp/XtreamLibrary.swift',
              ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
              ROOT / 'Tests/PreparationChecks/main.swift', '-o', binary], timeout=90)
@@ -335,7 +463,8 @@ try:
         print('PASS 4K remux, four enhancement presets, 100->60 fps cap, software fallback and 10-bit refusal')
     cached = OUT / 'CacheChecks'
     run(['swiftc', '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
-         ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
+         ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/InterfaceCopy.swift',
+         ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
          ROOT / 'Sources/AirThrowApp/XtreamLibrary.swift',
          ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
          ROOT / 'Tests/CacheChecks/main.swift', '-o', cached], timeout=90)
@@ -346,7 +475,8 @@ try:
         raise SystemExit(0)
     progressive = OUT / 'ProgressiveChecks'
     run(['swiftc', '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
-         ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
+         ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/InterfaceCopy.swift',
+         ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
          ROOT / 'Sources/AirThrowApp/XtreamLibrary.swift',
          ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
          ROOT / 'Tests/ProgressiveChecks/main.swift', '-o', progressive], timeout=90)

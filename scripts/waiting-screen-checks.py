@@ -9,6 +9,7 @@ binary.parent.mkdir(exist_ok=True)
 subprocess.run(['swiftc', '-swift-version', '6', '-parse-as-library',
                 *sorted((root / 'Sources/AirThrowCore').glob('*.swift')),
                 root / 'Sources/AirThrowApp/MediaDiagnostics.swift',
+                root / 'Sources/AirThrowApp/InterfaceCopy.swift',
                 root / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
                 root / 'Sources/AirThrowApp/PlaybackController.swift',
                 root / 'Sources/AirThrowApp/XtreamLibrary.swift',

@@ -636,8 +636,7 @@ struct CacheChecks {
             prepared.updatePlaybackPosition(position, playing: true)
             if position > 0.1, began == nil { began = clock.now }
             if let began {
-                let elapsed = began.duration(to: clock.now).components
-                lostTime = max(lostTime, Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18 - position)
+                lostTime = max(lostTime, began.duration(to: clock.now).timeInterval - position)
             }
             try await Task.sleep(for: .milliseconds(100))
         }

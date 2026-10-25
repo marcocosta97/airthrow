@@ -20,7 +20,7 @@ public enum XtreamPlaylist {
         }
         guard !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !password.isEmpty,
               [username, password].allSatisfy({ value in
-                  value.utf8.count <= 4096 && !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+                  value.utf8.count <= 4096 && !value.containsControlCharacters
               }) else {
             throw AppFailure(.invalidRequest, "Enter a username and password without line breaks.")
         }
@@ -171,7 +171,7 @@ public enum IPTVPlaylist {
                 let url = relativeToFile ? resolved.flatMap { try? MediaInput.localFile($0) }
                     : resolved.flatMap { try? MediaInput.url($0.absoluteString) }
                 guard !unsupported, line.utf8.count <= 16_384, !line.contains("|"),
-                      !line.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+                      !line.containsControlCharacters,
                       let url else { skipped += 1; continue }
                 guard channels.count < maximumChannels else { truncated = true; break }
                 channels.append(IPTVChannel(number: channels.count + 1, name: name.flatMap(label) ?? "Channel \(channels.count + 1)",
@@ -201,7 +201,7 @@ public enum IPTVPlaylist {
         return nil
     }
     private static func label(_ value: String) -> String? {
-        let text = String(String.UnicodeScalarView(value.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }))
+        let text = value.removingControlCharacters
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return text.isEmpty ? nil : String(text.prefix(200))
     }

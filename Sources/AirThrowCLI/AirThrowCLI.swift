@@ -24,11 +24,16 @@ struct AirThrowCLI {
       athrow source ID       Change source, preserving position and play/pause
       athrow conversion allow-video|avoid-video
                                 Allow or block video re-encoding and enhancements
+      athrow enhance PRESET [BACKEND]
+                                Change enhancement, preserving position and play/pause
       athrow show            Open the controller and choose a receiver
 
     --json is available on every command. Receiver selection uses the app's
     AirPlay picker. open and show launch AirThrow if needed.
     Set AIRTHROW_APP to an explicit AirThrow.app path for development.
+    PRESET: original, upscale_1080, cleanup_1080, upscale_4k, cleanup_4k.
+    BACKEND: automatic (default), lanczos, ai_low_latency, ai_standard. AI is experimental;
+    macOS 26+ and compatible hardware are required. Standard needs a ready model.
     """
 
     @MainActor static func main() async {
@@ -40,9 +45,8 @@ struct AirThrowCLI {
                 print(helpText)
                 return
             case .run(let parsed):
-                if parsed.command == .open || parsed.command == .show {
-                    let running = await Task.detached { (try? LocalSocket.send(Request(.status))) != nil }.value
-                    if !running { try await launch() }
+                if parsed.command == .open || parsed.command == .show, await !isAppReachable() {
+                    try await launch()
                 }
                 let response = try await Task.detached { try LocalSocket.send(parsed.request) }.value
                 output(response, json: parsed.json, showSources: parsed.showsSources)
@@ -74,11 +78,14 @@ struct AirThrowCLI {
         config.activates = true
         _ = try await NSWorkspace.shared.openApplication(at: app, configuration: config)
         for _ in 0..<40 {
-            let ready = await Task.detached { (try? LocalSocket.send(Request(.status))) != nil }.value
-            if ready { return }
+            if await isAppReachable() { return }
             try await Task.sleep(for: .milliseconds(100))
         }
         throw AppFailure(.appUnavailable, "AirThrow launched but its command endpoint is unavailable.")
+    }
+
+    private static func isAppReachable() async -> Bool {
+        await Task.detached { (try? LocalSocket.send(Request(.status))) != nil }.value
     }
 
     private static func output(_ response: Response, json: Bool, showSources: Bool = false) {

@@ -105,8 +105,12 @@ are available when provided by the server.
 
 - Playback depends on website, media format and receiver compatibility;
   DRM-protected media is unsupported.
-- Enhancements require finite SDR video and never downscale. HDR/Dolby Vision
-  processing and surround preservation are unsupported.
+- Enhancements require finite SDR video and never downscale. A Main 10
+  HDR10/HDR10+/HLG source, including a compatible Dolby Vision base layer
+  (profiles 7 and 8.1/8.2/8.4 — any enhancement layer and profile 7's RPU are
+  dropped, leaving its underlying HDR10 picture), copies through unmodified at
+  Original quality; re-encoding HDR/Dolby Vision, profile 5 and surround
+  preservation are unsupported.
 - Image-based subtitles, subtitle burn-in and subtitles in Mac-prepared live
   streams are unsupported.
 
@@ -121,7 +125,8 @@ are available when provided by the server.
 | MKV · H.264 or HEVC + AAC | 🔁 |
 | MKV · H.264 or HEVC + FLAC/Opus | 🔧 audio |
 | WebM · VP9/AV1 SDR 8-bit + Opus | 🔧 |
-| HDR/DV processing | ⏳ |
+| MKV · HEVC Main 10 HDR10/HDR10+/HLG or Dolby Vision 7/8.1/8.2/8.4 (base layer) | 🔁 Original only |
+| HDR/DV re-encode (tone mapping), Dolby Vision profile 5 | 🚫 |
 | DRM-protected media | 🚫 |
 
 Direct playback needs no media processing on the Mac; remux repackages existing tracks, while re-encoding processes audio and/or video on the Mac.

@@ -12,7 +12,7 @@ final class XtreamLibrary: ObservableObject {
     @Published private(set) var section: XtreamSection = .live
     @Published private(set) var categories: [XtreamCategory] = []
     @Published private(set) var categoryID: String?
-    @Published private(set) var listing = XtreamListing(items: [], skipped: 0, truncated: false)
+    @Published private(set) var listing = XtreamListing.empty
     @Published private(set) var loading = false
     @Published private(set) var error: String?
     @Published private(set) var selected: XtreamItem?
@@ -97,13 +97,13 @@ final class XtreamLibrary: ObservableObject {
         // An all-titles response can also answer subsequent category requests locally.
         let allKey = CatalogKey(section: section, categoryID: nil)
         if let categoryID, let all = listingCache[allKey] {
-            listing = XtreamListing(items: all.items.filter { $0.categoryID == categoryID }, skipped: 0, truncated: false)
+            listing = all.filtered(toCategory: categoryID)
             loading = false; task = nil
             rebuildVisible()
             return
         }
         loading = true
-        listing = XtreamListing(items: [], skipped: 0, truncated: false)
+        listing = .empty
         rebuildVisible()
         let client = client, key = catalogKey, cachedCategories = categoryCache[section]
         task = Task { [weak self] in
@@ -121,7 +121,8 @@ final class XtreamLibrary: ObservableObject {
                         if let saved {
                             self.storeCategories(saved.categories); self.categoryCache[section] = saved.categories
                             self.listingCache[savedKey] = saved.listing
-                            self.listing = savedKey == key ? saved.listing : XtreamListing(items: saved.listing.items.filter { $0.categoryID == categoryID }, skipped: 0, truncated: false)
+                            if savedKey != key, let categoryID { self.listing = saved.listing.filtered(toCategory: categoryID) }
+                            else { self.listing = saved.listing }
                             self.rebuildVisible()
                             self.loading = false; self.task = nil
                             return
@@ -222,6 +223,7 @@ final class XtreamLibrary: ObservableObject {
     func episodeURL(_ episode: XtreamEpisode) throws -> URL {
         try client.account.streamURL(kind: .series, id: episode.id, extension: episode.container)
     }
-    func didPlay(_ id: String) { playingID = section.rawValue + "/" + id }
-    func isPlaying(_ id: String) -> Bool { playingID == section.rawValue + "/" + id }
+    func didPlay(_ id: String) { playingID = Self.playingKey(section, id) }
+    func isPlaying(_ id: String) -> Bool { playingID == Self.playingKey(section, id) }
+    static func playingKey(_ section: XtreamSection, _ id: String) -> String { section.rawValue + "/" + id }
 }

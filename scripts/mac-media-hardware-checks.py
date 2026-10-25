@@ -114,12 +114,13 @@ def main():
     for name in ['h264','hevc','non-wide','hevc-input','separate','progressive','cached']:
         a=jobs[name]
         assert '-hwaccel' in a and 'scale_vt=' in a[a.index('-vf')+1], name
-    for name in ['cleanup','no-scale','failed-frames','full-range','high-rate']:
+    for name in ['cleanup','lanczos','no-scale','failed-frames','full-range','high-rate']:
         a=jobs[name]
         assert '-hwaccel' not in a and a[a.index('-c:v')+1].endswith('_videotoolbox'),name
+    assert 'flags=lanczos' in jobs['lanczos'][jobs['lanczos'].index('-vf')+1]
     assert jobs['software'][jobs['software'].index('-c:v')+1]=='libx264'
     assert any(c['case']=='failed-frames' and '-hwaccel' in c['args'] for c in commands)
-    for name in ['no-scale','failed-frames','software','non-wide','hevc-input','separate','full-range','high-rate']:
+    for name in ['no-scale','failed-frames','software','non-wide','hevc-input','separate','full-range','high-rate','lanczos']:
         run([ffmpeg,'-v','error','-xerror','-i',out/(name+'.mp4'),'-f','null','-'],timeout=60)
     probe=run(['ffprobe','-v','error','-show_streams','-of','json',out/'non-wide.mp4'],capture_output=True)
     v=next(s for s in json.loads(probe.stdout)['streams'] if s['codec_type']=='video')

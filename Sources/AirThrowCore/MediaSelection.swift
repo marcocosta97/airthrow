@@ -200,6 +200,12 @@ public enum MediaSelector {
     }
 }
 
+enum MediaContainer {
+    /// Extensions AVPlayer normally cannot read; they go straight to the
+    /// existing stream-copy inspection/remux path.
+    static let needingPreparation: Set<String> = ["mkv", "webm", "mpg", "mpeg", "vob"]
+}
+
 enum LocalSourceAdapter {
     static func candidates(_ input: URL) throws -> [MediaCandidate] {
         let url = try MediaInput.localFile(input)
@@ -207,10 +213,8 @@ enum LocalSourceAdapter {
         guard ext != "m3u8" else {
             throw AppFailure(.unsupportedOperation, "Local HLS video playlists are not supported. Load an HTTP or HTTPS HLS link instead.")
         }
-        // MP4/MOV and unknown containers get one native attempt through the LAN
-        // server. Containers AVPlayer normally cannot read go straight to the
-        // existing stream-copy inspection/remux path.
-        let needsRemux = ["mkv", "webm", "mpg", "mpeg", "vob"].contains(ext)
+        // MP4/MOV and unknown containers get one native attempt through the LAN server.
+        let needsRemux = MediaContainer.needingPreparation.contains(ext)
         return [MediaCandidate(source: ResolvedSource(
             url: url, title: url.lastPathComponent, needsPreparation: needsRemux,
             needsDelivery: true, delivery: .file))]
@@ -224,7 +228,7 @@ enum DirectSourceAdapter {
         // the native attempt for unknown/extensionless URLs: an extension is
         // only a routing hint, not proof of the contained codecs.
         let ext = url.pathExtension.lowercased()
-        let needsPreparation = ["mkv", "webm", "mpg", "mpeg", "vob"].contains(ext)
+        let needsPreparation = MediaContainer.needingPreparation.contains(ext)
         let delivery: MediaDelivery = ext == "m3u8" ? .hls
             : (needsPreparation || ["mp4", "m4v", "mov"].contains(ext) ? .file : .unknown)
         return [MediaCandidate(source: ResolvedSource(url: url, needsPreparation: needsPreparation,

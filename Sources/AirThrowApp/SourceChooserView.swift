@@ -16,12 +16,14 @@ struct VideoMenuView: View {
     @SwiftUI.State private var draftVideo = "automatic"
     @SwiftUI.State private var draftAction: EnhancementAction = .original
     @SwiftUI.State private var draftOutput4K = false
+    @SwiftUI.State private var draftUpscaler: VideoUpscaler = .automatic
     @SwiftUI.State private var draftSourceIDs: [String] = []
     private var status: PlaybackSnapshot { controller.snapshot }
     private var sources: [SourceOptionSnapshot] { status.sources ?? [] }
     private var audioOptions: [AudioOptionSnapshot] { status.audioOptions ?? [] }
     private var subtitleOptions: [SubtitleOptionSnapshot] { status.subtitleOptions ?? [] }
     private var enhancement: VideoEnhancement { status.videoEnhancement ?? .original }
+    private var upscaler: VideoUpscaler { status.videoUpscaler ?? .automatic }
     private var enhancementAction: EnhancementAction { .from(enhancement) }
     private var audioSelection: String { status.selectedAudioID ?? "" }
     private var subtitleSelection: String { status.selectedSubtitleID ?? "" }
@@ -78,8 +80,14 @@ struct VideoMenuView: View {
         }
         if draftAction == .upscale && !canUpscale(output4K: true) { draftAction = .original }
     }
+    private var cleanupOnly: Bool {
+        draftAction == .cleanUpUpscale
+            && controller.sourceHeight(for: draftVideo == videoSelection ? nil : draftVideo) == (draftOutput4K ? 2160 : 1080)
+    }
+    private var effectiveUpscaler: VideoUpscaler { cleanupOnly ? .automatic : draftUpscaler }
     private var hasChanges: Bool {
         draftVideo != videoSelection || draftAction != enhancementAction
+            || effectiveUpscaler != upscaler
             || (draftAction != .original && draftOutput4K != controller.enhancementOutput4K)
     }
     private var outputHelp: String {
@@ -93,10 +101,11 @@ struct VideoMenuView: View {
         if !controller.allowVideoConversion { return "Turn off Avoid video re-encoding in Settings to use enhancements." }
         if isLive { return "Enhancement is available only for on-demand video." }
         if !mediaReady { return "Video options become available when the source is ready." }
-        if !canUpscale(output4K: true) { return "The source is already 4K or higher. Upscaling is unavailable." }
+        if draftAction == .upscale && !canUpscale(output4K: true) { return "The source is already 4K or higher. Upscaling is unavailable." }
         if draftAction == .upscale && !canUpscale(output4K: false) {
             return "The source is already 1080p. Upscale uses 4K."
         }
+        if cleanupOnly { return "Clean up keeps this source at its original resolution." }
         if draftAction == .original { return "Choose an enhancement to enable output resolution." }
         if requires4K { return "This source requires 4K output and a compatible receiver." }
         return "4K needs a compatible receiver."
@@ -223,7 +232,30 @@ struct VideoMenuView: View {
                 .pickerStyle(.radioGroup)
                 .labelsHidden()
                 .disabled(!mediaReady || isLive)
-                Text("Upscale output")
+                if !cleanupOnly {
+                    Picker("Upscaler", selection: $draftUpscaler) {
+                        ForEach(VideoUpscaler.allCases, id: \.self) { backend in
+                            Text(backend.label).tag(backend)
+                                .disabled(SuperResolutionSupport.unavailableReason(backend) != nil)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(!canChooseOutput)
+                    if draftUpscaler.isAI {
+                        Text("Experimental. Detail and colors may change. SDR video. Output up to 60 fps.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if draftUpscaler == .standard && !controller.superResolutionModelReady {
+                        Button(controller.downloadingSuperResolutionModel ? "Downloading model…" : "Download Standard model") {
+                            Task { await controller.downloadSuperResolutionModel() }
+                        }
+                        .disabled(controller.downloadingSuperResolutionModel)
+                        Text("The model is downloaded and managed by macOS.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Text("Output")
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(canChooseOutput ? Color.primary : Color.secondary)
                 UpscaleOutputPicker(output4K: $draftOutput4K,
@@ -238,7 +270,7 @@ struct VideoMenuView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(12)
-            .frame(width: 210, alignment: .leading)
+            .frame(width: 280, alignment: .leading)
         }
         .onChange(of: showingOptions) { _, isPresented in
             if isPresented {
@@ -283,6 +315,7 @@ struct VideoMenuView: View {
     private func resetDraft() {
         draftVideo = videoSelection
         draftAction = enhancementAction
+        draftUpscaler = upscaler
         draftOutput4K = controller.enhancementOutput4K
         draftSourceIDs = sources.map(\.id)
     }
@@ -291,28 +324,22 @@ struct VideoMenuView: View {
         // Stop/replacement can dismiss the popover too. Only commit a draft
         // that still belongs to the same source session, and only once.
         guard hasChanges, mediaReady, draftSourceIDs == sources.map(\.id) else { return }
-        do {
+        controller.perform {
             try controller.applyVideoOptions(
                 sourceID: draftVideo == videoSelection ? nil : draftVideo,
                 enhancement: draftAction.enhancement(output4K: draftOutput4K),
-                output4K: draftOutput4K)
-        } catch { controller.displayError(error) }
+                output4K: draftOutput4K, upscaler: effectiveUpscaler)
+        }
     }
 
     private func chooseAudio(_ id: String) {
         guard id != audioSelection else { return }
-        do {
-            try controller.selectAudio(id)
-        }
-        catch { controller.displayError(error) }
+        controller.perform { try controller.selectAudio(id) }
     }
 
     private func chooseSubtitle(_ id: String) {
         guard id != subtitleSelection else { return }
-        do {
-            try controller.selectSubtitle(id)
-        }
-        catch { controller.displayError(error) }
+        controller.perform { try controller.selectSubtitle(id) }
     }
 }
 
@@ -353,7 +380,7 @@ private enum EnhancementAction: CaseIterable, Hashable {
         switch self {
         case .original: "Original"
         case .upscale: "Upscale"
-        case .cleanUpUpscale: "Clean up and upscale"
+        case .cleanUpUpscale: "Clean up"
         }
     }
 
@@ -387,7 +414,7 @@ private struct UpscaleOutputPicker: NSViewRepresentable {
         let control = NSSegmentedControl(labels: ["1080p", "4K"], trackingMode: .selectOne,
             target: context.coordinator, action: #selector(Coordinator.choose(_:)))
         control.segmentDistribution = .fill
-        control.setAccessibilityLabel("Upscale output")
+        control.setAccessibilityLabel("Output resolution")
         return control
     }
 

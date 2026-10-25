@@ -46,27 +46,6 @@ public enum YouTubeCookieStatus: Sendable, Equatable {
     case unavailable
 }
 
-/// Legacy YouTube-facing view of the generalized cookie scope. Kept so existing
-/// callers and checks keep working; the real rules live in `WebsiteCookieScope`.
-enum YouTubeCookieScope {
-    static let domains = WebsiteService.youtube.domains
-
-    /// The definitive signed-in marker. `LOGIN_INFO` is what yt-dlp relies on
-    /// for YouTube authentication; PSID-style cookies can linger after a session
-    /// is invalid, so their presence alone is not treated as a session.
-    static var authenticationName: String {
-        WebsiteCookieScope.authenticationNames(for: .youtube).first ?? "LOGIN_INFO"
-    }
-
-    static func includes(_ domain: String) -> Bool {
-        WebsiteCookieScope.includes(domain, service: .youtube)
-    }
-
-    static func hasAuthentication(_ cookies: [NetscapeCookie]) -> Bool {
-        WebsiteCookieScope.hasAuthentication(cookies, service: .youtube)
-    }
-}
-
 /// One Netscape cookies.txt record. `domain` keeps any leading dot so
 /// subdomain inclusion is preserved exactly.
 struct NetscapeCookie: Equatable {
@@ -121,11 +100,6 @@ enum NetscapeCookies {
     /// genuine subdomains.
     static func scoped(_ cookies: [NetscapeCookie], service: WebsiteService) -> [NetscapeCookie] {
         cookies.filter { WebsiteCookieScope.includes($0.domain, service: service) }
-    }
-
-    /// Legacy YouTube-only scope filter.
-    static func youtube(_ cookies: [NetscapeCookie]) -> [NetscapeCookie] {
-        scoped(cookies, service: .youtube)
     }
 
     static func serialize(_ cookies: [NetscapeCookie]) -> String {
@@ -297,14 +271,6 @@ enum BrowserCookieReader {
             return chromium(browser: browser, home: home, service: service)
         default: return .failed
         }
-    }
-
-    /// Legacy convenience for the YouTube-only call sites.
-    static func youtubeCookies(browser: String, home: URL) -> [NetscapeCookie] {
-        if case .cookies(let cookies) = outcome(browser: browser, home: home, service: .youtube) {
-            return cookies
-        }
-        return []
     }
 
     /// Restrict a cookie table to a service's fixed owned domains at the SQL
@@ -819,10 +785,7 @@ struct SQLiteRow {
 
     var count: Int { values.count }
 
-    var integer: Int64? { first?.integer }
-    var string: String? { first?.string }
-    var data: Data? { first?.data }
-    private var first: SQLiteValue? { values.first }
+    var integer: Int64? { values.first?.integer }
 }
 
 /// Bounds-checked big/little-endian reader for the Safari container.

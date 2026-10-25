@@ -18,7 +18,7 @@ struct YouTubeSourceAdapter: SourceAdapter {
     }
 
     public static func isWebsite(_ url: URL) -> Bool {
-        supportedHosts.contains(normalizedHost(url))
+        supportedHosts.contains(url.normalizedHost)
     }
 
     /// Dedicated playlist pages opt into queue playback. A Mix (`list=RD...`) is
@@ -27,7 +27,7 @@ struct YouTubeSourceAdapter: SourceAdapter {
     /// A watch URL carrying any other `list=` remains a single-video request.
     /// `/embed/videoseries` is a playlist, not an 11-character video id.
     public static func playlistPage(_ url: URL) -> URL? {
-        guard isWebsite(url), normalizedHost(url) != "youtu.be" else { return nil }
+        guard isWebsite(url), url.normalizedHost != "youtu.be" else { return nil }
         let path = url.path
         let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
         guard let list = query?.first(where: { $0.name == "list" })?.value,
@@ -51,7 +51,7 @@ struct YouTubeSourceAdapter: SourceAdapter {
         let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         let parts = url.path.split(separator: "/").map(String.init)
         let id: String?
-        if normalizedHost(url) == "youtu.be", parts.count == 1 { id = parts[0] }
+        if url.normalizedHost == "youtu.be", parts.count == 1 { id = parts[0] }
         else if url.path == "/watch" {
             id = components?.queryItems?.first(where: { $0.name == "v" })?.value
         } else if parts.count == 2, ["shorts", "embed", "live"].contains(parts[0]), parts[1] != "videoseries" {
@@ -71,12 +71,6 @@ struct YouTubeSourceAdapter: SourceAdapter {
         let seconds = Double(raw) ?? clockSeconds(raw)
         guard let seconds, seconds.isFinite, seconds > 0, seconds <= 86_400 else { return nil }
         return seconds
-    }
-
-    private static func normalizedHost(_ url: URL) -> String {
-        var host = url.host?.lowercased() ?? ""
-        while host.hasSuffix(".") { host.removeLast() }
-        return host
     }
 
     private static func validVideoID(_ id: String) -> Bool {
@@ -117,30 +111,20 @@ struct YouTubeSourceAdapter: SourceAdapter {
 
     func candidates(for url: URL) async throws -> [MediaCandidate] {
         let page = try Self.videoPage(url)
-        let finder = HelperExecutables(environment: environment)
-        guard let helper = finder.executable("yt-dlp", override: "AIRTHROW_YTDLP"),
-              let deno = finder.executable("deno", override: "AIRTHROW_DENO") else {
-            throw ResolutionFailure.unavailable
-        }
-        let scratch = cookies.materialize()
-        defer { scratch.cleanup() }
-        var arguments = ["--ignore-config", "--no-plugin-dirs", "--no-cache-dir", "--no-remote-components",
-                         "--no-js-runtimes", "--js-runtimes", "deno:\(deno)",
-                         "--no-playlist", "--playlist-items", "1", "--simulate", "--dump-single-json",
-                         "--no-warnings", "--socket-timeout", "10",
-                         "--retries", "0", "--extractor-retries", "0"]
-        if let path = scratch.path { arguments.append(contentsOf: ["--cookies", path]) }
-        arguments.append(contentsOf: ["--", page.absoluteString])
-        let result = try await HelperProcess.runCapturingStderr(executable: helper, arguments: arguments)
-        guard result.succeeded else {
-            throw Self.isSignInChallenge(result.stderr) ? ResolutionFailure.signInRequired : ResolutionFailure.failed
-        }
-        return try await ExtractedSourceAdapter.candidatesWithHLS(result.output,
-                                                                  allowAuthenticated: scratch.path != nil)
+        let extracted = try await dumpJSON(page, selecting: ["--no-playlist", "--playlist-items", "1"])
+        return try await ExtractedSourceAdapter.candidatesWithHLS(extracted.json,
+                                                                  allowAuthenticated: extracted.authenticated)
     }
 
     public func resolvePlaylist(_ url: URL) async throws -> ResolvedPlaylist {
         guard let page = Self.playlistPage(url) else { throw ResolutionFailure.unsupportedPage }
+        let extracted = try await dumpJSON(page, selecting: ["--flat-playlist", "--playlist-end",
+                                                             String(Self.maximumPlaylistEntries + 1)])
+        return try Self.selectPlaylist(extracted.json)
+    }
+
+    /// Runs the isolated helper with scoped cookies, which are deleted before returning.
+    private func dumpJSON(_ page: URL, selecting selection: [String]) async throws -> (json: Data, authenticated: Bool) {
         let finder = HelperExecutables(environment: environment)
         guard let helper = finder.executable("yt-dlp", override: "AIRTHROW_YTDLP"),
               let deno = finder.executable("deno", override: "AIRTHROW_DENO") else {
@@ -149,17 +133,17 @@ struct YouTubeSourceAdapter: SourceAdapter {
         let scratch = cookies.materialize()
         defer { scratch.cleanup() }
         var arguments = ["--ignore-config", "--no-plugin-dirs", "--no-cache-dir", "--no-remote-components",
-                         "--no-js-runtimes", "--js-runtimes", "deno:\(deno)",
-                         "--flat-playlist", "--playlist-end", String(Self.maximumPlaylistEntries + 1),
-                         "--simulate", "--dump-single-json", "--no-warnings", "--socket-timeout", "10",
-                         "--retries", "0", "--extractor-retries", "0"]
-        if let path = scratch.path { arguments.append(contentsOf: ["--cookies", path]) }
-        arguments.append(contentsOf: ["--", page.absoluteString])
+                         "--no-js-runtimes", "--js-runtimes", "deno:\(deno)"]
+            + selection
+            + ["--simulate", "--dump-single-json", "--no-warnings", "--socket-timeout", "10",
+               "--retries", "0", "--extractor-retries", "0"]
+        if let path = scratch.path { arguments += ["--cookies", path] }
+        arguments += ["--", page.absoluteString]
         let result = try await HelperProcess.runCapturingStderr(executable: helper, arguments: arguments)
         guard result.succeeded else {
             throw Self.isSignInChallenge(result.stderr) ? ResolutionFailure.signInRequired : ResolutionFailure.failed
         }
-        return try Self.selectPlaylist(result.output)
+        return (result.output, scratch.path != nil)
     }
 
     static func selectPlaylist(_ data: Data) throws -> ResolvedPlaylist {
@@ -181,9 +165,7 @@ struct YouTubeSourceAdapter: SourceAdapter {
             let upcoming = entry.live_status == "is_upcoming"
             let unavailable = entry.availability.map { !["public", "unlisted"].contains($0) } ?? false
             let id = entry.id ?? entry.url
-            let validID = id.map { value in
-                value.count == 11 && value.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") }
-            } ?? false
+            let validID = id.map(validVideoID) ?? false
             if upcoming { return PlaylistEntry(url: nil, title: title, unavailableReason: "This playlist entry has not started yet.") }
             if unavailable || !validID { return PlaylistEntry(url: nil, title: title, unavailableReason: "This playlist entry is unavailable.") }
             return PlaylistEntry(url: URL(string: "https://www.youtube.com/watch?v=\(id!)"), title: title)
@@ -202,7 +184,6 @@ struct YouTubeSourceAdapter: SourceAdapter {
         let url: String?
         let title: String?
         let availability: String?
-        let is_live: Bool?
         let live_status: String?
     }
 }

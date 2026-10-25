@@ -46,10 +46,8 @@ public enum WebsiteService: String, CaseIterable, Sendable, Hashable {
     /// Resolve an HTTP(S) URL to the service that owns its host, or nil when the
     /// host is neither an exact service domain nor one of its owned subdomains.
     public static func service(for url: URL) -> WebsiteService? {
-        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
-              let rawHost = url.host, !rawHost.isEmpty else { return nil }
-        var host = rawHost.lowercased()
-        while host.hasSuffix(".") { host.removeLast() }
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return nil }
+        let host = url.normalizedHost
         guard !host.isEmpty else { return nil }
         return allCases.first { $0.includes(domain: host) }
     }

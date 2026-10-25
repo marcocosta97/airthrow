@@ -60,8 +60,7 @@ struct HistoryPanel: View {
                 List(controller.history) { entry in
                     HStack(spacing: 8) {
                         Button {
-                            do { try controller.selectHistoryEntry(entry.id) }
-                            catch { controller.displayError(error) }
+                            controller.perform { try controller.selectHistoryEntry(entry.id) }
                         } label: {
                             HStack(spacing: 8) {
                                 Image(systemName: entry.kind == .iptv || entry.kind == .xtream ? "tv" : entry.kind == .playlist ? "list.bullet" : "play.rectangle")

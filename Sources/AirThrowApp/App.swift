@@ -5,6 +5,9 @@ import SwiftUI
 import AirThrowCore
 #endif
 
+/// Effectively no maximum for a resizable window dimension.
+private let unboundedWindowLength: CGFloat = 12_000
+
 @main
 @MainActor
 struct AirThrowMain {
@@ -138,8 +141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 showWindow()
             }
         } else if let file = urls.first {
-            do { try controller.load(file.path) }
-            catch { controller.displayError(error) }
+            controller.perform { try controller.load(file.path) }
             showWindow()
         }
     }
@@ -231,10 +233,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                     switch key {
                     case .toggle:
                         guard PlaybackPolicy.canControl(status) else { return false }
-                        if PlaybackPolicy.isPlaying(status) { self.controller.pause() }
-                        else { try self.controller.play() }
+                        try self.controller.togglePlayback()
                     case .backward, .forward:
-                        let interval: Double = key == .backward ? -10 : 10
+                        let interval = key == .backward ? -MenuModel.skipInterval : MenuModel.skipInterval
                         guard PlaybackPolicy.canSkip(status, by: interval, position: self.controller.pendingSeek) else { return false }
                         try self.controller.skip(by: interval)
                     }
@@ -322,7 +323,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             (window as? ControllerWindow)?.allowsVerticalGrowth = true
             let contentHeight = window.map { $0.contentRect(forFrameRect: $0.frame).height } ?? Self.controllerHeight
             syncInspectorPreferredHeight(to: max(contentHeight, Self.controllerHeight))
-            window?.contentMaxSize = NSSize(width: 12_000, height: 12_000)
+            window?.contentMaxSize = NSSize(width: unboundedWindowLength, height: unboundedWindowLength)
         }
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             inspectorItem.isCollapsed = collapsed
@@ -347,7 +348,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         guard let window else { return }
         let minimumWidth = ControllerMetrics.minWidth + (inspectorOpen ? ControllerMetrics.playlistWidth : 0)
         window.contentMinSize = NSSize(width: minimumWidth, height: Self.controllerHeight)
-        window.contentMaxSize = NSSize(width: 12_000, height: inspectorOpen ? 12_000 : Self.controllerHeight)
+        window.contentMaxSize = NSSize(width: unboundedWindowLength, height: inspectorOpen ? unboundedWindowLength : Self.controllerHeight)
     }
 
     /// Closing the inspector returns the controller to its designed height.
@@ -449,6 +450,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 return Response(message: "Re-encoding preference saved.",
                                 pending: controller.snapshot.state == .loading || controller.snapshot.loadingPhase != nil,
                                 status: controller.snapshot)
+            case .enhance:
+                guard let enhancement = request.enhancement else {
+                    throw AppFailure(.invalidRequest, "Choose an enhancement preset.")
+                }
+                try controller.selectEnhancement(enhancement, upscaler: request.upscaler ?? .automatic)
+                return Response(message: "Changing enhancement at the current position, preserving play/pause.", pending: true, status: controller.snapshot)
             }
             return Response(message: request.command == .status ? controller.snapshot.state.rawValue : "Done.", status: controller.snapshot)
         } catch {
@@ -759,8 +766,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             case .previous: try controller.previous()
             case .skipBackward: try controller.skip(by: -MenuModel.skipInterval)
             case .togglePlayback:
-                if PlaybackPolicy.isPlaying(controller.snapshot) { controller.pause() }
-                else { try controller.play() }
+                try controller.togglePlayback()
             case .stop: controller.stop()
             case .skipForward: try controller.skip(by: MenuModel.skipInterval)
             case .next: try controller.next()
@@ -787,9 +793,9 @@ private final class ControllerSplitViewController: NSSplitViewController {
         super.viewDidLayout()
         guard let window = view.window else { return }
         let minWidth = window.contentMinSize.width
-        let maxHeight = allowsVerticalGrowth ? CGFloat(12_000) : minimumContentHeight
+        let maxHeight = allowsVerticalGrowth ? unboundedWindowLength : minimumContentHeight
         let minSize = NSSize(width: minWidth, height: minimumContentHeight)
-        let maxSize = NSSize(width: max(minWidth, 12_000), height: maxHeight)
+        let maxSize = NSSize(width: max(minWidth, unboundedWindowLength), height: maxHeight)
         if window.contentMinSize != minSize { window.contentMinSize = minSize }
         if window.contentMaxSize != maxSize { window.contentMaxSize = maxSize }
     }
@@ -808,8 +814,8 @@ private final class ControllerWindow: PlaybackKeyboardWindow {
         set {
             var size = newValue
             if allowsVerticalGrowth {
-                size.width = max(size.width, 12_000)
-                size.height = max(size.height, 12_000)
+                size.width = max(size.width, unboundedWindowLength)
+                size.height = max(size.height, unboundedWindowLength)
             }
             guard super.contentMaxSize != size else { return }
             super.contentMaxSize = size

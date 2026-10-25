@@ -7,7 +7,7 @@ private final class ProbeHarness: @unchecked Sendable {
     var count: Int { lock.withLock { requests.count } }
     var lastSource: YouTubeCookies? { lock.withLock { requests.last } }
     func release() { gate.signal() }
-    func probe(_ source: YouTubeCookies, _ home: URL) -> YouTubeCookieStatus {
+    func probe(_ service: WebsiteService, _ source: YouTubeCookies, _ home: URL) -> YouTubeCookieStatus {
         let index = lock.withLock { requests.append(source); return requests.count }
         if index == 1 { _ = gate.wait(timeout: .now() + 5) }
         return .loaded(index)
@@ -48,7 +48,7 @@ struct SettingsChecks {
         try await Task.sleep(for: .milliseconds(80))
         try check(harness.count == 1, "Browser reads overlapped")
         harness.release()
-        try await wait { model.check == .result(.loaded(2)) }
+        try await wait { model.checks[.youtube] == .result(.loaded(2)) }
         try check(harness.count == 2, "Intermediate selections were not coalesced")
         try check(harness.lastSource == .browser("firefox"), "The latest browser choice was not checked")
 
@@ -59,9 +59,9 @@ struct SettingsChecks {
         cleared.refresh(for: .none)
         clearing.release()
         try await Task.sleep(for: .milliseconds(100))
-        try check(cleared.check == .idle && clearing.count == 1, "A stale cookie result replaced the cleared state")
+        try check((cleared.checks[.youtube] ?? .idle) == .idle && clearing.count == 1, "A stale cookie result replaced the cleared state")
         let scoped = ProbeHarness()
-        let multi = CookieStatusModel(scopedProbe: { _, source, home in scoped.probe(source, home) })
+        let multi = CookieStatusModel(probe: scoped.probe)
         multi.refresh(for: .browser("safari"), service: .twitch)
         try await wait { scoped.count == 1 }
         multi.refresh(for: .browser("firefox"), service: .twitter)
@@ -137,7 +137,7 @@ struct SettingsChecks {
                   "Unselecting all services retained a queued browser read or stale result")
 
         let fileHarness = FileHarness()
-        let fileModel = CookieStatusModel(scopedProbe: { _, _, _ in .unavailable }, inspectFile: fileHarness.inspect)
+        let fileModel = CookieStatusModel(probe: { _, _, _ in .unavailable }, inspectFile: fileHarness.inspect)
         fileModel.refreshSelection(source: .file(URL(fileURLWithPath: "/tmp/first")), services: [])
         try await wait { fileHarness.count == 1 }
         fileModel.refreshSelection(source: .none, services: [])
@@ -149,7 +149,7 @@ struct SettingsChecks {
         try check(fileHarness.count == 2 && fileModel.checks.values.allSatisfy { $0 == .idle },
                   "File summary required service selection or read a browser")
         let replacementHarness = FileHarness()
-        let replacement = CookieStatusModel(scopedProbe: { _, _, _ in .unavailable }, inspectFile: replacementHarness.inspect)
+        let replacement = CookieStatusModel(probe: { _, _, _ in .unavailable }, inspectFile: replacementHarness.inspect)
         replacement.refreshSelection(source: .file(URL(fileURLWithPath: "/tmp/old")), services: [])
         try await wait { replacementHarness.count == 1 }
         replacement.refreshSelection(source: .file(URL(fileURLWithPath: "/tmp/new")), services: [])

@@ -66,7 +66,9 @@ struct XtreamPanel: View, Equatable {
                 Picker("Catalog", selection: Binding(get: { library.section }, set: { library.switchSection($0) })) {
                     ForEach(XtreamSection.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                 }.pickerStyle(.segmented).labelsHidden().accessibilityLabel("Catalog")
-                XtreamCategoryField(selection: Binding(get: { library.categoryID }, set: { library.browse(library.section, categoryID: $0) }), categories: library.categories)
+                CategoryPopUpField(selection: Binding(get: { library.categoryID }, set: { library.browse(library.section, categoryID: $0) }),
+                                   options: [.init(title: "All categories", value: nil)] + library.categories.map { .init(title: $0.name, value: $0.id) },
+                                   accessibilityLabel: "Category")
                     .frame(height: 26)
                 TextField("Find a title", text: Binding(get: { library.search }, set: { library.setSearch($0) })).textFieldStyle(.roundedBorder)
                     .focused($searchFocused).accessibilityLabel("Find a title").frame(height: 26)
@@ -277,7 +279,7 @@ private struct XtreamTitleList: View, Equatable {
                                 }
                             }
                             Spacer(minLength: 0)
-                            Image(systemName: playingID == section.rawValue + "/" + item.id ? "checkmark" : section == .live ? "play.fill" : "chevron.right")
+                            Image(systemName: playingID == XtreamLibrary.playingKey(section, item.id) ? "checkmark" : section == .live ? "play.fill" : "chevron.right")
                                 .font(.caption).foregroundStyle(.secondary).accessibilityHidden(true)
                         }.frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 8).padding(.vertical, 6).contentShape(Rectangle())
@@ -290,37 +292,5 @@ private struct XtreamTitleList: View, Equatable {
                 }
             }
         }.scrollTargetLayout()
-    }
-}
-
-private struct XtreamCategoryField: NSViewRepresentable {
-    @Binding var selection: String?
-    let categories: [XtreamCategory]
-    private var values: [String?] { [nil] + categories.map { Optional($0.id) } }
-    func makeNSView(context: Context) -> NSPopUpButton {
-        let button = NSPopUpButton(frame: .zero, pullsDown: false)
-        button.setAccessibilityLabel("Category")
-        button.target = context.coordinator; button.action = #selector(Coordinator.select(_:))
-        button.cell?.lineBreakMode = .byTruncatingTail
-        return button
-    }
-    func updateNSView(_ button: NSPopUpButton, context: Context) {
-        context.coordinator.parent = self
-        let titles = ["All categories"] + categories.map(\.name)
-        if button.itemTitles != titles { button.removeAllItems(); button.addItems(withTitles: titles) }
-        button.selectItem(at: values.firstIndex(of: selection) ?? 0)
-    }
-    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSPopUpButton, context: Context) -> CGSize? {
-        // Menu contents must not determine the inspector's width.
-        CGSize(width: proposal.width ?? 0, height: nsView.intrinsicContentSize.height)
-    }
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
-    @MainActor final class Coordinator: NSObject {
-        var parent: XtreamCategoryField
-        init(_ parent: XtreamCategoryField) { self.parent = parent }
-        @objc func select(_ sender: NSPopUpButton) {
-            guard parent.values.indices.contains(sender.indexOfSelectedItem) else { return }
-            parent.selection = parent.values[sender.indexOfSelectedItem]
-        }
     }
 }

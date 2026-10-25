@@ -348,7 +348,7 @@ struct ControllerView: View {
             PlaybackTimeline(controller: controller, scrub: $scrub, scrubbing: $scrubbing, perform: perform)
                 .frame(height: 28)
             HStack {
-                Text(livePositionLabel)
+                Text(controller.positionLabel(scrubbingTo: scrubbing ? scrub : nil))
                 Spacer()
                 if LivePolicy.supportsTimeShift(status), !LivePolicy.isAtLive(status), status.liveOffset != nil {
                     Button("Go Live") { perform { try controller.goLive() } }
@@ -370,11 +370,11 @@ struct ControllerView: View {
                     .disabled(queue.currentIndex == 0 || busy)
                     .help("Previous playlist item").accessibilityLabel("Previous playlist item")
             }
-            Button { perform { try controller.skip(by: -10) } } label: { Image(systemName: "gobackward.10") }
-                .disabled(!PlaybackPolicy.canSkip(status, by: -10, position: controller.pendingSeek))
+            Button { perform { try controller.skip(by: -MenuModel.skipInterval) } } label: { Image(systemName: "gobackward.10") }
+                .disabled(!PlaybackPolicy.canSkip(status, by: -MenuModel.skipInterval, position: controller.pendingSeek))
                 .help("Back 10 seconds (←)").accessibilityLabel("Back 10 seconds")
             Button {
-                if isPlaying { controller.pause() } else { perform { try controller.play() } }
+                perform { try controller.togglePlayback() }
             } label: {
                 Image(systemName: isPlaying ? "pause.fill" : "play.fill")
             }
@@ -382,8 +382,8 @@ struct ControllerView: View {
             .disabled(!canControl)
             .accessibilityLabel(isPlaying ? "Pause" : "Play")
             .help(isPlaying ? "Pause (Space)" : "Play (Space)")
-            Button { perform { try controller.skip(by: 10) } } label: { Image(systemName: "goforward.10") }
-                .disabled(!PlaybackPolicy.canSkip(status, by: 10, position: controller.pendingSeek))
+            Button { perform { try controller.skip(by: MenuModel.skipInterval) } } label: { Image(systemName: "goforward.10") }
+                .disabled(!PlaybackPolicy.canSkip(status, by: MenuModel.skipInterval, position: controller.pendingSeek))
                 .help("Forward 10 seconds (→)").accessibilityLabel("Forward 10 seconds")
             if let queue = status.queue {
                 Button { perform { try controller.next() } } label: { Image(systemName: "forward.end.fill") }
@@ -427,16 +427,7 @@ struct ControllerView: View {
         }
     }
 
-    private var livePositionLabel: String {
-        if status.isLive {
-            return LivePolicy.positionLabel(status, position: scrubbing ? scrub : controller.pendingSeek)
-        }
-        return PlaybackFormat.time(scrubbing ? scrub : (controller.pendingSeek ?? status.position))
-    }
-
-    private func perform(_ action: () throws -> Void) {
-        do { try action() } catch { controller.displayError(error) }
-    }
+    private func perform(_ action: () throws -> Void) { controller.perform(action) }
 
 }
 
@@ -453,12 +444,6 @@ private struct PlaybackTimeline: View {
 
     private var status: PlaybackSnapshot { controller.snapshot }
     private var range: SeekRange? { PlaybackPolicy.activeSeekRange(status) }
-    private var positionLabel: String {
-        if status.isLive {
-            return LivePolicy.positionLabel(status, position: scrubbing ? scrub : controller.pendingSeek)
-        }
-        return PlaybackFormat.time(scrubbing ? scrub : (controller.pendingSeek ?? status.position))
-    }
     private var progressHelp: String {
         if status.isLive, !LivePolicy.supportsTimeShift(status) {
             return "Live broadcast. No rewind window is currently available."
@@ -492,7 +477,7 @@ private struct PlaybackTimeline: View {
                 .padding(.top, 8)
                 .disabled(!PlaybackPolicy.canSeek(status))
                 .accessibilityLabel("Playback position")
-                .accessibilityValue(positionLabel)
+                .accessibilityValue(controller.positionLabel(scrubbingTo: scrubbing ? scrub : nil))
                 .accessibilityHint(progressHelp)
                 .help(progressHelp)
                 if PlaybackPolicy.canSeek(status), let hoverTime {
@@ -520,5 +505,13 @@ private struct PlaybackTimeline: View {
                 }
             }
         }
+    }
+}
+
+private extension PlaybackController {
+    /// Elapsed time, or the live offset, including a scrub or seek still in progress.
+    func positionLabel(scrubbingTo scrub: Double?) -> String {
+        if snapshot.isLive { return LivePolicy.positionLabel(snapshot, position: scrub ?? pendingSeek) }
+        return PlaybackFormat.time(scrub ?? pendingSeek ?? snapshot.position)
     }
 }

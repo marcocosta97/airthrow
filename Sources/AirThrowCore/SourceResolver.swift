@@ -42,31 +42,32 @@ public struct HLSAudioOption: Sendable, Equatable {
 }
 
 public struct ResolvedSource: Sendable {
-    public let url: URL
+    public private(set) var url: URL
     public let title: String?
     // Keep request metadata in memory. Never put URLs, headers, or helper output into status/logs.
-    public let headers: [String: String]
-    public let audio: MediaTrack?
+    public private(set) var headers: [String: String]
+    public private(set) var audio: MediaTrack?
     public let hlsAudioOptions: [HLSAudioOption]
     public var hlsVariant: HLSVariantSelection?
-    public let needsPreparation: Bool
+    public private(set) var needsPreparation: Bool
     /// The source must be exposed through AirThrow's LAN server before AVPlayer
     /// can hand it to a receiver. This is independent of whether tracks are remuxed.
     public let needsDelivery: Bool
     public let delivery: MediaDelivery
     /// Positive video evidence from an inspected presentation, not its URL or extension.
-    public let videoKnownPresent: Bool
+    public private(set) var videoKnownPresent: Bool
     /// The source is an indefinite presentation; preparation must use a rolling playlist.
-    public let isLive: Bool
+    public private(set) var isLive: Bool
     /// The conversion preference in force when this plan was chosen.
-    public let conversionPolicy: ConversionPolicy
-    public let enhancement: VideoEnhancement
+    public private(set) var conversionPolicy: ConversionPolicy
+    public private(set) var enhancement: VideoEnhancement
+    public private(set) var upscaler: VideoUpscaler
     /// Per-load preparation hint, independent of presentation identity. Cached
     /// preparation warms this position without encoding all preceding chunks.
     public var preparationPosition: Double? = nil
     /// A concrete processing tier chosen by the selector. Nil means the tier is
     /// derived from `needsPreparation`; set it to request audio/video conversion.
-    public let plannedPath: PlaybackPath?
+    public private(set) var plannedPath: PlaybackPath?
     public var playbackPath: PlaybackPath { plannedPath ?? (needsPreparation ? .remux : .direct) }
     public var needsPreparationPipeline: Bool { needsPreparation || needsDelivery }
     public init(url: URL, title: String? = nil, headers: [String: String] = [:], audio: MediaTrack? = nil,
@@ -75,7 +76,7 @@ public struct ResolvedSource: Sendable {
                 videoKnownPresent: Bool = false, isLive: Bool = false,
                 conversionPolicy: ConversionPolicy = .avoidVideo,
                 plannedPath: PlaybackPath? = nil,
-                enhancement: VideoEnhancement = .original) {
+                enhancement: VideoEnhancement = .original, upscaler: VideoUpscaler = .automatic) {
         self.url = url; self.title = title; self.headers = headers; self.audio = audio
         self.hlsAudioOptions = hlsAudioOptions
         self.hlsVariant = hlsVariant
@@ -86,50 +87,43 @@ public struct ResolvedSource: Sendable {
         self.isLive = isLive
         self.conversionPolicy = conversionPolicy
         self.enhancement = enhancement
+        self.upscaler = upscaler
         self.plannedPath = plannedPath
     }
 
     /// Copy the same presentation with a different conversion preference. The
     /// planned path and every delivery flag are preserved.
     public func withConversionPolicy(_ policy: ConversionPolicy) -> ResolvedSource {
-        var result = ResolvedSource(url: url, title: title, headers: headers, audio: audio,
-                       hlsAudioOptions: hlsAudioOptions, hlsVariant: hlsVariant,
-                       needsPreparation: needsPreparation, needsDelivery: needsDelivery,
-                       delivery: delivery, videoKnownPresent: videoKnownPresent, isLive: isLive,
-                       conversionPolicy: policy, plannedPath: plannedPath, enhancement: enhancement)
-        result.preparationPosition = preparationPosition
+        var result = self
+        result.conversionPolicy = policy
         return result
     }
 
-    public func withEnhancement(_ choice: VideoEnhancement) -> ResolvedSource {
-        var result = ResolvedSource(url: url, title: title, headers: headers, audio: audio,
-                       hlsAudioOptions: hlsAudioOptions, hlsVariant: hlsVariant,
-                       needsPreparation: needsPreparation || choice != .original,
-                       needsDelivery: needsDelivery, delivery: delivery,
-                       videoKnownPresent: videoKnownPresent, isLive: isLive,
-                       conversionPolicy: conversionPolicy,
-                       plannedPath: choice == .original ? plannedPath : .videoConversion,
-                       enhancement: choice)
-        result.preparationPosition = preparationPosition
+    public func withEnhancement(_ choice: VideoEnhancement, upscaler: VideoUpscaler = .automatic) -> ResolvedSource {
+        var result = self
+        result.enhancement = choice
+        result.upscaler = upscaler
+        if choice != .original {
+            result.needsPreparation = true
+            result.plannedPath = .videoConversion
+        }
         return result
     }
 
     public func withTransportRemux(isLive: Bool) -> ResolvedSource {
-        var result = ResolvedSource(url: url, title: title, headers: headers, audio: audio, hlsAudioOptions: hlsAudioOptions, hlsVariant: hlsVariant,
-            needsPreparation: true, needsDelivery: needsDelivery, delivery: delivery, videoKnownPresent: true, isLive: isLive,
-            conversionPolicy: conversionPolicy, plannedPath: .remux, enhancement: enhancement)
-        result.preparationPosition = preparationPosition
+        var result = self
+        result.needsPreparation = true
+        result.videoKnownPresent = true
+        result.isLive = isLive
+        result.plannedPath = .remux
         return result
     }
 
     /// A catalog's Live section identifies an indefinite presentation even
     /// before native inspection exposes the moving seek window.
     public func withLivePresentation() -> ResolvedSource {
-        var result = ResolvedSource(url: url, title: title, headers: headers, audio: audio,
-            hlsAudioOptions: hlsAudioOptions, hlsVariant: hlsVariant, needsPreparation: needsPreparation,
-            needsDelivery: needsDelivery, delivery: delivery, videoKnownPresent: videoKnownPresent,
-            isLive: true, conversionPolicy: conversionPolicy, plannedPath: plannedPath, enhancement: enhancement)
-        result.preparationPosition = preparationPosition
+        var result = self
+        result.isLive = true
         return result
     }
 
@@ -140,11 +134,10 @@ public struct ResolvedSource: Sendable {
     /// Replacement inputs for a helper process. Headers are whatever the helper
     /// may see; callers clearing them have already moved the origin behind a relay.
     func withHelperInputs(url: URL, headers: [String: String], audio: MediaTrack?) -> ResolvedSource {
-        var result = ResolvedSource(url: url, title: title, headers: headers, audio: audio, hlsAudioOptions: hlsAudioOptions, hlsVariant: hlsVariant,
-            needsPreparation: needsPreparation, needsDelivery: needsDelivery, delivery: delivery,
-            videoKnownPresent: videoKnownPresent, isLive: isLive, conversionPolicy: conversionPolicy,
-            plannedPath: plannedPath, enhancement: enhancement)
-        result.preparationPosition = preparationPosition
+        var result = self
+        result.url = url
+        result.headers = headers
+        result.audio = audio
         return result
     }
 }
@@ -323,7 +316,7 @@ enum HLSMaster {
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty, value.count <= limit,
               !value.contains("://"), !value.contains("/"), !value.contains("?"), !value.contains("@"),
-              !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return nil }
+              !value.containsControlCharacters else { return nil }
         return value
     }
 
@@ -433,19 +426,14 @@ public enum HLSVideoEvidence {
                 return await transportCharacteristics(at: reference.url, depth: depth + 1,
                     isLive: livePresentation(in: fetched.data) ?? isLive)
             }
-            let sample = fetched.data
             guard let executable = HelperExecutables(environment: ProcessInfo.processInfo.environment)
                     .executable("ffprobe", override: "AIRTHROW_FFPROBE") else { return nil }
-            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
-                                                   attributes: [.posixPermissions: 0o700])
-            defer { try? FileManager.default.removeItem(at: directory) }
-            let local = directory.appendingPathComponent("sample.ts")
-            try sample.write(to: local, options: .atomic)
-            let output = try await HelperProcess.run(executable: executable, arguments: [
-                "-v", "error", "-protocol_whitelist", "file", "-f", "mpegts", "-select_streams", "v:0",
-                "-show_entries", "stream=codec_name,width,height,pix_fmt,color_transfer,profile,level", "-of", "json", local.path
-            ], timeout: .seconds(4), outputLimit: 16 * 1024)
+            let output = try await withLocalSample(fetched.data) { local in
+                try await HelperProcess.run(executable: executable, arguments: [
+                    "-v", "error", "-protocol_whitelist", "file", "-f", "mpegts", "-select_streams", "v:0",
+                    "-show_entries", "stream=codec_name,width,height,pix_fmt,color_transfer,profile,level", "-of", "json", local.path
+                ], timeout: .seconds(4), outputLimit: 16 * 1024)
+            }
             return decodeTransportCharacteristics(output, delivery: depth == 0 ? .transportStream : .hls, isLive: isLive)
         } catch { return nil }
     }
@@ -528,13 +516,18 @@ public enum HLSVideoEvidence {
 
     private static func sampledTransportVideo(at url: URL) async throws -> Bool {
         guard let sample = try await transportSample(at: url) else { return false }
+        return try await withLocalSample(sample) { await videoTracks(at: $0) }
+    }
+
+    /// The sample lives in a private directory that is removed after inspection.
+    private static func withLocalSample<T>(_ sample: Data, _ inspect: (URL) async throws -> T) async throws -> T {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
                                                attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: directory) }
         let local = directory.appendingPathComponent("sample.ts")
-        try sample.write(to: local)
-        return await videoTracks(at: local)
+        try sample.write(to: local, options: .atomic)
+        return try await inspect(local)
     }
 
     private static func transportSample(at url: URL) async throws -> Data? {

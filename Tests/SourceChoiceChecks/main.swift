@@ -49,10 +49,12 @@ private actor PreparationRequests {
 
 private actor EnhancementRequests {
     private(set) var choices: [VideoEnhancement] = []
+    private(set) var backends: [VideoUpscaler] = []
     private(set) var policies: [ConversionPolicy] = []
     private(set) var urls: [URL] = []
     func record(_ source: ResolvedSource) {
         choices.append(source.enhancement)
+        backends.append(source.upscaler)
         policies.append(source.conversionPolicy)
         urls.append(source.url)
     }
@@ -198,14 +200,55 @@ struct SourceChoiceChecks {
         try await originalSourceChoiceUsesRequestedPolicy(website: website, native: native720,
                                                           conversion: conversion1080, prepareSource: prepareSource)
         try await failedEnhancementRestoresOriginal(url: audioURL)
+        try await backendPreferences(website: website, source: remux1080, prepareSource: prepareSource)
         let genericPage = URL(string: "https://video.example/watch?id=generic-private-query")!
         try await explicitChoiceReResolves(website: genericPage, high: native1080, low: native720)
         try await staleResolutionRejected(website: genericPage, videoURL: videoURL, native: native720)
         try await snapshotIsPrivate(base: base, website: genericPage, secret: secret)
-        print("27/27 source-choice controller checks passed (no physical receiver)")
+        print("28/28 source-choice controller checks passed (no physical receiver)")
         if CommandLine.arguments.count == 4 {
             try await genericExtraction(base: base, helper: CommandLine.arguments[3])
         }
+    }
+
+    static func backendPreferences(website: URL, source: MediaCandidate,
+                                   prepareSource: @escaping @Sendable (ResolvedSource) async throws -> PreparedMedia) async throws {
+        let key = VideoUpscaler.preferenceKey
+        let previous = UserDefaults.standard.object(forKey: key)
+        defer {
+            if let previous { UserDefaults.standard.set(previous, forKey: key) }
+            else { UserDefaults.standard.removeObject(forKey: key) }
+        }
+        UserDefaults.standard.set(VideoUpscaler.standard.rawValue, forKey: key)
+        let resolver = ScriptedResolver([website.absoluteString: [
+            .init(candidates: [source], delay: .milliseconds(250))]])
+        let requests = EnhancementRequests()
+        let controller = PlaybackController(resolveCandidates: { try await resolver.candidates(for: $0) },
+                                            prepareSource: { selected in
+            await requests.record(selected)
+            return try await prepareSource(selected)
+        })
+        defer { controller.shutdown() }
+        try controller.load(website.absoluteString)
+        UserDefaults.standard.set(VideoUpscaler.lanczos.rawValue, forKey: key)
+        let loaded = try await settle(controller)
+        try check(loaded.videoUpscaler == .standard && loaded.videoEnhancement == .original,
+                  "Delayed resolution did not capture the backend without enabling enhancement")
+        try controller.applyVideoOptions(sourceID: nil, enhancement: .original, output4K: false, upscaler: .lanczos)
+        try check(controller.snapshot.videoUpscaler == .lanczos && controller.snapshot.videoEnhancement == .original,
+                  "Per-video backend override was not stored")
+        try controller.selectEnhancement(.cleanup1080)
+        let enhanced = try await settle(controller)
+        let backends = await requests.backends
+        // Cleanup at the source's own height stays on the hardware scaler.
+        try check(enhanced.videoUpscaler == .automatic && backends.last == .automatic,
+                  "Native-resolution cleanup kept \(String(describing: enhanced.videoUpscaler)) / \(String(describing: backends.last))")
+        try controller.selectEnhancement(.original)
+        _ = try await settle(controller)
+        try check(controller.snapshot.videoUpscaler == .automatic && controller.player.rate == 0,
+                  "Restoring Original changed the hardware scaler or started playback")
+        await controller.shutdownAndWait()
+        print("PASS default backend captured during resolution and native-resolution cleanup stays on hardware scaling")
     }
 
     // Optional integration check with the installed generic extractor and original

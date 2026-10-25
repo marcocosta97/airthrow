@@ -13,6 +13,9 @@ enum MediaURLSecrets {
         if parts.queryItems?.contains(where: { credentialQueries.contains($0.name.lowercased()) }) == true {
             return true
         }
+        // A recognized website's own path shape (e.g. x.com/<user>/status/<id>)
+        // can otherwise collide with the bare Xtream `account/account/id` guess.
+        guard WebsiteService.service(for: url) == nil else { return false }
         return credentialSpan(in: parts.percentEncodedPath) != nil
     }
 
@@ -29,7 +32,7 @@ enum MediaURLSecrets {
             }
             parts.percentEncodedQuery = kept.isEmpty ? nil : kept.joined(separator: "&")
         }
-        if let span = credentialSpan(in: parts.percentEncodedPath) {
+        if WebsiteService.service(for: url) == nil, let span = credentialSpan(in: parts.percentEncodedPath) {
             var segments = parts.percentEncodedPath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
             guard segments.indices.contains(span.lowerBound) else { return parts.url ?? url }
             segments.removeSubrange(span)

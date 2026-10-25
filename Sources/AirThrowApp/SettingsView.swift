@@ -27,24 +27,17 @@ final class CookieStatusModel: ObservableObject {
     private var fileRevision = 0
     private let inspectFile: @Sendable (URL) -> CookieFileInspection
     @Published private(set) var installedBrowsers: [String] = []
-    var check: Check { checks[.youtube] ?? .idle }
     private var task: Task<Void, Never>?
     private var requested: [WebsiteService: YouTubeCookies] = [:]
     private var revisions: [WebsiteService: Int] = [:]
     private var pending = Set<WebsiteService>()
     private let probe: @Sendable (WebsiteService, YouTubeCookies, URL) -> YouTubeCookieStatus
 
-    init() {
-        probe = { service, source, home in source.probe(for: service, home: home) }
-        inspectFile = CookieFileInspection.inspect
-    }
-    init(probe: @escaping @Sendable (YouTubeCookies, URL) -> YouTubeCookieStatus) {
-        self.probe = { _, source, home in probe(source, home) }
-        inspectFile = CookieFileInspection.inspect
-    }
-    init(scopedProbe: @escaping @Sendable (WebsiteService, YouTubeCookies, URL) -> YouTubeCookieStatus,
+    init(probe: @escaping @Sendable (WebsiteService, YouTubeCookies, URL) -> YouTubeCookieStatus = { service, source, home in
+             source.probe(for: service, home: home)
+         },
          inspectFile: @escaping @Sendable (URL) -> CookieFileInspection = CookieFileInspection.inspect) {
-        probe = scopedProbe
+        self.probe = probe
         self.inspectFile = inspectFile
     }
 
@@ -109,6 +102,9 @@ struct SettingsView: View {
     @AppStorage(PreparationPreferences.retainAllKey) private var retainAll = false
     @AppStorage(PreparationPreferences.remuxCacheKey) private var remuxCache = false
     @AppStorage(PreparationPreferences.windowSecondsKey) private var windowSeconds = 60
+    @AppStorage(VideoUpscaler.preferenceKey) private var upscaler = VideoUpscaler.automatic.rawValue
+    @AppStorage(PreparationPreferences.aiBeforePlaybackKey) private var aiBeforePlayback = false
+    @AppStorage(PreparationPreferences.noiseReductionKey) private var noiseReduction = CleanupNoiseReduction.defaultBackend.rawValue
 
     var body: some View {
         Form {
@@ -144,6 +140,56 @@ struct SettingsView: View {
                 Text("Automatic selection favors quality within your re-encoding preference, even if more processing is needed. Applies to the next load or source change; enhancements are unchanged.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            Section("Experimental AI processing") {
+                Picker("Default upscaler", selection: $upscaler) {
+                    ForEach(VideoUpscaler.allCases, id: \.self) { backend in
+                        Text(backend.label).tag(backend.rawValue)
+                            .disabled(SuperResolutionSupport.unavailableReason(backend) != nil)
+                    }
+                }
+                Picker("AI preparation", selection: $aiBeforePlayback) {
+                    Text("During playback").tag(false)
+                    Text("Complete before playback").tag(true)
+                }
+                Text("Applies to the next load. AI is used only when you choose Upscale or Clean up and upscale in Video options.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text(aiBeforePlayback
+                     ? "The full video is converted before it becomes ready. Startup can take longer and uses more temporary storage."
+                     : "Playback can wait for new segments if this Mac cannot prepare them fast enough. Some sources require complete preparation.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let backend = VideoUpscaler(rawValue: upscaler), backend.isAI,
+                   let reason = SuperResolutionSupport.unavailableReason(backend) {
+                    Text(reason).font(.caption).foregroundStyle(.secondary)
+                }
+                if upscaler == VideoUpscaler.standard.rawValue && !controller.superResolutionModelReady {
+                    Button(controller.downloadingSuperResolutionModel ? "Downloading model…" : "Download Standard model") {
+                        Task { await controller.downloadSuperResolutionModel() }
+                    }
+                    .disabled(controller.downloadingSuperResolutionModel
+                        || SuperResolutionSupport.unavailableReason(.standard) != nil)
+                    Text("macOS downloads and manages the model. It is not included in AirThrow.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Section("Cleanup") {
+                Picker("Noise reduction", selection: $noiseReduction) {
+                    Text("Automatic").tag(CleanupNoiseReduction.automatic.rawValue)
+                if #available(macOS 26, *) {
+                        Text("GPU (Core Image)").tag(CleanupNoiseReduction.gpu.rawValue)
+                    }
+                    Text("FFmpeg (CPU)").tag(CleanupNoiseReduction.ffmpeg.rawValue)
+                    Text(TemporalNoiseFilterSupport.unavailableReason == nil
+                         ? "Apple temporal noise filter (experimental)"
+                         : "Apple temporal noise filter (Not supported)")
+                        .tag(CleanupNoiseReduction.appleTemporal.rawValue)
+                        .disabled(TemporalNoiseFilterSupport.unavailableReason != nil)
+                }
+                Text("Applies to the next load when you choose Clean up and upscale in Video options. Debanding remains enabled with either method.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let reason = TemporalNoiseFilterSupport.unavailableReason {
+                    Text(reason).font(.caption).foregroundStyle(.secondary)
+                }
             }
             Section("Prepared video storage") {
                 Picker("Maximum preparation space", selection: $preparationGiB) {
