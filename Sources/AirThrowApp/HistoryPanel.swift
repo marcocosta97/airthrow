@@ -31,7 +31,7 @@ struct HistoryPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             LibraryHeader(title: "History") {
-                Menu("Options", systemImage: "ellipsis") {
+                Menu {
                     if controller.snapshot.queue != nil {
                         Button("Show Queue", systemImage: "list.bullet") { controller.inspectorPage = .playlist }
                         Divider()
@@ -39,6 +39,11 @@ struct HistoryPanel: View {
                     Button("Clear History", role: .destructive) { confirmClear = true }
                         .disabled(!controller.history.contains(where: { !$0.isPinned }))
                         .help("Remove all unpinned entries")
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "ellipsis")
+                        Text("Options")
+                    }
                 }
                     .help("History options").accessibilityLabel("History options")
             }
