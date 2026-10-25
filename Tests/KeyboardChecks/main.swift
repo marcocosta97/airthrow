@@ -17,6 +17,10 @@ import AppKit
     var received = 0
     override func keyDown(with event: NSEvent) { received += 1 }
 }
+@MainActor private final class SliderSink: NSSlider {
+    var received = 0
+    override func keyDown(with event: NSEvent) { received += 1 }
+}
 @MainActor private final class TableSink: NSTableView {
     var received = 0
     override var acceptsFirstResponder: Bool { true }
@@ -83,6 +87,11 @@ import AppKit
         check(window.makeFirstResponder(segments), "Cannot install segmented control")
         send(49); send(124)
         check(keys.count == 4 && segments.received == 2, "Playback keys intercepted a segmented control")
+        let slider = SliderSink(frame: sink.bounds)
+        window.contentView = slider
+        check(window.makeFirstResponder(slider), "Cannot install slider responder")
+        send(49); send(123); send(124)
+        check(keys.count == 4 && slider.received == 3, "Playback keys intercepted slider adjustment")
         let table = TableSink(frame: sink.bounds)
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
         table.addTableColumn(column)
@@ -95,6 +104,6 @@ import AppKit
         check(keys.count == 4 && table.received == 2, "Playback keys intercepted a list")
         window.resignKey()
         check(!window.isVisible, "Keyboard checks opened a visible window")
-        print("PASS window-scoped Space/arrows, repeats, modifiers, disabled actions, text editing, buttons, segments and lists (headless)")
+        print("PASS window-scoped Space/arrows, repeats, modifiers, disabled actions, text editing, buttons, segments, sliders and lists (headless)")
     }
 }

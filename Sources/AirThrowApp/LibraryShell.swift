@@ -16,6 +16,8 @@ struct LibraryShell: View {
     @ObservedObject var presentation: ControllerPresentation
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var width: CGFloat = 960
+    @State private var sourceDraft = ""
+    @State private var regularSidebarVisible = true
 
     private var sizeClass: LibrarySizeClass { LibrarySizeClass(width: width) }
     private var selection: LibrarySelection {
@@ -32,7 +34,7 @@ struct LibraryShell: View {
         let compact = sizeClass == .compact
         VStack(spacing: 0) {
             if presentation.sourceVisible {
-                SourceBar(controller: controller, presentation: presentation, compact: compact)
+                SourceBar(controller: controller, presentation: presentation, compact: compact, url: $sourceDraft)
                 Divider()
             } else if controller.iptvImporting {
                 importStrip
@@ -61,8 +63,18 @@ struct LibraryShell: View {
         }
         .onPreferenceChange(LibraryWidthKey.self) { if $0 > 1 { width = $0 } }
         .onChange(of: sizeClass) { previous, next in
-            if next == .compact { presentation.playlistVisible = false }
-            else if previous == .compact { presentation.playlistVisible = true }
+            if next == .compact {
+                regularSidebarVisible = presentation.playlistVisible
+                presentation.playlistVisible = false
+            } else if previous == .compact {
+                presentation.playlistVisible = regularSidebarVisible
+            }
+        }
+        .onChange(of: controller.sourceInput, initial: true) { _, input in
+            if let input { sourceDraft = input }
+        }
+        .onChange(of: controller.inspectorPage) { _, _ in
+            if sizeClass == .compact { presentation.playlistVisible = false }
         }
         .onChange(of: presentation.openFileRequest) { _, _ in
             presentVideoPicker { path in
@@ -184,6 +196,7 @@ struct LibraryShell: View {
             case .xtream: controller.inspectorPage = .xtream
             case .iptv(let id): controller.selectIPTVPlaylist(id)
             }
+            if sizeClass == .compact { presentation.playlistVisible = false }
         })
     }
 
@@ -196,7 +209,9 @@ struct LibraryShell: View {
                 ContentUnavailableView {
                     Label("Nothing queued", systemImage: "list.bullet")
                 } description: {
-                    Text("Use Open in the toolbar, or drop files here. One file replaces playback.")
+                    Text("Open a video or drop a file here to get started.")
+                } actions: {
+                    openSourceButton
                 }
             }
         case .channels:
@@ -207,7 +222,10 @@ struct LibraryShell: View {
                 ContentUnavailableView {
                     Label("No playlists", systemImage: "tv")
                 } description: {
-                    Text("Use Open in the toolbar to add an M3U playlist. Each one stays in the library until you remove it.")
+                    Text("Add an M3U playlist to browse its channels. Saved playlists appear in the sidebar.")
+                } actions: {
+                    Button("Add Playlist…", action: openSource)
+                    Button("Add Xtream Server…") { presentation.xtreamPlaylistVisible = true }
                 }
             }
         case .xtream:
@@ -216,8 +234,16 @@ struct LibraryShell: View {
                             placesDetailBesideList: sizeClass == .expanded).equatable()
             }
         case .history:
-            HistoryPanel(controller: controller)
+            HistoryPanel(controller: controller, openSource: openSource)
         }
+    }
+    private var openSourceButton: some View {
+        Button("Open Video…", systemImage: "plus", action: openSource)
+    }
+
+    private func openSource() {
+        presentation.sourceVisible = true
+        presentation.focusSourceRequest += 1
     }
 }
 
@@ -225,7 +251,7 @@ private struct SourceBar: View {
     @ObservedObject var controller: PlaybackController
     @ObservedObject var presentation: ControllerPresentation
     var compact: Bool
-    @State private var url = ""
+    @Binding var url: String
     @FocusState private var urlFocused: Bool
 
     private var trimmed: String { url.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -257,13 +283,10 @@ private struct SourceBar: View {
         .padding(.vertical, 10)
         .onChange(of: presentation.focusSourceRequest) { _, _ in urlFocused = true }
         .onAppear { urlFocused = true }
-        .onReceive(controller.$sourceInput) { input in
-            if let input { url = input }
-        }
     }
 
     private var sourceField: some View {
-        TextField("Video or playlist URL", text: $url)
+        TextField("Video, playlist URL, or file path", text: $url)
             .textFieldStyle(.roundedBorder)
             .focused($urlFocused)
             .onSubmit(play)
@@ -282,10 +305,11 @@ private struct SourceBar: View {
                 .help("Cancel loading the channel playlist")
         } else {
             Button(action: play) {
-                Image(systemName: "play.fill")
+                Label("Play", systemImage: "play.fill")
             }
             .disabled(trimmed.isEmpty)
             .keyboardShortcut(.defaultAction)
+            .buttonStyle(.borderedProminent)
             .help("Play this source. Play replaces what is playing. An M3U playlist is added to the library.")
             .accessibilityLabel("Play")
             if somethingPlaying {

@@ -68,6 +68,7 @@ struct ControllerWindowView: View {
                 Image(systemName: "sidebar.left")
             }
             .toggleStyle(.button)
+            .disabled(presentation.settingsVisible)
             .help(presentation.playlistVisible ? "Hide sidebar" : "Show sidebar")
             .accessibilityLabel(presentation.playlistVisible ? "Hide sidebar" : "Show sidebar")
         }
@@ -81,8 +82,8 @@ struct ControllerWindowView: View {
                 Image(systemName: "plus")
             }
             .toggleStyle(.button)
-            .help(presentation.sourceVisible ? "Hide the video field" : "Show the video field")
-            .accessibilityLabel(presentation.sourceVisible ? "Hide video field" : "Show video field")
+            .help(presentation.sourceVisible ? "Hide source field" : "Open video or playlist (⌘L)")
+            .accessibilityLabel(presentation.sourceVisible ? "Hide source field" : "Open video or playlist")
         }
         ToolbarItem(placement: .primaryAction) {
             ReceiverToolbarButton(controller: controller, connection: receiverConnection)
@@ -127,7 +128,16 @@ struct ControllerWindowView: View {
                 .accessibilityHidden(presentation.settingsVisible)
 
             if presentation.settingsVisible {
-                SettingsView(controller: controller, cookieStatus: cookieStatus)
+                VStack(spacing: 0) {
+                    HStack {
+                        Text("Settings").font(.headline)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 12)
+                    SettingsView(controller: controller, cookieStatus: cookieStatus)
+                }
+                    .frame(maxWidth: 760)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(Color(nsColor: SurfaceColor.window))
                     .transition(.opacity)
@@ -258,20 +268,25 @@ struct ControllerView: View {
 
     private var playback: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .center, spacing: 16) {
-                titleBlock(limit: wide ? 2 : 3)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                transport
-                    .fixedSize(horizontal: true, vertical: false)
+            if wide {
+                HStack(alignment: .center, spacing: 20) {
+                    titleBlock(limit: 2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    transport.fixedSize(horizontal: true, vertical: false)
+                }
+                timeline
+            } else {
+                titleBlock(limit: 2)
+                timeline
+                transport.frame(maxWidth: .infinity)
             }
-            timeline
         }
     }
 
     private func titleBlock(limit: Int) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 8) {
-                if status.state == .buffering || status.seekInProgress == true {
+                if busy || status.state == .buffering || status.seekInProgress == true {
                     ProgressView().controlSize(.small).accessibilityHidden(true)
                 }
                 Text(status.title)
@@ -281,32 +296,50 @@ struct ControllerView: View {
                     .textSelection(.enabled)
                     .help(status.title)
             }
-            if showsVideoMenu || !playbackDetail.isEmpty || status.hasAudio == false {
-                HStack(spacing: 8) {
-                    if !playbackDetail.isEmpty {
-                        Text(playbackDetail)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .help(playbackDetailHelp)
-                    }
-                    if status.hasAudio == false {
-                        Label("No audio track detected. Try a link that includes audio.", systemImage: "speaker.slash")
-                            .font(.caption)
-                            .lineLimit(2)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Spacer(minLength: 0)
-                    if showsVideoMenu { VideoMenuView(controller: controller) }
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(playbackStateLabel)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+                if wide, !playbackDetail.isEmpty {
+                    Text(playbackDetail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .help(playbackDetailHelp)
                 }
+                Spacer(minLength: 0)
+                if showsVideoMenu { VideoMenuView(controller: controller) }
             }
-            if !status.externalPlaybackActive &&
-                (status.state == .awaitingReceiver || status.state == .connecting) {
-                Text("Choose an AirPlay receiver to play. Video options are available above.")
+            if status.hasAudio == false {
+                Label("No audio track detected. Try a source that includes audio.", systemImage: "speaker.slash")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if !status.externalPlaybackActive &&
+                (status.state == .awaitingReceiver || status.state == .connecting) {
+                Text("Choose a receiver with the AirPlay button to play on TV.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var playbackStateLabel: String {
+        if status.seekInProgress == true { return "Seeking…" }
+        switch status.state {
+        case .idle: return "Nothing playing"
+        case .loading: return "Loading…"
+        case .connecting: return "Connecting…"
+        case .awaitingReceiver: return "Ready for AirPlay"
+        case .ready: return "Ready"
+        case .buffering: return "Buffering…"
+        case .playing: return "Playing"
+        case .paused: return "Paused"
+        case .ended: return "Finished"
+        case .failed: return "Unable to play"
         }
     }
 
@@ -345,13 +378,10 @@ struct ControllerView: View {
             } label: {
                 Image(systemName: isPlaying ? "pause.fill" : "play.fill")
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.borderedProminent)
             .disabled(!canControl)
             .accessibilityLabel(isPlaying ? "Pause" : "Play")
             .help(isPlaying ? "Pause (Space)" : "Play (Space)")
-            Button { controller.stop() } label: { Image(systemName: "stop.fill") }
-                .disabled(status.state == .idle && status.receiverWaiting != true)
-                .help("Stop and unload video").accessibilityLabel("Stop and unload video")
             Button { perform { try controller.skip(by: 10) } } label: { Image(systemName: "goforward.10") }
                 .disabled(!PlaybackPolicy.canSkip(status, by: 10, position: controller.pendingSeek))
                 .help("Forward 10 seconds (→)").accessibilityLabel("Forward 10 seconds")
@@ -360,6 +390,10 @@ struct ControllerView: View {
                     .disabled(queue.currentIndex + 1 >= queue.items.count || busy)
                     .help("Next playlist item").accessibilityLabel("Next playlist item")
             }
+            Divider().frame(height: 16).padding(.horizontal, 2)
+            Button { controller.stop() } label: { Image(systemName: "stop.fill") }
+                .disabled(status.state == .idle && status.receiverWaiting != true)
+                .help("Stop and unload video").accessibilityLabel("Stop and unload video")
         }
         .controlSize(.regular)
     }
@@ -376,7 +410,7 @@ struct ControllerView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if status.errorReason == .preparationStorageLimit {
                     Button("Settings…") {
-                        NSApp.sendAction(NSSelectorFromString("showSettings"), to: NSApp.delegate, from: nil)
+                        presentation.settingsVisible = true
                     }
                     .controlSize(.small)
                 }

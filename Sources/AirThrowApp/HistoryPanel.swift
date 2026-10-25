@@ -24,6 +24,7 @@ struct InspectorHeader: View {
 
 struct HistoryPanel: View {
     @ObservedObject var controller: PlaybackController
+    var openSource: (() -> Void)? = nil
     @SwiftUI.State private var hoveredEntryID: UUID?
     @SwiftUI.State private var confirmClear = false
     @FocusState private var focusedRemovalID: UUID?
@@ -50,7 +51,9 @@ struct HistoryPanel: View {
                 ContentUnavailableView {
                     Label("No recent sources", systemImage: "clock")
                 } description: {
-                    Text("Load a video or playlist in Source. It will appear here for next time.")
+                    Text("Videos and playlists you open appear here for next time.")
+                } actions: {
+                    if let openSource { Button("Open Video…", systemImage: "plus", action: openSource) }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {

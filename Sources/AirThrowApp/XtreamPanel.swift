@@ -47,9 +47,7 @@ struct XtreamPanel: View, Equatable {
                 }
             } else {
                 VStack(alignment: .leading, spacing: 0) {
-                    InspectorHeader(title: "Xtream", back: library.selected == nil ? nil : {
-                        library.cancelLoading(); library.back()
-                    })
+                    InspectorHeader(title: "Xtream", back: nil)
                     if library.selected != nil {
                         details
                     } else {

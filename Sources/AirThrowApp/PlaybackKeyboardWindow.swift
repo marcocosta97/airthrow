@@ -5,8 +5,8 @@ enum PlaybackKey: Equatable {
 }
 
 /// Window-scoped transport keys for an AppKit-hosted SwiftUI controller.
-/// A text field keeps Space and the arrows. Lists and buttons do not: the
-/// library stays focused after a click, and that was swallowing playback keys.
+/// Focused controls keep their native Space and arrow-key behavior. Transport
+/// shortcuts apply when focus is on the window or noninteractive content.
 @MainActor
 class PlaybackKeyboardWindow: NSWindow {
     var playbackKeyAction: ((PlaybackKey) -> Bool)?
@@ -32,13 +32,12 @@ class PlaybackKeyboardWindow: NSWindow {
         super.sendEvent(event)
     }
 
-    /// A focused cell sits inside the field, so walk its ancestors. Buttons,
-    /// lists, and segmented controls are not included: they remain first
-    /// responder after an ordinary click and would block Space and the arrows.
+    /// SwiftUI may focus a descendant of an AppKit control. Walk its ancestors
+    /// so editing, selection, button activation, and slider adjustment stay native.
     static func controlOwnsKey(_ responder: NSResponder?) -> Bool {
         var current: NSResponder? = responder
         while let view = current as? NSView {
-            if view is NSText || view is NSTextField || view is NSPopUpButton || view is NSComboBox {
+            if view is NSText || view is NSControl {
                 return true
             }
             current = view.superview

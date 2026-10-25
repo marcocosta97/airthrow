@@ -40,7 +40,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var presentationObservation: AnyCancellable?
     private var snapshotObservation: AnyCancellable?
     private var menuObservation: AnyCancellable?
-    private var iptvObservation: AnyCancellable?
     private var httpLoginObservation: AnyCancellable?
     private var menuIsOpen = false
     private var playbackMenuItems: [MenuCommand: NSMenuItem] = [:]
@@ -87,12 +86,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             .sink { [weak self] available in
                 self?.updatePlaylistAvailability(available)
         }
-        iptvObservation = controller.$inspectorPage.dropFirst()
-            .receive(on: RunLoop.main)
-            .sink { [weak self] page in
-                guard let self, self.controller.inspectorPage == page else { return }
-                if page != .history { self.presentation.playlistVisible = true }
-            }
         httpLoginObservation = controller.$httpLoginRequest
             .map { $0?.id }
             .removeDuplicates()
@@ -266,9 +259,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             window.collectionBehavior.remove(.fullScreenNone)
             window.contentViewController = mainHosting
             window.setContentSize(NSSize(width: 960, height: 640))
+            self.window = window
             applyLibraryWindowLimits()
             window.center()
-            self.window = window
         }
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
