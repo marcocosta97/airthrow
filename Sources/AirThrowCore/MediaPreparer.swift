@@ -115,6 +115,10 @@ public final class PreparedMedia {
     private var drainingNativeInput: NativeInputPrefetch?
     private var nativeMetrics: NativeVideoMetrics?
     public var nativeProcessingDiagnostics: NativeVideoDiagnostics? { nativeMetrics?.snapshot }
+    /// Model chosen for this enhancement, when preparation walked the ranking.
+    public let resolvedUpscaler: VideoUpscaler?
+    /// Higher-ranked model skipped because it cannot process this video.
+    public let upscalerFellBackFrom: VideoUpscaler?
     fileprivate init(server: MediaHTTPServer, workspace: PreparationWorkspace? = nil,
                      sourceDuration: Double? = nil, playbackPath: PlaybackPath = .remux,
                      videoHeight: Int? = nil, videoFrameRate: Double? = nil) {
@@ -122,6 +126,9 @@ public final class PreparedMedia {
         self.playbackPath = playbackPath
         self.videoHeight = videoHeight; self.videoFrameRate = videoFrameRate
         self.upstream = PreparationPrivacy.upstream
+        let selection = PreparationPrivacy.upscalerResolution?.selection
+        resolvedUpscaler = selection?.backend
+        upscalerFellBackFrom = selection?.fellBackFrom
         url = server.url!
     }
 
@@ -551,8 +558,22 @@ final class PreparationUpstream {
     }
 }
 
+private final class UpscalerResolution: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: VideoUpscaler.Selection?
+    var selection: VideoUpscaler.Selection? {
+        lock.lock(); defer { lock.unlock() }
+        return value
+    }
+    func set(_ selection: VideoUpscaler.Selection) {
+        lock.lock(); defer { lock.unlock() }
+        value = selection
+    }
+}
+
 private enum PreparationPrivacy {
     @TaskLocal static var upstream: PreparationUpstream?
+    @TaskLocal static var upscalerResolution: UpscalerResolution?
 }
 
 public struct MediaPreparer: Sendable {
@@ -579,9 +600,12 @@ public struct MediaPreparer: Sendable {
     public func prepare(_ source: ResolvedSource, mode: PreparationMode? = nil,
                         onPlan: (@Sendable (PlaybackPath) async -> Void)? = nil) async throws -> PreparedMedia {
         let upstream = PreparationUpstream()
+        let resolution = UpscalerResolution()
         do {
-            let prepared = try await PreparationPrivacy.$upstream.withValue(upstream) {
-                try await self.prepareBody(source, mode: mode, onPlan: onPlan)
+            let prepared = try await PreparationPrivacy.$upscalerResolution.withValue(resolution) {
+                try await PreparationPrivacy.$upstream.withValue(upstream) {
+                    try await self.prepareBody(source, mode: mode, onPlan: onPlan)
+                }
             }
             await prepared.retain(upstream)
             return prepared
@@ -653,6 +677,11 @@ public struct MediaPreparer: Sendable {
                     noiseReduction = .gpu
                 } else { noiseReduction = .ffmpeg }
             } else { noiseReduction = preferences.noiseReduction }
+            if source.followsUpscalerRanking, source.enhancement != .original, let target = source.enhancement.targetHeight {
+                let selection = try await resolveUpscalerRanking(video: videoForProcessing, targetHeight: target)
+                source = source.withEnhancement(source.enhancement, upscaler: selection.backend)
+                PreparationPrivacy.upscalerResolution?.set(selection)
+            }
             let usesAppleProcessing = source.upscaler.isAI && source.enhancement != .original
                 || source.enhancement.cleansUp && noiseReduction != .ffmpeg
             if usesAppleProcessing && preferences.aiBeforePlayback { mode = .completeFile }
@@ -1785,9 +1814,28 @@ public struct MediaPreparer: Sendable {
             }
         }
     }
+    /// Walk the saved ranking once the probed picture is known. An explicit
+    /// backend never reaches here. A picture AI cannot read falls through to
+    /// the first traditional model instead of failing the load.
+    @MainActor
+    private func resolveUpscalerRanking(video: Stream?, targetHeight: Int) throws -> VideoUpscaler.Selection {
+        let order = preferences.upscalerRanking
+        if let video {
+            do {
+                let picture = try AppleInputNormalization(stream: video)
+                return try VideoUpscaler.select(order: order, pictureWidth: picture.width, pictureHeight: picture.height,
+                                                 targetHeight: targetHeight)
+            } catch let error as AppFailure where error.message.hasPrefix(AppleInputNormalization.failurePrefix) {
+                return try VideoUpscaler.select(order: order, pictureWidth: nil, pictureHeight: nil, targetHeight: targetHeight)
+            }
+        }
+        return try VideoUpscaler.select(order: order, pictureWidth: nil, pictureHeight: nil, targetHeight: targetHeight)
+    }
+
     /// The Apple processors receive upright, square-pixel, limited-range BT.709
     /// frames. FFmpeg performs autorotation and the actual color conversion.
     private struct AppleInputNormalization: Sendable {
+        static let failurePrefix = "Apple AI processing: "
         let width: Int
         let height: Int
         let rate: Double
@@ -1795,7 +1843,7 @@ public struct MediaPreparer: Sendable {
 
         init(stream: Stream) throws {
             func unsupported(_ detail: String) -> AppFailure {
-                AppFailure(.unsupportedOperation, "Apple AI processing: " + detail)
+                AppFailure(.unsupportedOperation, Self.failurePrefix + detail)
             }
             guard !stream.isHDR else {
                 throw unsupported("HDR and Dolby Vision conversion are not supported by the current 8-bit SDR pipeline.")

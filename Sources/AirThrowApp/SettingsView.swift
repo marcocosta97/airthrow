@@ -102,7 +102,8 @@ struct SettingsView: View {
     @AppStorage(PreparationPreferences.retainAllKey) private var retainAll = false
     @AppStorage(PreparationPreferences.remuxCacheKey) private var remuxCache = false
     @AppStorage(PreparationPreferences.windowSecondsKey) private var windowSeconds = 60
-    @AppStorage(VideoUpscaler.preferenceKey) private var upscaler = VideoUpscaler.automatic.rawValue
+    var preferences: UserDefaults = .standard
+    @State private var upscalerRanking = VideoUpscaler.defaultRanking
     @AppStorage(PreparationPreferences.aiBeforePlaybackKey) private var aiBeforePlayback = false
     @AppStorage(PreparationPreferences.noiseReductionKey) private var noiseReduction = CleanupNoiseReduction.defaultBackend.rawValue
 
@@ -141,36 +142,41 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Section("Experimental AI processing") {
-                Picker("Default upscaler", selection: $upscaler) {
-                    ForEach(VideoUpscaler.allCases, id: \.self) { backend in
-                        Text(backend.label).tag(backend.rawValue)
-                            .disabled(SuperResolutionSupport.unavailableReason(backend) != nil)
+            Section("Upscaling") {
+                UpscalerRankingList(ranking: Binding(
+                    get: { upscalerRanking },
+                    set: { upscalerRanking = $0; VideoUpscaler.saveRanking($0, defaults: preferences) }),
+                    modelReady: controller.superResolutionModelReady)
+                Text("Before upscaling, AirThrow chooses the first available option compatible with the video. Move an AI option above Automatic to prefer it. Applies to the next load.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if SuperResolutionSupport.unavailableReason(.standard) == nil && !controller.superResolutionModelReady {
+                    Button(controller.downloadingSuperResolutionModel ? "Downloading model…" : "Download Standard model") {
+                        Task { await controller.downloadSuperResolutionModel() }
                     }
+                    .disabled(controller.downloadingSuperResolutionModel)
+                    if let error = controller.superResolutionDownloadError {
+                        Text(error).font(.caption).foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Text("macOS downloads and manages the model. It is not included in AirThrow.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if availableUpscalers.contains(where: \.isAI) {
+                    Text("AI models are experimental. Detail and colors may change. Output is SDR, up to 60 fps.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Picker("AI preparation", selection: $aiBeforePlayback) {
                     Text("During playback").tag(false)
                     Text("Complete before playback").tag(true)
                 }
-                Text("Applies to the next load. AI is used only when you choose Upscale or Clean up and upscale in Video options.")
+                Text("Applies to the next load when an AI model handles Upscale or Clean up.")
                     .font(.caption).foregroundStyle(.secondary)
                 Text(aiBeforePlayback
                      ? "The full video is converted before it becomes ready. Startup can take longer and uses more temporary storage."
                      : "Playback can wait for new segments if this Mac cannot prepare them fast enough. Some sources require complete preparation.")
                     .font(.caption).foregroundStyle(.secondary)
-                if let backend = VideoUpscaler(rawValue: upscaler), backend.isAI,
-                   let reason = SuperResolutionSupport.unavailableReason(backend) {
-                    Text(reason).font(.caption).foregroundStyle(.secondary)
-                }
-                if upscaler == VideoUpscaler.standard.rawValue && !controller.superResolutionModelReady {
-                    Button(controller.downloadingSuperResolutionModel ? "Downloading model…" : "Download Standard model") {
-                        Task { await controller.downloadSuperResolutionModel() }
-                    }
-                    .disabled(controller.downloadingSuperResolutionModel
-                        || SuperResolutionSupport.unavailableReason(.standard) != nil)
-                    Text("macOS downloads and manages the model. It is not included in AirThrow.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
             }
             Section("Cleanup") {
                 Picker("Noise reduction", selection: $noiseReduction) {
@@ -232,12 +238,81 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .contentMargins(.top, 8, for: .scrollContent)
-        .background(Color(nsColor: SurfaceColor.window))
+        .background(Color(nsColor: .windowBackgroundColor))
         .settingsScrollEdgeEffect()
         .padding(.horizontal, 8)
         .padding(.bottom, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { cookieStatus.discoverBrowsers() }
+        .onAppear {
+            cookieStatus.discoverBrowsers()
+            upscalerRanking = VideoUpscaler.ranking(preferences)
+        }
+    }
+
+    private var availableUpscalers: [VideoUpscaler] {
+        upscalerRanking.filter { SuperResolutionSupport.unavailableReason($0) == nil }
+    }
+
+}
+
+/// Four ordered choices with visible, keyboard-accessible move controls.
+private struct UpscalerRankingList: View {
+    @Binding var ranking: [VideoUpscaler]
+    var modelReady: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Preference order").font(.headline)
+            ForEach(Array(ranking.enumerated()), id: \.element) { index, backend in
+                HStack(spacing: 12) {
+                    Text("\(index + 1)")
+                        .monospacedDigit().foregroundStyle(.secondary)
+                        .frame(width: 16)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(backend.shortLabel)
+                        Text(detail(backend))
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("\(backend.shortLabel), preference \(index + 1). \(detail(backend))")
+                    HStack(spacing: 4) {
+                        moveButton(backend, index: index, delta: -1)
+                        moveButton(backend, index: index, delta: 1)
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func moveButton(_ backend: VideoUpscaler, index: Int, delta: Int) -> some View {
+        let direction = delta < 0 ? "up" : "down"
+        return Button {
+            let destination = index + delta
+            guard ranking.indices.contains(destination) else { return }
+            ranking.swapAt(index, destination)
+        } label: {
+            Image(systemName: delta < 0 ? "chevron.up" : "chevron.down")
+        }
+        .buttonStyle(.bordered).controlSize(.small)
+        .disabled(!ranking.indices.contains(index + delta))
+        .help("Move \(backend.shortLabel) \(direction)")
+        .accessibilityLabel("Move \(backend.shortLabel) \(direction)")
+    }
+
+    private func detail(_ backend: VideoUpscaler) -> String {
+        if SuperResolutionSupport.unavailableReason(backend) != nil {
+            return "Unavailable on this Mac · skipped"
+        }
+        switch backend {
+        case .automatic: return "Hardware scaling when compatible; otherwise CPU scaling."
+        case .lanczos: return "CPU scaling with the Lanczos filter."
+        case .lowLatency: return "Apple AI, optimized for speed."
+        case .standard: return modelReady ? "Apple AI · model downloaded." : "Download required · skipped until ready."
+        }
     }
 }
 

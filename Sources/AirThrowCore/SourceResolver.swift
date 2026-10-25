@@ -62,6 +62,9 @@ public struct ResolvedSource: Sendable {
     public private(set) var conversionPolicy: ConversionPolicy
     public private(set) var enhancement: VideoEnhancement
     public private(set) var upscaler: VideoUpscaler
+    /// When set, preparation walks the saved model ranking instead of keeping
+    /// `upscaler`. An explicit request, including the CLI, leaves this false.
+    public private(set) var followsUpscalerRanking: Bool
     /// Per-load preparation hint, independent of presentation identity. Cached
     /// preparation warms this position without encoding all preceding chunks.
     public var preparationPosition: Double? = nil
@@ -76,7 +79,8 @@ public struct ResolvedSource: Sendable {
                 videoKnownPresent: Bool = false, isLive: Bool = false,
                 conversionPolicy: ConversionPolicy = .avoidVideo,
                 plannedPath: PlaybackPath? = nil,
-                enhancement: VideoEnhancement = .original, upscaler: VideoUpscaler = .automatic) {
+                enhancement: VideoEnhancement = .original, upscaler: VideoUpscaler = .automatic,
+                followsUpscalerRanking: Bool = false) {
         self.url = url; self.title = title; self.headers = headers; self.audio = audio
         self.hlsAudioOptions = hlsAudioOptions
         self.hlsVariant = hlsVariant
@@ -88,6 +92,7 @@ public struct ResolvedSource: Sendable {
         self.conversionPolicy = conversionPolicy
         self.enhancement = enhancement
         self.upscaler = upscaler
+        self.followsUpscalerRanking = followsUpscalerRanking
         self.plannedPath = plannedPath
     }
 
@@ -99,10 +104,12 @@ public struct ResolvedSource: Sendable {
         return result
     }
 
-    public func withEnhancement(_ choice: VideoEnhancement, upscaler: VideoUpscaler = .automatic) -> ResolvedSource {
+    public func withEnhancement(_ choice: VideoEnhancement, upscaler: VideoUpscaler = .automatic,
+                                followsUpscalerRanking: Bool = false) -> ResolvedSource {
         var result = self
         result.enhancement = choice
         result.upscaler = upscaler
+        result.followsUpscalerRanking = followsUpscalerRanking
         if choice != .original {
             result.needsPreparation = true
             result.plannedPath = .videoConversion

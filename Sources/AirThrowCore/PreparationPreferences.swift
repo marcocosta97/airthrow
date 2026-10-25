@@ -19,6 +19,7 @@ public struct PreparationPreferences: Sendable, Equatable {
     public static let aiBeforePlaybackKey = "preparationAIBeforePlayback"
     public static let noiseReductionKey = "preparationCleanupNoiseReduction"
     public let noiseReduction: CleanupNoiseReduction
+    public let upscalerRanking: [VideoUpscaler]
     public let aiBeforePlayback: Bool
     public let remuxCache: Bool
     public let maximumBytes: Int64
@@ -27,12 +28,14 @@ public struct PreparationPreferences: Sendable, Equatable {
 
     public init(maximumBytes: Int64 = 2 * 1024 * 1024 * 1024,
                 retainAll: Bool = false, windowSeconds: Double = 60, remuxCache: Bool = false,
-                aiBeforePlayback: Bool = false, noiseReduction: CleanupNoiseReduction = CleanupNoiseReduction.defaultBackend) {
+                aiBeforePlayback: Bool = false, noiseReduction: CleanupNoiseReduction = CleanupNoiseReduction.defaultBackend,
+                upscalerRanking: [VideoUpscaler] = VideoUpscaler.defaultRanking) {
         self.maximumBytes = max(1, maximumBytes)
         self.retainAll = retainAll
         self.remuxCache = remuxCache
         self.aiBeforePlayback = aiBeforePlayback
         self.noiseReduction = noiseReduction
+        self.upscalerRanking = VideoUpscaler.normalized(upscalerRanking)
         self.windowSeconds = windowSeconds.isFinite ? min(600, max(12, windowSeconds)) : 60
     }
 
@@ -44,6 +47,7 @@ public struct PreparationPreferences: Sendable, Equatable {
                     retainAll: defaults.bool(forKey: retainAllKey), windowSeconds: window,
                     remuxCache: defaults.bool(forKey: remuxCacheKey),
                     aiBeforePlayback: defaults.bool(forKey: aiBeforePlaybackKey),
-                    noiseReduction: CleanupNoiseReduction(rawValue: defaults.string(forKey: noiseReductionKey) ?? "") ?? CleanupNoiseReduction.defaultBackend)
+                    noiseReduction: CleanupNoiseReduction(rawValue: defaults.string(forKey: noiseReductionKey) ?? "") ?? CleanupNoiseReduction.defaultBackend,
+                    upscalerRanking: VideoUpscaler.ranking(defaults))
     }
 }

@@ -47,6 +47,8 @@ final class PlaybackController: ObservableObject {
         /// chosen when the user asked for it, not a later UI change.
         let enhancement: VideoEnhancement
         let upscaler: VideoUpscaler
+        /// Preparation walks Settings order instead of keeping `upscaler`.
+        var followsUpscalerRanking: Bool
         let enhancementOutput4K: Bool
         /// Keeps Automatic's current presentation while its processing preset
         /// changes, without turning it into an explicit source choice in status.
@@ -155,15 +157,20 @@ final class PlaybackController: ObservableObject {
     /// `.original` for every new item; a source-quality change keeps it.
     private var videoEnhancement: VideoEnhancement = .original
     private var videoUpscaler: VideoUpscaler = .automatic
+    private var followsUpscalerRanking = false
+    /// Why playback moved down the upscaler ranking. Stays with this item after the notice clears.
+    @Published private(set) var upscalerNote: String?
     @Published private(set) var superResolutionModelReady = SuperResolutionSupport.standardModelReady
     @Published private(set) var downloadingSuperResolutionModel = false
+    @Published private(set) var superResolutionDownloadError: String?
 
     func downloadSuperResolutionModel() async {
         guard !downloadingSuperResolutionModel else { return }
         downloadingSuperResolutionModel = true
+        superResolutionDownloadError = nil
         defer { downloadingSuperResolutionModel = false; superResolutionModelReady = SuperResolutionSupport.standardModelReady }
         do { try await SuperResolutionSupport.downloadStandardModel() }
-        catch { displayError(AppFailure(.unsupportedOperation, "Could not download the AI Standard model. Check the connection and try again.")) }
+        catch { superResolutionDownloadError = "Could not download the AI Standard model. Check the connection and try again." }
     }
     @Published private(set) var enhancementOutput4K = false
     private var inspectedSourceHeight: (url: URL, height: Double)?
@@ -406,7 +413,8 @@ final class PlaybackController: ObservableObject {
         } else {
             let preferences = SourceResolver.youtubeStartSeconds(url).map { seconds in
                 LoadPreferences(conversion: conversionPolicy, preferQuality: preferQuality,
-                                enhancement: .original, upscaler: videoUpscaler, enhancementOutput4K: enhancementOutput4K,
+                                enhancement: .original, upscaler: videoUpscaler, followsUpscalerRanking: false,
+                                enhancementOutput4K: enhancementOutput4K,
                                 pinnedSourceID: nil, subtitle: nil, resumePosition: seconds)
             }
             startLoad(url, autoplay: shouldPlay, preferences: preferences, recordHistory: true)
@@ -796,7 +804,8 @@ final class PlaybackController: ObservableObject {
         let target4K = enhancement.targetHeight.map { $0 == 2160 }
             ?? (output4K || requires4KOutput(for: sourceID))
         if sourceID == nil {
-            if enhancement != videoEnhancement || (upscaler != nil && upscaler != videoUpscaler) {
+            if enhancement != videoEnhancement || (upscaler != nil && upscaler != videoUpscaler)
+                || (upscaler == nil && enhancement != .original && enhancement != videoEnhancement) {
                 try selectEnhancement(enhancement, upscaler: upscaler)
             }
             enhancementOutput4K = target4K
@@ -824,9 +833,11 @@ final class PlaybackController: ObservableObject {
         guard enhancement == .original || !snapshot.isLive else {
             throw AppFailure(.unsupportedOperation, "Enhancement is available for on-demand video, not live streams.")
         }
+        let follows = upscaler == nil && enhancement != .original
         startLoad(url, preservingQueue: queue != nil, titleOverride: title, sourceChoice: candidateID,
                   changingSource: true, enhancement: enhancement,
-                  upscaler: upscaler ?? videoUpscaler,
+                  upscaler: upscaler ?? (follows ? SuperResolutionSupport.firstAvailable() : videoUpscaler),
+                  followsUpscalerRanking: follows,
                   enhancementOutput4K: target4K)
     }
 
@@ -845,12 +856,16 @@ final class PlaybackController: ObservableObject {
         try requireEnhancementAllowed(enhancement)
         let url = try requireDiscoveredSource()
         try requireOnDemand()
-        let backend = upscaler ?? videoUpscaler
-        guard enhancement != videoEnhancement || backend != videoUpscaler else { return }
+        let follows = upscaler == nil && enhancement != .original
+        let backend = upscaler ?? (follows ? SuperResolutionSupport.firstAvailable() : videoUpscaler)
+        guard enhancement != videoEnhancement || (!follows && backend != videoUpscaler) else { return }
         if enhancement == .original && videoEnhancement == .original {
-            videoUpscaler = backend; refresh(); return
+            videoUpscaler = backend
+            followsUpscalerRanking = false
+            upscalerNote = nil
+            refresh(); return
         }
-        if enhancement != .original, let reason = SuperResolutionSupport.unavailableReason(backend) {
+        if enhancement != .original, !follows, let reason = SuperResolutionSupport.unavailableReason(backend) {
             throw AppFailure(.unsupportedOperation, reason)
         }
         guard enhancement.targetHeight != 1080 || !requires4KOutput else {
@@ -871,6 +886,7 @@ final class PlaybackController: ObservableObject {
         startLoad(url, fallback: directSource, preservingQueue: queue != nil, titleOverride: title, sourceChoice: sourceChoice,
                   changingSource: true, enhancement: enhancement,
                   upscaler: backend,
+                  followsUpscalerRanking: follows,
                   enhancementOutput4K: enhancement.targetHeight.map { $0 == 2160 } ?? enhancementOutput4K,
                   pinnedSourceID: pinnedSourceID)
     }
@@ -1008,6 +1024,7 @@ final class PlaybackController: ObservableObject {
                            titleOverride: String? = nil, sourceChoice: String? = nil,
                            changingSource: Bool = false, enhancement: VideoEnhancement? = nil,
                            upscaler: VideoUpscaler? = nil,
+                           followsUpscalerRanking: Bool? = nil,
                            enhancementOutput4K: Bool? = nil,
                            pinnedSourceID: String? = nil,
                            preferences: LoadPreferences? = nil, recordHistory: Bool = false,
@@ -1023,10 +1040,13 @@ final class PlaybackController: ObservableObject {
                                                          enhancement: enhancement ?? .original,
                                                          upscaler: upscaler ?? (changingSource || retry || fallback != nil
                                                             ? videoUpscaler : VideoUpscaler.preferred()),
+                                                         followsUpscalerRanking: followsUpscalerRanking
+                                                            ?? ((changingSource || retry || fallback != nil) && self.followsUpscalerRanking),
                                                          enhancementOutput4K: enhancementOutput4K ?? false,
                                                          pinnedSourceID: pinnedSourceID,
                                                          subtitle: changingSource || retry || fallback != nil
                                                             ? subtitlePreference : nil)
+        if preferences.enhancement == .original { preferences.followsUpscalerRanking = false }
         if changingSource {
             preferences.resumePosition = resumedPosition
             preferences.resumeDuration = snapshot.duration ?? loadPreferences?.resumeDuration
@@ -1064,6 +1084,7 @@ final class PlaybackController: ObservableObject {
         subtitlePreference = preferences.subtitle
         videoEnhancement = preferences.enhancement
         videoUpscaler = preferences.upscaler
+        self.followsUpscalerRanking = preferences.followsUpscalerRanking
         self.enhancementOutput4K = preferences.enhancementOutput4K
         originalSourceURL = url
         self.sourceChoice = sourceChoice
@@ -1080,6 +1101,7 @@ final class PlaybackController: ObservableObject {
         pendingAutoplaySeek = autoplay && preferences.resumePosition == nil
         playbackRequested = autoplay
         if !preservingQueue { notice = nil }
+        upscalerNote = nil
         refresh()
         let resolver = resolveCandidates
         let policy = preferences.conversion
@@ -1133,7 +1155,8 @@ final class PlaybackController: ObservableObject {
                     let cleanupOnly = appliedEnhancement.cleansUp
                         && sourceHeight == appliedEnhancement.targetHeight.map(Double.init)
                     let backend: VideoUpscaler = cleanupOnly ? .automatic : preferences.upscaler
-                    source = source.withEnhancement(appliedEnhancement, upscaler: backend)
+                    source = source.withEnhancement(appliedEnhancement, upscaler: backend,
+                                                    followsUpscalerRanking: preferences.followsUpscalerRanking && !cleanupOnly)
                     self.videoUpscaler = backend
                 }
                 self.videoEnhancement = appliedEnhancement
@@ -1195,6 +1218,12 @@ final class PlaybackController: ObservableObject {
                         prepared.stop(); await prepared.waitForProducer(); return
                     }
                     self.preparedMedia = prepared
+                    if let used = prepared.resolvedUpscaler { self.videoUpscaler = used }
+                    if let from = prepared.upscalerFellBackFrom, let used = prepared.resolvedUpscaler, from != used {
+                        let message = "\(from.label) is unavailable for this video. Using \(used.label)."
+                        self.upscalerNote = message
+                        self.notice = self.notice.map { $0.isEmpty ? message : $0 + " " + message } ?? message
+                    }
                     self.actualPlaybackPath = prepared.playbackPath
                     self.selectedQuality = Self.qualityLabel(height: prepared.videoHeight,
                                                               frameRate: prepared.videoFrameRate)

@@ -32,7 +32,44 @@ struct SuperResolutionChecks {
                   "Traditional processing unexpectedly selects an AI backend")
         defaults.set(VideoUpscaler.lanczos.rawValue, forKey: VideoUpscaler.preferenceKey)
         try check(VideoUpscaler.preferred(defaults) == .lanczos, "Saved Lanczos selection was replaced by Automatic")
+        try check(VideoUpscaler.ranking(defaults) == [.lanczos, .automatic, .lowLatency, .standard],
+                  "A saved backend did not become the first ranking entry")
+        defaults.set(["ai_standard", "bogus", "ai_standard", "lanczos"], forKey: VideoUpscaler.rankingKey)
+        try check(VideoUpscaler.ranking(defaults) == [.standard, .lanczos, .automatic, .lowLatency],
+                  "Ranking did not drop unknown entries and append missing models")
+        try check(VideoUpscaler.preferred(defaults) == .standard, "Ranking did not outrank the legacy single choice")
+        VideoUpscaler.saveRanking([.lowLatency, .lanczos], defaults: defaults)
+        try check(VideoUpscaler.ranking(defaults) == [.lowLatency, .lanczos, .automatic, .standard]
+                  && VideoUpscaler.preferred(defaults) == .lowLatency, "Saving a ranking did not keep its order")
+        let automaticFirst = try VideoUpscaler.select(order: VideoUpscaler.defaultRanking, pictureWidth: 1001,
+                                                       pictureHeight: 720, targetHeight: 1080)
+        try check(automaticFirst.backend == .automatic && automaticFirst.fellBackFrom == nil,
+                  "Automatic did not stay first when a later model cannot read the picture")
+        let unreadable = try VideoUpscaler.select(order: [.lowLatency, .standard, .automatic], pictureWidth: nil,
+                                                   pictureHeight: nil, targetHeight: 1080)
+        let runnableAI = [VideoUpscaler.lowLatency, .standard].filter { SuperResolutionSupport.unavailableReason($0) == nil }
+        if let firstAI = runnableAI.first {
+            try check(unreadable.backend == .automatic && unreadable.fellBackFrom == firstAI,
+                      "A picture AI cannot read did not fall back from \(String(describing: unreadable.fellBackFrom))")
+        } else {
+            try check(unreadable.backend == .automatic && unreadable.fellBackFrom == nil,
+                      "Architecture-skipped models were reported as a video fallback")
+        }
+        let odd = try VideoUpscaler.select(order: [.lowLatency, .standard, .automatic], pictureWidth: 1001,
+                                            pictureHeight: 720, targetHeight: 1080)
+        if runnableAI.isEmpty {
+            try check(odd.backend == .automatic && odd.fellBackFrom == nil, "Odd frames used an unavailable AI model")
+        } else {
+            try check(odd.backend == .automatic && odd.fellBackFrom == runnableAI[0],
+                      "Odd frames did not fall back from the first available AI model")
+        }
+        defaults.removeObject(forKey: VideoUpscaler.rankingKey)
         let fixture = URL(fileURLWithPath: "/tmp/airthrow-synthetic-backend.mp4")
+        let ranked = ResolvedSource(url: fixture).withEnhancement(.upscale1080, upscaler: .lowLatency, followsUpscalerRanking: true)
+        try check(ranked.followsUpscalerRanking && ranked.withConversionPolicy(.allowVideo).followsUpscalerRanking
+                  && ranked.withTransportRemux(isLive: false).followsUpscalerRanking,
+                  "Ranking request was dropped while copying a source")
+        try check(!ranked.withEnhancement(.upscale1080).followsUpscalerRanking, "A plain enhancement kept the ranking request")
         for backend in VideoUpscaler.allCases {
             var source = ResolvedSource(url: fixture).withEnhancement(.upscale1080, upscaler: backend)
             source.preparationPosition = 12
@@ -54,6 +91,7 @@ struct SuperResolutionChecks {
                   && snapshot.noiseReduction == .appleTemporal, "Invalid cleanup preference or session snapshot changed")
         defaults.removeObject(forKey: PreparationPreferences.noiseReductionKey)
         defaults.removeObject(forKey: VideoUpscaler.preferenceKey)
+        defaults.removeObject(forKey: VideoUpscaler.rankingKey)
         defaults.removeObject(forKey: PreparationPreferences.aiBeforePlaybackKey)
         print("PASS backend CLI/protocol and settings defaults")
         guard (2...3).contains(CommandLine.arguments.count) else { return }
@@ -72,6 +110,24 @@ struct SuperResolutionChecks {
             try check([200, 206].contains((response as? HTTPURLResponse)?.statusCode ?? 0), "Delivery response failed")
             return data
         }
+        // Standard requires a larger scale than 720p -> 1080p supports. Verify
+        // that an actual preparation job walks the preference order and reports
+        // the chosen fallback, instead of testing the selector in isolation.
+        let rankedSource = ResolvedSource(url: directory.appendingPathComponent("ranking-fallback.mp4"),
+            needsDelivery: true, delivery: .file, conversionPolicy: .allowVideo)
+            .withEnhancement(.upscale1080, upscaler: .standard, followsUpscalerRanking: true)
+        let rankedPrepared = try await MediaPreparer(environment: environment,
+            preferences: PreparationPreferences(upscalerRanking: [.standard, .lanczos, .automatic, .lowLatency]))
+            .prepare(rankedSource, mode: .completeFile)
+        do {
+            try check(rankedPrepared.resolvedUpscaler == .lanczos
+                      && rankedPrepared.upscalerFellBackFrom == (SuperResolutionSupport.unavailableReason(.standard) == nil ? .standard : nil)
+                      && rankedPrepared.videoHeight == 1080,
+                      "Preparation lost the ranked fallback or its reported output")
+            try await fetch(rankedPrepared.url).write(to: directory.appendingPathComponent("ranked-fallback.mp4"))
+        } catch { rankedPrepared.stop(); await rankedPrepared.waitForProducer(); throw error }
+        rankedPrepared.stop(); await rankedPrepared.waitForProducer()
+        print("PASS ranked AI-to-Lanczos fallback prepares and delivers 1080p")
         let cleanupSource = ResolvedSource(url: directory.appendingPathComponent("short.mp4"), needsDelivery: true, delivery: .file, conversionPolicy: .allowVideo)
             .withEnhancement(.cleanup1080, upscaler: .lanczos)
         let temporalPreferences = PreparationPreferences(noiseReduction: .appleTemporal)

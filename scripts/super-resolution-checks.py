@@ -47,7 +47,7 @@ def main():
            ("color_space", "color_transfer", "color_primaries")):
         raise RuntimeError("VP8 fixture unexpectedly has explicit color metadata")
     for name, size, rate, extra in [
-        ("portrait", "180x320", "24", ""),
+        ("portrait", "180x320", "24", ""), ("ranking-fallback", "1280x720", "24", ""),
         ("anamorphic", "480x360", "24", "setsar=4/3,"),
         ("narrow-pixels", "480x270", "24", "setsar=3/4,"),
         ("fps50", "320x180", "50", ""), ("fps60", "320x180", "60", ""),

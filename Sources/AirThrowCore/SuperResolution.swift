@@ -13,6 +13,12 @@ public enum SuperResolutionSupport {
         return supported ? nil : "This Mac does not support this AI processor. Choose Lanczos."
     }
 
+    /// First ranked model this Mac can run. Architecture limits are skipped;
+    /// per-video limits are resolved later from the picture itself.
+    public static func firstAvailable(_ defaults: UserDefaults = .standard) -> VideoUpscaler {
+        VideoUpscaler.ranking(defaults).first { unavailableReason($0) == nil } ?? .automatic
+    }
+
     public static var standardModelReady: Bool {
         guard #available(macOS 26, *), let configuration = standardConfiguration() else { return false }
         return configuration.configurationModelStatus == .ready
@@ -104,6 +110,52 @@ struct SuperResolutionLayout: Sendable {
                         outputWidth: actualW, outputHeight: actualH)
         }
         throw AppFailure(.unsupportedOperation, "This AI processor does not support this source and output combination on this Mac. Choose another output, a smaller source, or Lanczos.")
+    }
+}
+
+extension VideoUpscaler {
+    /// The model playback will use, and the higher-ranked model it replaced
+    /// when that model cannot process this picture.
+    public struct Selection: Sendable, Equatable {
+        public let backend: VideoUpscaler
+        public let fellBackFrom: VideoUpscaler?
+        public init(backend: VideoUpscaler, fellBackFrom: VideoUpscaler?) {
+            self.backend = backend
+            self.fellBackFrom = fellBackFrom
+        }
+    }
+
+    /// Walk `order` from the top. A nil picture means no AI model can read the
+    /// source, so the first non-AI model is used. Otherwise each AI model is
+    /// checked against this frame size and output; the first that fits wins.
+    @MainActor
+    public static func select(order: [VideoUpscaler], pictureWidth: Int?, pictureHeight: Int?, targetHeight: Int) throws -> Selection {
+        let runnable = normalized(order).filter { SuperResolutionSupport.unavailableReason($0) == nil }
+        let candidates = runnable.isEmpty ? [VideoUpscaler.lanczos] : runnable
+        guard let first = candidates.first else { return Selection(backend: .lanczos, fellBackFrom: nil) }
+        guard let width = pictureWidth, let height = pictureHeight else {
+            guard first.isAI else { return Selection(backend: first, fellBackFrom: nil) }
+            let fallback = candidates.first { !$0.isAI } ?? .lanczos
+            return Selection(backend: fallback, fellBackFrom: first)
+        }
+        var fellBackFrom: VideoUpscaler?
+        var lastError: AppFailure?
+        for backend in candidates {
+            if !backend.isAI { return Selection(backend: backend, fellBackFrom: fellBackFrom) }
+            if backend == .standard, !SuperResolutionSupport.standardModelReady {
+                if fellBackFrom == nil { fellBackFrom = backend }
+                lastError = AppFailure(.unsupportedOperation, "Download the AI Standard model in Settings before using it.")
+                continue
+            }
+            do {
+                _ = try SuperResolutionLayout.make(width: width, height: height, targetHeight: targetHeight, backend: backend)
+                return Selection(backend: backend, fellBackFrom: fellBackFrom)
+            } catch let error as AppFailure {
+                if fellBackFrom == nil { fellBackFrom = backend }
+                lastError = error
+            }
+        }
+        throw lastError ?? AppFailure(.unsupportedOperation, "No upscaler can process this video.")
     }
 }
 

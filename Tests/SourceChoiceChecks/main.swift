@@ -214,11 +214,16 @@ struct SourceChoiceChecks {
     static func backendPreferences(website: URL, source: MediaCandidate,
                                    prepareSource: @escaping @Sendable (ResolvedSource) async throws -> PreparedMedia) async throws {
         let key = VideoUpscaler.preferenceKey
+        let rankingKey = VideoUpscaler.rankingKey
         let previous = UserDefaults.standard.object(forKey: key)
+        let previousRanking = UserDefaults.standard.object(forKey: rankingKey)
         defer {
             if let previous { UserDefaults.standard.set(previous, forKey: key) }
             else { UserDefaults.standard.removeObject(forKey: key) }
+            if let previousRanking { UserDefaults.standard.set(previousRanking, forKey: rankingKey) }
+            else { UserDefaults.standard.removeObject(forKey: rankingKey) }
         }
+        UserDefaults.standard.removeObject(forKey: rankingKey)
         UserDefaults.standard.set(VideoUpscaler.standard.rawValue, forKey: key)
         let resolver = ScriptedResolver([website.absoluteString: [
             .init(candidates: [source], delay: .milliseconds(250))]])

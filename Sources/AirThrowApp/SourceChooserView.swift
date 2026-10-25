@@ -16,7 +16,6 @@ struct VideoMenuView: View {
     @SwiftUI.State private var draftVideo = "automatic"
     @SwiftUI.State private var draftAction: EnhancementAction = .original
     @SwiftUI.State private var draftOutput4K = false
-    @SwiftUI.State private var draftUpscaler: VideoUpscaler = .automatic
     @SwiftUI.State private var draftSourceIDs: [String] = []
     private var status: PlaybackSnapshot { controller.snapshot }
     private var sources: [SourceOptionSnapshot] { status.sources ?? [] }
@@ -84,10 +83,8 @@ struct VideoMenuView: View {
         draftAction == .cleanUpUpscale
             && controller.sourceHeight(for: draftVideo == videoSelection ? nil : draftVideo) == (draftOutput4K ? 2160 : 1080)
     }
-    private var effectiveUpscaler: VideoUpscaler { cleanupOnly ? .automatic : draftUpscaler }
     private var hasChanges: Bool {
         draftVideo != videoSelection || draftAction != enhancementAction
-            || effectiveUpscaler != upscaler
             || (draftAction != .original && draftOutput4K != controller.enhancementOutput4K)
     }
     private var outputHelp: String {
@@ -119,7 +116,7 @@ struct VideoMenuView: View {
     }
 
     private var menuLabel: String {
-        if enhancement != .original { return enhancement.label }
+        if enhancement != .original { return "\(enhancement.label) · \(upscaler.shortLabel)" }
         if videoOptions.count > 1 { return sourceLabel }
         if let quality = status.quality { return "Original · \(quality)" }
         return "Original"
@@ -129,7 +126,9 @@ struct VideoMenuView: View {
         if isLive {
             return "Enhancement is only for on-demand video. This live stream can only change source quality."
         }
-        return "Choose this video's source, audio, subtitles, and enhancement. Video or enhancement changes keep your position and play/pause state; native track changes stay on the current item. 4K needs a compatible receiver."
+        var text = "Choose this video's source, audio, subtitles, and enhancement. The upscaler order is in Settings. Video or enhancement changes keep your position and play/pause state; native track changes stay on the current item. 4K needs a compatible receiver."
+        if let note = controller.upscalerNote { text += " " + note }
+        return text
     }
 
     var body: some View {
@@ -232,28 +231,11 @@ struct VideoMenuView: View {
                 .pickerStyle(.radioGroup)
                 .labelsHidden()
                 .disabled(!mediaReady || isLive)
-                if !cleanupOnly {
-                    Picker("Upscaler", selection: $draftUpscaler) {
-                        ForEach(VideoUpscaler.allCases, id: \.self) { backend in
-                            Text(backend.label).tag(backend)
-                                .disabled(SuperResolutionSupport.unavailableReason(backend) != nil)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .disabled(!canChooseOutput)
-                    if draftUpscaler.isAI {
-                        Text("Experimental. Detail and colors may change. SDR video. Output up to 60 fps.")
-                            .font(.caption).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    if draftUpscaler == .standard && !controller.superResolutionModelReady {
-                        Button(controller.downloadingSuperResolutionModel ? "Downloading model…" : "Download Standard model") {
-                            Task { await controller.downloadSuperResolutionModel() }
-                        }
-                        .disabled(controller.downloadingSuperResolutionModel)
-                        Text("The model is downloaded and managed by macOS.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
+                if draftAction != .original && !cleanupOnly {
+                    Text("Upscaling follows the model order in Settings. If a model cannot process this video, the next one is used.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Text("Output")
                     .font(.subheadline.weight(.medium))
@@ -315,7 +297,6 @@ struct VideoMenuView: View {
     private func resetDraft() {
         draftVideo = videoSelection
         draftAction = enhancementAction
-        draftUpscaler = upscaler
         draftOutput4K = controller.enhancementOutput4K
         draftSourceIDs = sources.map(\.id)
     }
@@ -328,7 +309,7 @@ struct VideoMenuView: View {
             try controller.applyVideoOptions(
                 sourceID: draftVideo == videoSelection ? nil : draftVideo,
                 enhancement: draftAction.enhancement(output4K: draftOutput4K),
-                output4K: draftOutput4K, upscaler: effectiveUpscaler)
+                output4K: draftOutput4K)
         }
     }
 

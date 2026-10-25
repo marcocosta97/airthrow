@@ -121,10 +121,49 @@ public enum VideoUpscaler: String, Codable, Sendable, CaseIterable {
         case .standard: "AI Super Resolution · Standard"
         }
     }
+    /// Compact name for the playback status line.
+    public var shortLabel: String {
+        switch self {
+        case .automatic: "Automatic"
+        case .lanczos: "Lanczos"
+        case .lowLatency: "AI Low Latency"
+        case .standard: "AI Standard"
+        }
+    }
     public var isAI: Bool { self == .lowLatency || self == .standard }
+    /// Legacy single-choice key. A saved value becomes the first ranking entry.
     public static let preferenceKey = "videoUpscaler"
+    /// Ordered models. Playback tries the first this Mac can run, then the next
+    /// when that model cannot process the current video.
+    public static let rankingKey = "videoUpscalerRanking"
+    public static let defaultRanking: [VideoUpscaler] = [.automatic, .lanczos, .lowLatency, .standard]
+
+    public static func ranking(_ defaults: UserDefaults = .standard) -> [VideoUpscaler] {
+        if let stored = defaults.stringArray(forKey: rankingKey), !stored.isEmpty {
+            return normalized(stored.compactMap(Self.init(rawValue:)))
+        }
+        if let raw = defaults.string(forKey: preferenceKey), let single = Self(rawValue: raw) {
+            return normalized([single])
+        }
+        return defaultRanking
+    }
+
     public static func preferred(_ defaults: UserDefaults = .standard) -> Self {
-        Self(rawValue: defaults.string(forKey: preferenceKey) ?? "") ?? .automatic
+        ranking(defaults).first ?? .automatic
+    }
+
+    public static func saveRanking(_ order: [VideoUpscaler], defaults: UserDefaults = .standard) {
+        let ranked = normalized(order)
+        defaults.set(ranked.map(\.rawValue), forKey: rankingKey)
+        if let first = ranked.first { defaults.set(first.rawValue, forKey: preferenceKey) }
+    }
+
+    static func normalized(_ picked: [VideoUpscaler]) -> [VideoUpscaler] {
+        var seen = Set<VideoUpscaler>()
+        var result: [VideoUpscaler] = []
+        for item in picked where seen.insert(item).inserted { result.append(item) }
+        for item in defaultRanking where seen.insert(item).inserted { result.append(item) }
+        return result
     }
 }
 
