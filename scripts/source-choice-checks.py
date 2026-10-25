@@ -4,7 +4,8 @@
 Default checks inject candidates while exercising real AVPlayer loading.
 --yt-dlp adds generic extraction over local pages using the installed helper.
 --controller runs playback lifecycle and simulated AirPlay handoff regressions.
---system-playback checks remote navigation, native language options and artwork.
+--system-playback checks remote navigation, native language options, artwork,
+live offset policy and numeric playback metrics.
 This suite shares system media services with the native/preparation/controller
 suites, so run it sequentially with those.
 """
@@ -81,6 +82,14 @@ if args.system_playback:
          '-movflags', '+faststart', out / 'artwork.mp4'])
     for name in ['tracks.mp4', 'artwork.mp4']:
         FILES['/' + name] = (out / name).read_bytes()
+    run([ffmpeg, '-v', 'error', '-nostdin', '-stream_loop', '5', '-i', out / 'audio.mp4',
+         '-t', '60', '-c', 'copy', '-hls_time', '2', '-hls_list_size', '0',
+         '-hls_playlist_type', 'event', out / 'live.m3u8'])
+    live = out / 'live.m3u8'
+    live.write_text(live.read_text().replace('#EXT-X-ENDLIST\n', ''))
+    for path in [live, *out.glob('live*.ts')]:
+        FILES['/' + path.name] = path.read_bytes()
+        CONTENT_TYPES['/' + path.name] = 'application/vnd.apple.mpegurl' if path.suffix == '.m3u8' else 'video/mp2t'
 run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-n', '-f', 'lavfi',
      '-i', 'testsrc2=size=1920x1080:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
      '-t', '1', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',

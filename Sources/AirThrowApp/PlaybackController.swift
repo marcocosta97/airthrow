@@ -58,6 +58,7 @@ final class PlaybackController: ObservableObject {
         let subtitle: SubtitlePreference?
         var resumePosition: Double? = nil
         var resumeDuration: Double? = nil
+        var followsLive = true
     }
     private enum SubtitlePreference {
         case off
@@ -265,6 +266,8 @@ final class PlaybackController: ObservableObject {
     private var remoteTargets: [(MPRemoteCommand, Any)] = []
     private(set) var nowPlayingLanguages = NowPlayingLanguages()
     private let nowPlayingArtwork = NowPlayingArtworkLoader()
+    private var metricsObserver: (any PlaybackMetricsObserving)?
+    private var liveFollowRequested = true
     private var activity: NSObjectProtocol?
     // AVPlayer can briefly report paused during an active AirPlay session.
     // Keep idle sleep prevention tied to the requested session, not that sample.
@@ -841,6 +844,9 @@ final class PlaybackController: ObservableObject {
                 throw AppFailure(.invalidRequest, "This subtitle choice has expired. Open Subtitles again.")
             }
             let option = group.options[index]
+            guard NativeMediaOptions.selectable(in: group, for: item).contains(option) else {
+                throw AppFailure(.unsupportedOperation, "This subtitle option is unavailable with the current audio. Choose another option.")
+            }
             item.select(option, in: group)
             subtitlePreference = .track(language: option.locale?.identifier, name: option.displayName)
         }
@@ -1125,6 +1131,7 @@ final class PlaybackController: ObservableObject {
             preferences.resumePosition = resumedPosition
             preferences.resumeDuration = snapshot.duration ?? loadPreferences?.resumeDuration
         }
+        if changingSource || retry || fallback != nil { preferences.followsLive = liveFollowRequested }
         let retryRoute = hasOpenedPicker || player.isExternalPlaybackActive
         let retainedCandidates = fallback == nil ? [] : sourceCandidates
         let receiverReplacement = player.currentItem != nil && (player.isExternalPlaybackActive || playWhenReady)
@@ -1142,6 +1149,7 @@ final class PlaybackController: ObservableObject {
             ? authenticatedMedia : nil
         if retainedAuthentication != nil { authenticatedMedia = nil }
         resetItem(keepPlayerItem: true, preserveQueue: preservingQueue)
+        liveFollowRequested = preferences.followsLive
         replacingReceiverItem = receiverReplacement
         keepReceiverOnFailure = retainReceiver
         loadingLiveChannel = retainedLiveChannel
@@ -1480,11 +1488,28 @@ final class PlaybackController: ObservableObject {
                             self.synchronizeNativeMediaSelection(in: item)
                         }
                         self.refresh()
+                        self.updateNowPlaying()
+                    }
+                })
+                self.notifications.append(NotificationCenter.default.addObserver(
+                    forName: AVPlayerItem.timeJumpedNotification, object: item, queue: .main
+                ) { [weak self] _ in
+                    Task { @MainActor in
+                        guard let self, self.generation == id, self.mediaItem === item else { return }
+                        self.refresh()
                     }
                 })
                 self.mediaItem = item
                 self.nowPlayingLanguages = NowPlayingLanguages(audio: self.nativeAudioGroup,
                     subtitles: self.nativeSubtitleGroup, generation: id)
+                if #available(macOS 15, *) {
+                    let observer = NativePlaybackMetricsObserver()
+                    self.metricsObserver = observer
+                    observer.start(item: item) { [weak self, weak item] in
+                        guard let self, self.generation == id, self.mediaItem === item else { return }
+                        self.refresh()
+                    }
+                }
                 self.player.replaceCurrentItem(with: item)
                 if self.integratesWithSystemPlayback, !source.isLive {
                     let fileBased = source.delivery != .hls && playbackURL.pathExtension.lowercased() != "m3u8"
@@ -1643,6 +1668,8 @@ final class PlaybackController: ObservableObject {
 
     func pause() {
         if waitingScreen.isActive { stop(); return }
+        liveFollowRequested = false
+        mediaItem?.automaticallyPreservesTimeOffsetFromLive = false
         playWhenReady = false
         seekPlayWhenReady = false
         replacementPlayTask?.cancel(); replacementPlayTask = nil
@@ -1708,6 +1735,10 @@ final class PlaybackController: ObservableObject {
     }
 
     func seek(_ seconds: Double) throws {
+        try seek(seconds, followingLive: false)
+    }
+
+    private func seek(_ seconds: Double, followingLive: Bool) throws {
         guard !snapshot.isLive || LivePolicy.supportsTimeShift(snapshot) else {
             throw AppFailure(.unsupportedOperation, "This live stream does not currently offer a rewind window.")
         }
@@ -1721,6 +1752,8 @@ final class PlaybackController: ObservableObject {
         guard player.isExternalPlaybackActive else {
             throw AppFailure(.routeRequired, "Choose a video receiver first.")
         }
+        liveFollowRequested = followingLive
+        configureLivePlayback()
         ended = false
         seekPreparationTask?.cancel()
         seekTimeoutTask?.cancel()
@@ -1821,7 +1854,18 @@ final class PlaybackController: ObservableObject {
             throw AppFailure(.unsupportedOperation, "This video is not a live stream.")
         }
         let preferred = finite(mediaItem?.recommendedTimeOffsetFromLive.seconds ?? .nan) ?? 0
-        try seek(max(range.start, range.end - preferred))
+        try seek(max(range.start, range.end - preferred), followingLive: true)
+    }
+
+    private func configureLivePlayback() {
+        guard let item = mediaItem else { return }
+        let live = failure == nil && item.status == .readyToPlay && (selectedSource?.isLive == true || LivePolicy.isLive(
+            sourceDuration: preparedMedia?.sourceDuration, itemDurationIndefinite: item.duration.isIndefinite))
+        item.automaticallyPreservesTimeOffsetFromLive = live && liveFollowRequested
+        if live, let offset = finite(item.recommendedTimeOffsetFromLive.seconds), offset >= 0,
+           item.configuredTimeOffsetFromLive.seconds != offset {
+            item.configuredTimeOffsetFromLive = item.recommendedTimeOffsetFromLive
+        }
     }
 
     /// The picker is usable without media. Remember the interaction so a later
@@ -2088,6 +2132,9 @@ final class PlaybackController: ObservableObject {
     }
 
     private func resetItem(keepPlayerItem: Bool = false, preserveQueue: Bool = false) {
+        metricsObserver?.cancel(); metricsObserver = nil
+        liveFollowRequested = true
+        mediaItem?.automaticallyPreservesTimeOffsetFromLive = false
         nowPlayingArtwork.cancel()
         nowPlayingLanguages = NowPlayingLanguages()
         diagnosticsFormatTask?.cancel(); diagnosticsFormatTask = nil
@@ -2246,6 +2293,8 @@ final class PlaybackController: ObservableObject {
         failureReason = reason
         failure = message ?? reason.message
         nowPlayingArtwork.cancel()
+        metricsObserver?.cancel()
+        mediaItem?.automaticallyPreservesTimeOffsetFromLive = false
         playbackErrorDismissed = false
         loadTask?.cancel(); loadTask = nil
         sampledVideo = nil
@@ -2492,6 +2541,15 @@ final class PlaybackController: ObservableObject {
             player.isMuted = false
             notice = nil
         }
+        // Observe the clock before publishing its new position. Receiver seeks
+        // may trigger a KVO refresh before the time-jump notification arrives.
+        if snapshot.isLive, liveFollowRequested, pendingSeek == nil, pendingResumePosition == nil,
+           !loadInProgress, !probing, !probeRestoring, failure == nil,
+           let previous = snapshot.position, let current = finite(player.currentTime().seconds),
+           current < previous - 1 {
+            liveFollowRequested = false
+        }
+        configureLivePlayback()
         // Inspect the original presentation only: an enhanced item's 2160p
         // output must not become the source resolution for future choices.
         if preparedMedia == nil, videoEnhancement == .original,
@@ -2520,20 +2578,23 @@ final class PlaybackController: ObservableObject {
         next.audioOptions = choices.count > 1 ? choices.map(\.snapshot) : nil
         if let group = nativeSubtitleGroup, let item = mediaItem {
             let prefix = "\(sourceOptionsGeneration.uuidString)-subtitle-"
+            let selectable = NativeMediaOptions.selectable(in: group, for: item)
             var options: [SubtitleOptionSnapshot] = []
             if group.allowsEmptySelection {
                 options.append(SubtitleOptionSnapshot(id: prefix + "off", label: "Off"))
             }
-            options += group.options.enumerated().map { index, option in
+            options += group.options.enumerated().compactMap { index, option -> SubtitleOptionSnapshot? in
+                guard selectable.contains(option) else { return nil }
                 let name = option.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
                 let label = name.isEmpty || name.count > 80 || name.contains("://")
                     ? "Subtitle \(index + 1)" : name
                 return SubtitleOptionSnapshot(id: prefix + String(index), label: label)
             }
             next.subtitleOptions = options
-            if let selected = item.currentMediaSelection.selectedMediaOption(in: group),
-               let index = group.options.firstIndex(of: selected) {
-                next.selectedSubtitleID = prefix + String(index)
+            if let selected = item.currentMediaSelection.selectedMediaOption(in: group) {
+                if selectable.contains(selected), let index = group.options.firstIndex(of: selected) {
+                    next.selectedSubtitleID = prefix + String(index)
+                }
             } else if group.allowsEmptySelection {
                 next.selectedSubtitleID = prefix + "off"
             }
@@ -2579,6 +2640,7 @@ final class PlaybackController: ObservableObject {
         next.isLive = item?.status == .readyToPlay && (selectedSource?.isLive == true || LivePolicy.isLive(
             sourceDuration: preparedMedia?.sourceDuration,
             itemDurationIndefinite: item?.duration.isIndefinite == true))
+        next.followsLive = next.isLive ? liveFollowRequested : nil
         if next.isLive, let position = next.position, let edge = next.seekableRanges.last?.end {
             next.liveOffset = max(0, edge - position)
             next.recommendedLiveOffset = item.flatMap { finite($0.recommendedTimeOffsetFromLive.seconds) }
@@ -2657,6 +2719,7 @@ final class PlaybackController: ObservableObject {
         diagnostics.bufferEmpty = item.isPlaybackBufferEmpty
         diagnostics.bufferFull = item.isPlaybackBufferFull
         diagnostics.likelyToKeepUp = item.isPlaybackLikelyToKeepUp
+        diagnostics.nativeMetrics = metricsObserver?.values
         diagnostics.itemErrorCode = (item.error as NSError?)?.code
         if !reuse {
             if let errors = item.errorLog()?.events, !errors.isEmpty {
@@ -2825,6 +2888,9 @@ final class PlaybackController: ObservableObject {
               let item = mediaItem, item.status == .readyToPlay,
               let entry = nowPlayingLanguages.entry(for: option),
               enabled || entry.group.allowsEmptySelection else { return .commandFailed }
+        if enabled, !NativeMediaOptions.selectable(in: entry.group, for: item).contains(entry.native) {
+            return .commandFailed
+        }
         // A delayed disable for an option that is no longer selected must not
         // turn off a newer selection in the same group.
         if !enabled, item.currentMediaSelection.selectedMediaOption(in: entry.group) != entry.native {
@@ -2890,7 +2956,9 @@ final class PlaybackController: ObservableObject {
         center.skipBackwardCommand.isEnabled = center.skipForwardCommand.isEnabled
         let canSelectLanguage = hasItem && !loadInProgress && !probing && !probeRestoring
             && mediaItem?.status == .readyToPlay
-        center.enableLanguageOptionCommand.isEnabled = canSelectLanguage && !nowPlayingLanguages.entries.isEmpty
+        center.enableLanguageOptionCommand.isEnabled = canSelectLanguage && mediaItem.map {
+            !nowPlayingLanguages.selectableEntries(in: $0).isEmpty
+        } == true
         center.disableLanguageOptionCommand.isEnabled = canSelectLanguage && nowPlayingLanguages.entries.contains { $0.group.allowsEmptySelection }
         center.previousTrackCommand.isEnabled = queue.map { $0.currentIndex > 0 } ?? false
         center.nextTrackCommand.isEnabled = queue.map { $0.currentIndex + 1 < $0.entries.count } ?? false
@@ -2904,7 +2972,7 @@ final class PlaybackController: ObservableObject {
             if let duration = snapshot.duration { metadata[MPMediaItemPropertyPlaybackDuration] = duration }
             if let artwork = nowPlayingArtwork.artwork { metadata[MPMediaItemPropertyArtwork] = artwork }
             if let item = mediaItem {
-                metadata[MPNowPlayingInfoPropertyAvailableLanguageOptions] = nowPlayingLanguages.groups
+                metadata[MPNowPlayingInfoPropertyAvailableLanguageOptions] = nowPlayingLanguages.groups(in: item)
                 metadata[MPNowPlayingInfoPropertyCurrentLanguageOptions] = nowPlayingLanguages.current(in: item)
             }
             if let queue {
@@ -2935,6 +3003,118 @@ final class PlaybackController: ObservableObject {
     }
 }
 
+@MainActor
+protocol PlaybackMetricsObserving: AnyObject {
+    var values: NativePlaybackMetrics? { get }
+    func cancel()
+}
+
+/// Consume native events without inspecting request resources, identifiers or
+/// error objects. One observer belongs to one installed player item.
+@available(macOS 15, *)
+@MainActor
+final class NativePlaybackMetricsObserver: PlaybackMetricsObserving {
+    private(set) var values: NativePlaybackMetrics?
+    private var task: Task<Void, Never>?
+    private var modeTask: Task<Void, Never>?
+    private var requestID = UUID()
+    private var seekStarted: Date?
+
+    func start(item: AVPlayerItem, changed: @escaping @MainActor () -> Void) {
+        cancel()
+        values = nil
+        seekStarted = nil
+        let id = requestID
+        // Subscribe to playback events directly, without resource requests.
+        let initial = item.metrics(forType: AVMetricPlayerItemInitialLikelyToKeepUpEvent.self)
+        let seek = item.metrics(forType: AVMetricPlayerItemSeekEvent.self)
+        let completed = item.metrics(forType: AVMetricPlayerItemSeekDidCompleteEvent.self)
+        let stalls = item.metrics(forType: AVMetricPlayerItemStallEvent.self)
+        let variants = item.metrics(forType: AVMetricPlayerItemVariantSwitchEvent.self)
+        let summary = item.metrics(forType: AVMetricPlayerItemPlaybackSummaryEvent.self)
+        let events = initial.chronologicalMerge(with: seek, completed, stalls, variants, summary)
+        let publish: @MainActor (AVMetricEvent) -> Void = { [weak self] event in
+            guard !Task.isCancelled, let self, self.requestID == id else { return }
+            if self.consume(event) { changed() }
+        }
+        task = Task {
+            do {
+                for try await (event, _) in events { publish(event) }
+            } catch { /* Metrics are optional and must never fail playback. */ }
+        }
+        #if compiler(>=6.4)
+        if #available(macOS 27, *) {
+            let modes = item.metrics(forType: AVMetricPlaybackModeSwitchEvent.self)
+            modeTask = Task {
+                do { for try await event in modes { publish(event) } }
+                catch { /* Optional diagnostic stream. */ }
+            }
+        }
+        #endif
+    }
+
+    func cancel() {
+        requestID = UUID()
+        task?.cancel(); task = nil
+        modeTask?.cancel(); modeTask = nil
+        seekStarted = nil
+    }
+
+    private func consume(_ event: AVMetricEvent) -> Bool {
+        var next = values ?? NativePlaybackMetrics()
+        switch event {
+        case let initial as AVMetricPlayerItemInitialLikelyToKeepUpEvent:
+            next.startupSeconds = Self.nonnegative(initial.timeTaken)
+        case is AVMetricPlayerItemSeekEvent:
+            seekStarted = event.date
+        case let completed as AVMetricPlayerItemSeekDidCompleteEvent:
+            next.completedSeeks = min(1_000_000, (next.completedSeeks ?? 0) + 1)
+            next.lastSeekWasBuffered = completed.didSeekInBuffer
+            if let seekStarted { next.lastSeekSeconds = Self.nonnegative(event.date.timeIntervalSince(seekStarted)) }
+            seekStarted = nil
+        case is AVMetricPlayerItemStallEvent:
+            next.stallCount = min(1_000_000, (next.stallCount ?? 0) + 1)
+        case is AVMetricPlayerItemVariantSwitchEvent:
+            next.variantSwitchCount = min(1_000_000, (next.variantSwitchCount ?? 0) + 1)
+        case let summary as AVMetricPlayerItemPlaybackSummaryEvent:
+            next.startupSeconds = Self.nonnegative(summary.timeSpentInInitialStartup) ?? next.startupSeconds
+            next.stallCount = max(next.stallCount ?? 0, summary.stallCount)
+            next.variantSwitchCount = max(next.variantSwitchCount ?? 0, summary.variantSwitchCount)
+            next.stallRecoverySeconds = Self.nonnegative(summary.timeSpentRecoveringFromStall)
+            next.averageBitrate = Self.nonnegative(Double(summary.timeWeightedAverageBitrate))
+        default:
+            #if compiler(>=6.4)
+            if #available(macOS 27, *), let change = event as? AVMetricPlaybackModeSwitchEvent {
+                switch change.mode {
+                case .local: next.mode = .local
+                case .airPlayVideo: next.mode = .airPlayVideo
+                @unknown default: break
+                }
+            }
+            #else
+            break
+            #endif
+        }
+        guard next != (values ?? NativePlaybackMetrics()) else { return false }
+        values = next
+        return true
+    }
+
+    private static func nonnegative(_ value: Double) -> Double? {
+        value.isFinite && value >= 0 ? value : nil
+    }
+}
+
+@MainActor
+enum NativeMediaOptions {
+    static func selectable(in group: AVMediaSelectionGroup, for item: AVPlayerItem) -> [AVMediaSelectionOption] {
+        #if compiler(>=6.4)
+        if #available(macOS 27, *) { return item.selectableMediaSelectionOptions(in: group) }
+        #endif
+        return group.options
+    }
+}
+
 /// Session-scoped identifiers prevent commands for a retired item from selecting
 /// an unrelated track in its replacement. Only native media groups are exposed.
 @MainActor
@@ -2945,7 +3125,6 @@ struct NowPlayingLanguages {
         let group: AVMediaSelectionGroup
     }
     private(set) var entries: [Entry] = []
-    private(set) var groups: [MPNowPlayingInfoLanguageOptionGroup] = []
 
     init(audio: AVMediaSelectionGroup? = nil, subtitles: AVMediaSelectionGroup? = nil, generation: UUID = UUID()) {
         for (type, group) in [(MPNowPlayingInfoLanguageOptionType.audible, audio), (.legible, subtitles)] {
@@ -2962,9 +3141,27 @@ struct NowPlayingLanguages {
             }
             guard !choices.isEmpty else { continue }
             entries += choices
-            groups.append(MPNowPlayingInfoLanguageOptionGroup(languageOptions: choices.map(\.option),
-                defaultLanguageOption: choices.first { $0.native == group.defaultOption }?.option,
-                allowEmptySelection: group.allowsEmptySelection))
+        }
+    }
+
+    func selectableEntries(in item: AVPlayerItem) -> [Entry] {
+        var available: [ObjectIdentifier: [AVMediaSelectionOption]] = [:]
+        return entries.filter { entry in
+            let id = ObjectIdentifier(entry.group)
+            if available[id] == nil { available[id] = NativeMediaOptions.selectable(in: entry.group, for: item) }
+            return available[id]?.contains(entry.native) == true
+        }
+    }
+
+    func groups(in item: AVPlayerItem) -> [MPNowPlayingInfoLanguageOptionGroup] {
+        let available = selectableEntries(in: item)
+        var seen = Set<ObjectIdentifier>()
+        return available.compactMap { entry in
+            guard seen.insert(ObjectIdentifier(entry.group)).inserted else { return nil }
+            let choices = available.filter { $0.group === entry.group }
+            return MPNowPlayingInfoLanguageOptionGroup(languageOptions: choices.map(\.option),
+                defaultLanguageOption: choices.first { $0.native == entry.group.defaultOption }?.option,
+                allowEmptySelection: entry.group.allowsEmptySelection)
         }
     }
 
@@ -2974,7 +3171,7 @@ struct NowPlayingLanguages {
     }
 
     func current(in item: AVPlayerItem) -> [MPNowPlayingInfoLanguageOption] {
-        entries.filter { item.currentMediaSelection.selectedMediaOption(in: $0.group) == $0.native }.map(\.option)
+        selectableEntries(in: item).filter { item.currentMediaSelection.selectedMediaOption(in: $0.group) == $0.native }.map(\.option)
     }
 }
 

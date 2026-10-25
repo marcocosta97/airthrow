@@ -275,6 +275,21 @@ public struct HLSVariantSummary: Codable, Sendable, Equatable {
     }
 }
 
+/// Numeric native metrics only. No request URLs, session identifiers or errors.
+public struct NativePlaybackMetrics: Codable, Sendable, Equatable {
+    public enum Mode: String, Codable, Sendable { case local, airPlayVideo }
+    public var startupSeconds: Double?
+    public var lastSeekSeconds: Double?
+    public var completedSeeks: Int?
+    public var lastSeekWasBuffered: Bool?
+    public var stallCount: Int?
+    public var stallRecoverySeconds: Double?
+    public var variantSwitchCount: Int?
+    public var averageBitrate: Double?
+    public var mode: Mode?
+    public init() {}
+}
+
 public struct PlaybackDiagnostics: Codable, Sendable, Equatable {
     public enum SampleInspectionStatus: String, Codable, Sendable { case pending, unavailable, complete }
     public var itemStatus: String?
@@ -289,6 +304,7 @@ public struct PlaybackDiagnostics: Codable, Sendable, Equatable {
     public var observedBitrate: Double?
     public var indicatedBitrate: Double?
     public var stalls: Int?
+    public var nativeMetrics: NativePlaybackMetrics?
     /// Numeric format identifiers and encoded dimensions, when local tracks are available.
     public var videoCodecTypes: [UInt32]?
     public var videoWidth: Int?
@@ -421,6 +437,9 @@ public struct PlaybackSnapshot: Codable, Sendable, Equatable {
     public var liveOffset: Double?
     /// Native live playback has a deliberate delay for buffering/network conditions.
     public var recommendedLiveOffset: Double?
+    /// Whether native live playback should recover its offset after buffering.
+    /// False after an explicit pause or rewind, until Go Live is requested.
+    public var followsLive: Bool?
     /// Smallest observed live-edge advance. Manifest updates move this edge in
     /// chunks even when the playhead advances continuously.
     public var liveEdgeUpdateInterval: Double?

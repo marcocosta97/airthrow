@@ -593,7 +593,8 @@ let tests: [(String, () throws -> Void)] = [
         let decoded = try JSONDecoder().decode(PlaybackSnapshot.self, from: legacy)
         try check(decoded.sources == nil && decoded.selectedSourceID == nil && decoded.audioOptions == nil
                   && decoded.selectedAudioID == nil && decoded.subtitleOptions == nil
-                  && decoded.selectedSubtitleID == nil && decoded.allowVideoConversion == nil,
+                  && decoded.selectedSubtitleID == nil && decoded.allowVideoConversion == nil
+                  && decoded.followsLive == nil && decoded.diagnostics?.nativeMetrics == nil,
                   "Legacy status invented source chooser fields")
         var status = PlaybackSnapshot()
         status.playbackPath = .remux
@@ -611,6 +612,17 @@ let tests: [(String, () throws -> Void)] = [
                                   SubtitleOptionSnapshot(id: "session-subtitle-0", label: "Italiano")]
         status.selectedSubtitleID = "session-subtitle-off"
         status.allowVideoConversion = true
+        status.followsLive = false
+        var native = NativePlaybackMetrics()
+        native.startupSeconds = 0.25
+        native.completedSeeks = 2
+        native.lastSeekSeconds = 0.1
+        native.lastSeekWasBuffered = true
+        native.stallCount = 1
+        native.mode = .airPlayVideo
+        var diagnostics = PlaybackDiagnostics()
+        diagnostics.nativeMetrics = native
+        status.diagnostics = diagnostics
         let data = try JSONEncoder().encode(status)
         try check(try JSONDecoder().decode(PlaybackSnapshot.self, from: data) == status,
                   "Source chooser status did not round-trip")
