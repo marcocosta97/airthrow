@@ -276,6 +276,10 @@ final class PlaybackController: ObservableObject {
     private var queueDirection = 1
     private var queueAttemptsRemaining = 0
     private var playWhenReady = false
+    private var waitsForAutoplayReceiver = false
+    static let autoplayVideosKey = "autoplayVideos"
+    @Published private(set) var autoplayVideos: Bool
+    private let playbackDefaults: UserDefaults
     private var pendingAutoplaySeek = false
     private var autoplayRouteTask: Task<Void, Never>?
     private var autoplayRouteDeadline: ContinuousClock.Instant?
@@ -306,6 +310,7 @@ final class PlaybackController: ObservableObject {
          historyStore: MediaHistoryStore? = nil,
          allowVideoConversion: Bool? = nil,
          preferQuality: Bool? = nil,
+         playbackDefaults: UserDefaults = .standard,
          xtreamCatalogStore: XtreamCatalogStore = .shared,
          xtreamCatalogDefaults: UserDefaults = .standard,
          resolvePlaylist: @escaping @Sendable (URL) async throws -> ResolvedPlaylist = {
@@ -317,6 +322,8 @@ final class PlaybackController: ObservableObject {
         return AfterPlaybackBehavior(rawValue: raw) ?? .keepConnected
     }, integratesWithSystemPlayback: Bool = true) {
         self.player = player
+        self.playbackDefaults = playbackDefaults
+        self.autoplayVideos = playbackDefaults.bool(forKey: Self.autoplayVideosKey)
         self.integratesWithSystemPlayback = integratesWithSystemPlayback
         self.inspectVideoEvidence = inspectVideoEvidence
         self.inspectStreamingVideo = inspectStreamingVideo
@@ -376,7 +383,12 @@ final class PlaybackController: ObservableObject {
         }
     }
 
-    func load(_ input: String, autoplay: Bool = false) throws {
+    func setAutoplayVideos(_ enabled: Bool) {
+        autoplayVideos = enabled
+        playbackDefaults.set(enabled, forKey: Self.autoplayVideosKey)
+    }
+
+    func load(_ input: String, autoplay: Bool? = nil) throws {
         let url = try MediaInput.source(input)
         sourceInput = input
         loadSource(url, autoplay: autoplay)
@@ -415,18 +427,19 @@ final class PlaybackController: ObservableObject {
         url.isFileURL ? url.deletingPathExtension().lastPathComponent : (url.host ?? "Video")
     }
 
-    private func loadSource(_ url: URL, autoplay: Bool = false) {
+    private func loadSource(_ url: URL, autoplay: Bool? = nil) {
         cancelIPTVImport()
         inspectorPage = .history
+        // Explicit handoffs retain their receiver-at-receipt contract. Ordinary
+        // selections follow the preference and can wait for a chosen receiver.
+        let shouldPlay = autoplay.map { $0 && player.isExternalPlaybackActive } ?? autoplayVideos
+        let waitForReceiver = autoplay == nil && shouldPlay && !player.isExternalPlaybackActive
         if IPTVPlaylist.isCatalogSource(url) {
-            importIPTV(url: url, hlsAutoplay: autoplay && player.isExternalPlaybackActive)
+            importIPTV(url: url, hlsAutoplay: shouldPlay, waitForReceiver: waitForReceiver)
             return
         }
-        // Picker intent is not an active route. Never arm an incoming request
-        // to start later merely because a receiver may subsequently connect.
-        let shouldPlay = autoplay && player.isExternalPlaybackActive
         if SourceResolver.playlistPage(url) != nil {
-            startPlaylistLoad(url, autoplay: shouldPlay)
+            startPlaylistLoad(url, autoplay: shouldPlay, waitForReceiver: waitForReceiver)
         } else {
             let preferences = SourceResolver.youtubeStartSeconds(url).map { seconds in
                 LoadPreferences(conversion: conversionPolicy, preferQuality: preferQuality,
@@ -434,9 +447,10 @@ final class PlaybackController: ObservableObject {
                                 enhancementOutput4K: enhancementOutput4K,
                                 pinnedSourceID: nil, subtitle: nil, resumePosition: seconds)
             }
-            startLoad(url, autoplay: shouldPlay, preferences: preferences, recordHistory: true)
+            startLoad(url, autoplay: shouldPlay, waitForReceiver: waitForReceiver,
+                      preferences: preferences, recordHistory: true)
         }
-        if autoplay && !shouldPlay {
+        if autoplay == true && !shouldPlay {
             notice = "Video will load paused. Choose a receiver using AirPlay, then press Play."
         }
     }
@@ -590,12 +604,13 @@ final class PlaybackController: ObservableObject {
 
     func selectXtreamMedia(_ url: URL, title: String, isLive: Bool = false) throws {
         let url = try MediaInput.url(url.absoluteString)
-        let autoplay = replacementAutoplay
-        startLoad(url, autoplay: autoplay, titleOverride: title, liveChannel: isLive)
+        let autoplay = autoplayVideos || replacementAutoplay
+        startLoad(url, autoplay: autoplay, waitForReceiver: autoplayVideos && !player.isExternalPlaybackActive,
+                  titleOverride: title, liveChannel: isLive)
         selectedIPTVChannelID = nil
     }
 
-    private func importIPTV(url: URL, hlsAutoplay: Bool? = nil) {
+    private func importIPTV(url: URL, hlsAutoplay: Bool? = nil, waitForReceiver: Bool = false) {
         cancelIPTVImport()
         let id = iptvImportID
         let mediaGeneration = generation
@@ -614,7 +629,7 @@ final class PlaybackController: ObservableObject {
                 self.iptvImporting = false; self.iptvImportTask = nil
                 if let hlsAutoplay, case IPTVCatalogFailure.hlsPlaylist = error {
                     guard self.generation == mediaGeneration else { return }
-                    self.startLoad(url, autoplay: hlsAutoplay, recordHistory: true)
+                    self.startLoad(url, autoplay: hlsAutoplay, waitForReceiver: waitForReceiver, recordHistory: true)
                     return
                 }
                 self.iptvImportError = IPTVCatalogFailure.message(for: error)
@@ -671,8 +686,9 @@ final class PlaybackController: ObservableObject {
         guard let channel = iptvCatalog?.channels.first(where: { $0.id == id }) else {
             throw AppFailure(.invalidRequest, "This channel is no longer available. Choose a channel from the current playlist.")
         }
-        let autoplay = replacementAutoplay
-        startLoad(channel.url, autoplay: autoplay, titleOverride: channel.name, liveChannel: true)
+        let autoplay = autoplayVideos || replacementAutoplay
+        startLoad(channel.url, autoplay: autoplay, waitForReceiver: autoplayVideos && !player.isExternalPlaybackActive,
+                  titleOverride: channel.name, liveChannel: true)
         selectedIPTVChannelID = id
     }
 
@@ -1062,7 +1078,7 @@ final class PlaybackController: ObservableObject {
         return built
     }
 
-    private func startPlaylistLoad(_ url: URL, autoplay: Bool = false) {
+    private func startPlaylistLoad(_ url: URL, autoplay: Bool = false, waitForReceiver: Bool = false) {
         let retryRoute = hasOpenedPicker || player.isExternalPlaybackActive
         resetItem(keepPlayerItem: true)
         probeWhenReady = retryRoute
@@ -1070,6 +1086,7 @@ final class PlaybackController: ObservableObject {
         loading = true
         resolving = true
         playWhenReady = autoplay
+        waitsForAutoplayReceiver = waitForReceiver
         playbackRequested = autoplay
         title = "YouTube playlist"
         notice = nil
@@ -1100,7 +1117,7 @@ final class PlaybackController: ObservableObject {
     }
 
     private func startLoad(_ url: URL, retry: Bool = false, fallback: ResolvedSource? = nil,
-                           preservingQueue: Bool = false, autoplay: Bool = false,
+                           preservingQueue: Bool = false, autoplay: Bool = false, waitForReceiver: Bool = false,
                            titleOverride: String? = nil, sourceChoice: String? = nil,
                            changingSource: Bool = false, enhancement: VideoEnhancement? = nil,
                            upscaler: VideoUpscaler? = nil,
@@ -1143,6 +1160,8 @@ final class PlaybackController: ObservableObject {
         let retainedLiveChannel = liveChannel ?? ((changingSource || retry || fallback != nil) && loadingLiveChannel)
         let retainedAutoplayDeadline = autoplay && (preservingQueue || retry || fallback != nil)
             ? autoplayRouteDeadline : nil
+        let retainedReceiverWait = autoplay && (waitForReceiver
+            || ((preservingQueue || retry || fallback != nil || changingSource) && waitsForAutoplayReceiver))
         let retainedChannel = changingSource || retry || fallback != nil ? selectedIPTVChannelID : nil
         let retainedHistoryURL = changingSource || retry || fallback != nil ? pendingHistoryURL : nil
         let retainedAuthentication = originalSourceURL == url && (changingSource || retry || fallback != nil)
@@ -1161,6 +1180,7 @@ final class PlaybackController: ObservableObject {
         sampledVideo = retainedVideoSample
         sampleInspectionStatus = retainedSampleStatus
         autoplayRouteDeadline = retainedAutoplayDeadline
+        waitsForAutoplayReceiver = retainedReceiverWait
         loadPreferences = preferences
         pendingResumePosition = preferences.resumePosition
         subtitlePreference = preferences.subtitle
@@ -1671,6 +1691,7 @@ final class PlaybackController: ObservableObject {
         liveFollowRequested = false
         mediaItem?.automaticallyPreservesTimeOffsetFromLive = false
         playWhenReady = false
+        waitsForAutoplayReceiver = false
         seekPlayWhenReady = false
         replacementPlayTask?.cancel(); replacementPlayTask = nil
         pendingAutoplaySeek = false
@@ -1694,20 +1715,22 @@ final class PlaybackController: ObservableObject {
         guard let queue, queue.currentIndex > 0 else {
             throw AppFailure(.unsupportedOperation, "There is no previous playlist item.")
         }
-        let autoplay = replacementAutoplay
-        loadQueueItem(at: queue.currentIndex - 1, direction: -1, autoplay: autoplay)
+        let autoplay = autoplayVideos || replacementAutoplay
+        loadQueueItem(at: queue.currentIndex - 1, direction: -1, autoplay: autoplay,
+                      waitForReceiver: autoplayVideos && !player.isExternalPlaybackActive)
     }
 
     func next() throws {
         guard let queue, queue.currentIndex + 1 < queue.entries.count else {
             throw AppFailure(.unsupportedOperation, "There is no next playlist item.")
         }
-        let autoplay = replacementAutoplay
-        loadQueueItem(at: queue.currentIndex + 1, direction: 1, autoplay: autoplay)
+        let autoplay = autoplayVideos || replacementAutoplay
+        loadQueueItem(at: queue.currentIndex + 1, direction: 1, autoplay: autoplay,
+                      waitForReceiver: autoplayVideos && !player.isExternalPlaybackActive)
     }
 
     private func loadQueueItem(at requestedIndex: Int, direction: Int, autoplay: Bool,
-                               attemptsRemaining: Int? = nil) {
+                               attemptsRemaining: Int? = nil, waitForReceiver: Bool = false) {
         guard var queue else { return }
         var attempts = attemptsRemaining ?? queue.entries.count
         var index = requestedIndex
@@ -1731,7 +1754,8 @@ final class PlaybackController: ObservableObject {
         queueDirection = direction
         queueAttemptsRemaining = attempts
         if !skippedTitles.isEmpty { notice = InterfaceCopy.skippedPlaylistItems(skippedTitles.count) }
-        startLoad(url, preservingQueue: true, autoplay: autoplay, titleOverride: queue.entries[index].title)
+        startLoad(url, preservingQueue: true, autoplay: autoplay, waitForReceiver: waitForReceiver,
+                  titleOverride: queue.entries[index].title)
     }
 
     func seek(_ seconds: Double) throws {
@@ -2213,6 +2237,7 @@ final class PlaybackController: ObservableObject {
         actualPlaybackPath = nil
         ended = false; hasPlayed = false; failure = nil; failureReason = nil; playbackErrorDismissed = false
         playWhenReady = false
+        waitsForAutoplayReceiver = false
         pendingAutoplaySeek = false
         replacementPlayTask?.cancel(); replacementPlayTask = nil
         replacingReceiverItem = false
@@ -2401,9 +2426,10 @@ final class PlaybackController: ObservableObject {
         }
         let external = player.isExternalPlaybackActive
         if external {
+            waitsForAutoplayReceiver = false
             autoplayRouteTask?.cancel(); autoplayRouteTask = nil
             autoplayRouteDeadline = nil
-        } else if playWhenReady, autoplayRouteTask == nil,
+        } else if playWhenReady, !waitsForAutoplayReceiver, autoplayRouteTask == nil,
                   !changingSource || (!loadInProgress && pendingResumePosition == nil && !probeRestoring) {
             // AVPlayer can briefly drop its external flag while replacing an
             // item. Preserve the explicit request for a bounded handoff grace,

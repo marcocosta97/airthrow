@@ -216,6 +216,9 @@ struct ControllerChecks {
         print("PASS URL replacement cancels playlist extraction and rejects stale queue results")
 
         let sendPlayer = HandoffPlayer()
+        let autoplaySuite = "airthrow-autoplay-checks-" + UUID().uuidString
+        let autoplayDefaults = UserDefaults(suiteName: autoplaySuite)!
+        defer { autoplayDefaults.removePersistentDomain(forName: autoplaySuite) }
         let sendController = PlaybackController(player: sendPlayer, resolveSource: { url in
             let marker = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
                 .first(where: { $0.name == "v" })?.value ?? "video"
@@ -225,7 +228,7 @@ struct ControllerChecks {
             }
             if marker == "boundary" { try await Task.sleep(for: .seconds(13)) }
             return ResolvedSource(url: mediaURL, title: marker)
-        }, resolvePlaylist: { url in
+        }, playbackDefaults: autoplayDefaults, resolvePlaylist: { url in
             if url.query?.contains("PLtimeout") == true {
                 try await Task.sleep(for: .seconds(20))
                 return ResolvedPlaylist(title: "Slow queue", entries: [
@@ -235,7 +238,8 @@ struct ControllerChecks {
             try await Task.sleep(for: .milliseconds(600))
             return ResolvedPlaylist(title: "Sent queue", entries: [
                 PlaylistEntry(url: nil, title: "Unavailable", unavailableReason: "Unavailable"),
-                PlaylistEntry(url: URL(string: "https://www.youtube.com/watch?v=first"), title: "First")
+                PlaylistEntry(url: URL(string: "https://www.youtube.com/watch?v=first"), title: "First"),
+                PlaylistEntry(url: URL(string: "https://www.youtube.com/watch?v=second"), title: "Second")
             ], truncated: false)
         }, prepareSource: nil, integratesWithSystemPlayback: false)
         defer { sendController.shutdown() }
@@ -335,6 +339,72 @@ struct ControllerChecks {
         try check(sendController.snapshot.state == .idle && sendPlayer.currentItem == nil && sendPlayer.rate == 0,
                   "Stop allowed a pending send to complete")
         print("PASS playlist send propagates play intent and Stop cancels pending replacement")
+
+        try check(!sendController.autoplayVideos, "Autoplay was enabled without opting in")
+        sendController.setAutoplayVideos(true)
+        let restoredPreference = PlaybackController(historyStore: MediaHistoryStore(defaults: nil),
+            playbackDefaults: autoplayDefaults, integratesWithSystemPlayback: false)
+        try check(restoredPreference.autoplayVideos, "Autoplay preference did not survive controller recreation")
+        restoredPreference.shutdown()
+        sendPlayer.handoff(at: 0, replies: [.restored])
+        try sendController.load(sendURL("automatic"))
+        try await waitForSend(.playing)
+        sendController.pause()
+        guard let rememberedVideo = sendController.history.first(where: { $0.kind == .video }) else {
+            throw NSError(domain: "ControllerChecks", code: 3,
+                          userInfo: [NSLocalizedDescriptionKey: "Synthetic video was not remembered"])
+        }
+        try sendController.selectHistoryEntry(rememberedVideo.id)
+        try await waitForSend(.playing)
+        sendController.pause()
+        try sendController.selectXtreamMedia(mediaURL, title: "Synthetic film")
+        try await waitForSend(.playing)
+        try sendController.load(sendURL("explicit-paused"), autoplay: false)
+        try await waitForSend(.ready)
+        try check(sendPlayer.rate == 0, "Autoplay preference overrode an explicit paused load")
+        print("PASS autoplay persists and starts ordinary, History and Xtream selections; explicit pause wins")
+
+        try sendController.load("https://www.youtube.com/playlist?list=PL12345678")
+        try await waitForSend(.playing)
+        sendController.pause()
+        try sendController.next()
+        try await waitForSend(.playing)
+        try check(sendController.snapshot.queue?.currentIndex == 2, "Autoplay did not start the next queue item")
+        sendController.pause()
+        try sendController.previous()
+        try await waitForSend(.playing)
+        try check(sendController.snapshot.queue?.currentIndex == 1,
+                  "Autoplay queue navigation failed to skip an unavailable item")
+        print("PASS autoplay starts the first playable playlist item and manual queue navigation")
+
+        sendController.stop()
+        sendPlayer.disconnect()
+        try sendController.load(sendURL("await-receiver"))
+        try await waitForSend(.awaitingReceiver, seconds: 20)
+        try check(sendPlayer.rate == 0 && sendPlayer.isMuted, "Autoplay played without a receiver")
+        sendController.pickerWillOpen()
+        sendPlayer.handoff(at: 0, replies: [.restored])
+        sendController.pickerDidClose()
+        try await waitForSend(.playing)
+        sendController.stop()
+        sendPlayer.disconnect()
+        try sendController.load(sendURL("cancelled-auto"))
+        try await waitForSend(.awaitingReceiver, seconds: 20)
+        sendController.pause()
+        sendController.pickerWillOpen()
+        sendPlayer.handoff(at: 0, replies: [.restored])
+        sendController.pickerDidClose()
+        try await waitForSend(.ready)
+        try check(sendPlayer.rate == 0, "Pause did not cancel autoplay while waiting for a receiver")
+        try sendController.load(sendURL("delayed"))
+        sendController.pause()
+        try await waitForSend(.ready)
+        try check(sendPlayer.rate == 0, "Pause during loading did not cancel preference autoplay")
+        sendController.setAutoplayVideos(false)
+        try sendController.selectXtreamMedia(mediaURL, title: "Paused synthetic film")
+        try await waitForSend(.ready)
+        try check(sendPlayer.rate == 0, "Disabling autoplay did not keep a paused selection paused")
+        print("PASS autoplay waits for a receiver; Pause during waiting or loading and disabling the preference keep selections paused")
 
         let handoffPlayer = HandoffPlayer()
         let handoffController = PlaybackController(player: handoffPlayer, historyStore: MediaHistoryStore(defaults: nil),
@@ -533,6 +603,6 @@ struct ControllerChecks {
         try check(qualityController.snapshot.seekInProgress == nil && qualityController.snapshot.state == .idle,
                   "Stop retained seek work")
         print("PASS seek progress stays visible on AirPlay, resumes play and handles supersession/Pause/Stop")
-        print("22/22 controller checks passed (simulated handoff; no physical receiver)")
+        print("25/25 controller checks passed (simulated handoff; no physical receiver)")
     }
 }

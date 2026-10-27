@@ -668,7 +668,11 @@ struct IPTVChecks {
         try check(staleHLS.player.currentItem === newerItem && staleHLS.snapshot.state != .failed, "Late HLS discovery cannot replace a newer video")
         staleHLS.shutdown()
         let receiver = ReceiverPlayer()
-        let playing = PlaybackController(player: receiver, showReceiverWaitingScreen: false, resolveSource: { ResolvedSource(url: $0) })
+        let autoplaySuite = "airthrow-iptv-autoplay-" + UUID().uuidString
+        let autoplayDefaults = UserDefaults(suiteName: autoplaySuite)!
+        defer { autoplayDefaults.removePersistentDomain(forName: autoplaySuite) }
+        let playing = PlaybackController(player: receiver, showReceiverWaitingScreen: false,
+            resolveSource: { ResolvedSource(url: $0) }, playbackDefaults: autoplayDefaults)
         try playing.importIPTV(local)
         try await wait { !playing.iptvImporting }
         try playing.load(base.appendingPathComponent("video.mp4").absoluteString, autoplay: true)
@@ -712,6 +716,16 @@ struct IPTVChecks {
         try playing.selectIPTVChannel(playing.iptvCatalog!.channels[1].id)
         try await wait { playing.snapshot.state != .loading }
         try check(receiver.rate == 0 && playing.snapshot.state != .failed, "Paused receiver playback stays paused when changing channel")
+        playing.setAutoplayVideos(true)
+        try playing.selectIPTVChannel(playing.iptvCatalog!.channels[0].id)
+        try await wait { playing.snapshot.state == .playing }
+        try check(receiver.rate > 0 && playing.player === receiver,
+                  "Autoplay starts an IPTV selection from a paused session on the persistent player")
+        playing.pause()
+        playing.setAutoplayVideos(false)
+        try playing.selectIPTVChannel(playing.iptvCatalog!.channels[1].id)
+        try await wait { playing.snapshot.state != .loading }
+        try check(receiver.rate == 0, "Disabling autoplay restores paused IPTV selection")
         try playing.importIPTV(base.appendingPathComponent("live-channels.m3u").absoluteString)
         try await wait { !playing.iptvImporting }
         try playing.load(liveURL.absoluteString, autoplay: true)

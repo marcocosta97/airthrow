@@ -110,6 +110,12 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section("Playback") {
+                Toggle("Autoplay videos", isOn: Binding(
+                    get: { controller.autoplayVideos },
+                    set: { controller.setAutoplayVideos($0) }))
+                Text("Start loaded or selected videos as soon as the video and AirPlay receiver are ready.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 Toggle("Show a waiting screen on the TV", isOn: Binding(
                     get: { controller.showReceiverWaitingScreen },
                     set: { controller.setShowReceiverWaitingScreen($0) }))

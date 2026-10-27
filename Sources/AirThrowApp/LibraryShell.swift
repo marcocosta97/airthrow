@@ -408,7 +408,8 @@ private struct SourceBar: View {
 
     private func play() {
         guard !trimmed.isEmpty else { return }
-        do { try controller.load(url, autoplay: true) } catch { controller.displayError(error) }
+        do { try controller.load(url, autoplay: controller.autoplayVideos ? nil : true) }
+        catch { controller.displayError(error) }
         urlFocused = false
     }
 
