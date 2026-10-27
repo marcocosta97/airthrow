@@ -113,7 +113,6 @@ struct SettingsView: View {
                 Toggle("Show a waiting screen on the TV", isOn: Binding(
                     get: { controller.showReceiverWaitingScreen },
                     set: { controller.setShowReceiverWaitingScreen($0) }))
-                    .background(SettingsScrollStyle().allowsHitTesting(false))
                 Text("When choosing a receiver with no video loaded, show AirThrow on a black background. Stays on until you load a video, press Stop, or leave on the TV.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -323,35 +322,6 @@ private extension View {
             scrollEdgeEffectStyle(.soft, for: .top)
         } else {
             self
-        }
-    }
-}
-
-/// Apply AppKit's fading overlay indicators to this Form's own scroll view.
-/// Mount inside a row so the lookup stays within the Settings scroll hierarchy.
-private struct SettingsScrollStyle: NSViewRepresentable {
-    func makeNSView(context: Context) -> ScrollStyleView { ScrollStyleView() }
-    func updateNSView(_ view: ScrollStyleView, context: Context) {
-        view.applyStyle()
-    }
-
-    final class ScrollStyleView: NSView {
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            applyStyle()
-        }
-
-        override func viewDidMoveToSuperview() {
-            super.viewDidMoveToSuperview()
-            applyStyle()
-        }
-
-        func applyStyle() {
-            // SwiftUI can attach the row before its scroll ancestor is ready.
-            DispatchQueue.main.async { [weak self] in
-                guard let scrollView = self?.enclosingScrollView else { return }
-                scrollView.scrollerStyle = .overlay
-            }
         }
     }
 }

@@ -20,7 +20,6 @@ struct IPTVPanel: View, Equatable {
     @CatalogState private var visible: [IPTVChannel]
     @CatalogState private var visibleRevision = 0
     @CatalogState private var searchTask: Task<Void, Never>?
-    @FocusState private var searchFocused: Bool
 
     init(controller: PlaybackController, catalogID: UUID?, selectedID: UUID?) {
         self.controller = controller
@@ -53,10 +52,7 @@ struct IPTVPanel: View, Equatable {
                     VStack(alignment: .leading, spacing: 6) {
                         CategoryPopUpField(selection: $category, options: categoryOptions, accessibilityLabel: "Channel category")
                             .frame(height: 26)
-                        TextField("Find a channel", text: $search)
-                            .textFieldStyle(.roundedBorder)
-                            .focused($searchFocused)
-                            .accessibilityLabel("Find a channel")
+                        CatalogSearchField(prompt: "Find a channel", text: $search)
                             .frame(height: 26)
                     }
                     Text(channelSummary(catalog))
@@ -78,15 +74,12 @@ struct IPTVPanel: View, Equatable {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    ScrollView {
-                        ChannelList(revision: visibleRevision, channels: visible,
-                                    selectedID: controller.selectedIPTVChannelID,
-                                    resignSearch: { searchFocused = false },
-                                    select: { channel in
-                                        controller.perform { try controller.selectIPTVChannel(channel.id) }
-                                    })
-                            .equatable()
-                    }
+                    ChannelList(revision: visibleRevision, channels: visible,
+                                selectedID: controller.selectedIPTVChannelID,
+                                select: { channel in
+                                    controller.perform { try controller.selectIPTVChannel(channel.id) }
+                                })
+                        .equatable()
                 }
             }
         }
@@ -134,42 +127,52 @@ struct IPTVPanel: View, Equatable {
     }
 }
 
-private struct ChannelList: View, Equatable {
+struct ChannelList: View, Equatable {
     let revision: Int
     let channels: [IPTVChannel]
     let selectedID: UUID?
-    let resignSearch: () -> Void
     let select: (IPTVChannel) -> Void
+    @State private var highlightedID: UUID?
 
     nonisolated static func == (lhs: ChannelList, rhs: ChannelList) -> Bool {
         lhs.revision == rhs.revision && lhs.selectedID == rhs.selectedID
     }
 
+    private var selection: Binding<UUID?> {
+        Binding(get: { highlightedID }, set: { id in
+            highlightedID = id
+            guard let channel = channels.first(where: { $0.id == id }) else { return }
+            select(channel)
+        })
+    }
+
     var body: some View {
-        LazyVStack(alignment: .leading, spacing: 0) {
+        List(selection: selection) {
             ForEach(channels) { channel in
-                Button {
-                    resignSearch()
-                    select(channel)
-                } label: {
-                    HStack(spacing: 8) {
-                        Text("\(channel.number)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                            .frame(minWidth: 20, alignment: .trailing)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(channel.name).lineLimit(2)
-                            if let category = channel.category { Text(category).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
+                HStack(spacing: 8) {
+                    Text("\(channel.number)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                        .frame(minWidth: 20, alignment: .trailing)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(channel.name).lineLimit(2)
+                        if let category = channel.category {
+                            Text(category).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                         }
-                        Spacer(minLength: 0)
-                        if selectedID == channel.id {
-                            Image(systemName: "checkmark").foregroundStyle(Color.accentColor).accessibilityHidden(true)
-                        }
-                    }.frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 8).padding(.vertical, 6).contentShape(Rectangle())
-                }.buttonStyle(.plain)
-                    .help("Load \(channel.name). Active TV playback continues; paused playback stays paused.")
-                    .accessibilityLabel("Load channel \(channel.number), \(channel.name)")
-                    .accessibilityValue(selectedID == channel.id ? "Selected channel" : "")
+                    }
+                    Spacer(minLength: 0)
+                    if selectedID == channel.id {
+                        Image(systemName: "checkmark").foregroundStyle(.secondary).accessibilityHidden(true)
+                    }
+                }
+                .libraryRowStyle()
+                .tag(channel.id)
+                .help("Load \(channel.name). Active TV playback continues; paused playback stays paused.")
+                .accessibilityElement(children: .combine)
+                .accessibilityValue(selectedID == channel.id ? "Current channel" : "")
             }
-        }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .libraryListStyle()
+        .accessibilityLabel("Channels")
+        .onAppear { highlightedID = selectedID }
+        .onChange(of: selectedID) { _, id in highlightedID = id }
     }
 }

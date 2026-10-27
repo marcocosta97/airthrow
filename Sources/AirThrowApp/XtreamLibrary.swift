@@ -18,6 +18,11 @@ extension XtreamSection {
     }
 }
 
+struct CatalogViewportPosition: Equatable {
+    let itemID: String
+    let offset: CGFloat
+}
+
 @MainActor
 final class XtreamLibrary: ObservableObject {
     let client: XtreamClient
@@ -44,7 +49,7 @@ final class XtreamLibrary: ObservableObject {
     var catalogKey: CatalogKey { CatalogKey(section: section, categoryID: categoryID) }
     @Published private(set) var search = ""
     /// Scroll restoration only. Publishing it made every scroll event refilter the catalog.
-    private(set) var scrollID: String?
+    private(set) var scrollPosition: CatalogViewportPosition?
     private(set) var visibleItems: [XtreamItem] = []
     @Published private(set) var visibleRevision = 0
     private(set) var categoryNames: [String: String] = [:]
@@ -53,7 +58,7 @@ final class XtreamLibrary: ObservableObject {
     private var listingCache: [CatalogKey: XtreamListing] = [:]
     private var rememberedCategories: [XtreamSection: String] = [:]
     private var searches: [XtreamSection: String] = [:]
-    private var positions: [CatalogKey: String] = [:]
+    private var positions: [CatalogKey: CatalogViewportPosition] = [:]
     private let catalogStore: XtreamCatalogStore?
     private var task: Task<Void, Never>?
     private var detailTask: Task<Void, Never>?
@@ -74,7 +79,7 @@ final class XtreamLibrary: ObservableObject {
     }
     func setSearch(_ value: String) {
         search = value; searches[section] = value
-        scrollID = nil; positions[catalogKey] = nil
+        scrollPosition = nil; positions[catalogKey] = nil
         visibleRefresh?.cancel()
         let terms = value.split(whereSeparator: \.isWhitespace)
         guard !terms.isEmpty else { rebuildVisible(); return }
@@ -84,10 +89,10 @@ final class XtreamLibrary: ObservableObject {
             self.rebuildVisible()
         }
     }
-    func updateScroll(_ value: String?, for key: CatalogKey) {
+    func updateScroll(_ value: CatalogViewportPosition?, for key: CatalogKey) {
         // A removed scroll view can publish a final update after changing tabs.
         guard key == catalogKey, !loading else { return }
-        scrollID = value; positions[key] = value
+        scrollPosition = value; positions[key] = value
     }
     func refresh() {
         browse(section, categoryID: categoryID, forceRefresh: true)
@@ -99,7 +104,7 @@ final class XtreamLibrary: ObservableObject {
         self.section = section; self.categoryID = categoryID
         rememberedCategories[section] = categoryID
         search = searches[section] ?? ""
-        scrollID = positions[catalogKey]
+        scrollPosition = positions[catalogKey]
         back(); error = nil
         if forceRefresh {
             categoryCache[section] = nil

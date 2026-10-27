@@ -26,18 +26,9 @@ struct ReceiverToolbarTitle: View {
 struct ReceiverToolbarButton: View {
     let controller: PlaybackController
     @ObservedObject var connection: ReceiverConnectionState
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ReceiverRoutePicker(controller: controller)
-            .overlay {
-                Image(systemName: "airplay.audio")
-                    .font(.system(size: 17, weight: .medium))
-                    .foregroundStyle(Color(nsColor: connection.phase == .idle ? .secondaryLabelColor : .systemBlue))
-                    .symbolEffect(.variableColor.iterative, isActive: connection.phase == .connecting && !reduceMotion)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
-            }
             .help(help)
             .accessibilityLabel("AirPlay receiver")
             .accessibilityValue(connection.phase.rawValue)
@@ -95,14 +86,6 @@ private struct ReceiverRoutePicker: NSViewRepresentable {
         view.player = controller.player
         view.delegate = context.coordinator
         view.isRoutePickerButtonBordered = false
-        // Retain the native interaction and accessible picker, but render one
-        // session-driven symbol in every state, including disconnection.
-        // Keep nonzero opacity so AVKit can still present its popover.
-        for state: AVRoutePickerView.ButtonState in [.normal, .normalHighlighted, .active, .activeHighlighted] {
-            view.setRoutePickerButtonColor(.clear, for: state)
-        }
-        view.wantsLayer = true
-        view.layer?.opacity = 0.02
         return view
     }
 

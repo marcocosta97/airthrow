@@ -178,16 +178,16 @@ private struct CheckFailure: Error { let message: String }
         cachedLibrary.browse(.movies, categoryID: "1")
         cachedLibrary.setSearch("Second")
         let filmKey = cachedLibrary.catalogKey
-        cachedLibrary.updateScroll("12", for: filmKey)
+        cachedLibrary.updateScroll(.init(itemID: "12", offset: 9), for: filmKey)
         cachedLibrary.switchSection(.series)
         try await wait { !cachedLibrary.loading }
         cachedLibrary.setSearch("First")
         let beforeSwitch = try await requestCounts()
         cachedLibrary.switchSection(.movies)
-        try check(!cachedLibrary.loading && cachedLibrary.categoryID == "1" && cachedLibrary.search == "Second" && cachedLibrary.scrollID == "12",
+        try check(!cachedLibrary.loading && cachedLibrary.categoryID == "1" && cachedLibrary.search == "Second" && cachedLibrary.scrollPosition == .init(itemID: "12", offset: 9),
                   "Tab return restores cached catalog, category, search and scroll immediately")
-        cachedLibrary.updateScroll("11", for: .init(section: .series, categoryID: nil))
-        try check(cachedLibrary.scrollID == "12", "Removed tab cannot overwrite current scroll position")
+        cachedLibrary.updateScroll(.init(itemID: "11", offset: 3), for: .init(section: .series, categoryID: nil))
+        try check(cachedLibrary.scrollPosition == .init(itemID: "12", offset: 9), "Removed tab cannot overwrite current scroll position")
         cachedLibrary.switchSection(.series)
         try check(cachedLibrary.search == "First" && !cachedLibrary.loading, "Each section retains its own search")
         try check(try await requestCounts() == beforeSwitch && beforeSwitch["get_vod_streams:all"] == 1 && beforeSwitch["get_vod_streams:1"] == nil,

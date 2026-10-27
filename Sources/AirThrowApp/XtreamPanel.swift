@@ -25,7 +25,6 @@ struct XtreamPanel: View, Equatable {
     }
     @SwiftUI.State private var season: Int?
     @SwiftUI.State private var accountVisible = false
-    @FocusState private var searchFocused: Bool
 
     private var items: [XtreamItem] { library.visibleItems }
 
@@ -35,17 +34,28 @@ struct XtreamPanel: View, Equatable {
 
     var body: some View {
         Group {
-            if placesDetailBesideList, library.selected != nil {
-                HStack(spacing: 0) {
+            if placesDetailBesideList {
+                HSplitView {
                     VStack(spacing: 0) {
                         InspectorHeader(title: "\(library.title) · \(library.section.sidebarTitle)", back: nil)
                         catalog
                     }
-                    .frame(width: 360)
+                    .frame(minWidth: 220, idealWidth: 300, maxWidth: 420)
                     .frame(maxHeight: .infinity)
-                    Divider()
-                    details
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    ZStack {
+                        if library.selected != nil {
+                            details
+                        } else {
+                            if library.section == .live {
+                                ContentUnavailableView("Programme guide", systemImage: "info.circle",
+                                                       description: Text("Use a channel's info button to see its programme guide."))
+                            } else {
+                                ContentUnavailableView("Select a title", systemImage: library.section.sidebarSymbol,
+                                                       description: Text("Choose a title to see its details."))
+                            }
+                        }
+                    }
+                    .frame(minWidth: 260, maxWidth: .infinity, maxHeight: .infinity)
                 }
             } else {
                 VStack(alignment: .leading, spacing: 0) {
@@ -74,8 +84,8 @@ struct XtreamPanel: View, Equatable {
                                    options: [.init(title: "All categories", value: nil)] + library.categories.map { .init(title: $0.name, value: $0.id) },
                                    accessibilityLabel: "Category")
                     .frame(height: 26)
-                TextField("Find a title", text: Binding(get: { library.search }, set: { library.setSearch($0) })).textFieldStyle(.roundedBorder)
-                    .focused($searchFocused).accessibilityLabel("Find a title").frame(height: 26)
+                CatalogSearchField(prompt: "Find a title", text: Binding(get: { library.search }, set: { library.setSearch($0) }))
+                    .frame(height: 26)
                 HStack {
                     Text(summary).font(.caption.monospacedDigit()).foregroundStyle(.secondary).lineLimit(1)
                     Spacer(minLength: 4)
@@ -98,15 +108,14 @@ struct XtreamPanel: View, Equatable {
                     if !library.search.isEmpty { Button("Clear search") { library.setSearch("") } }
                 }.padding(12)
             } else {
-                ScrollView {
-                    XtreamTitleList(revision: library.visibleRevision, items: items,
-                                    categoryNames: library.categoryNames, playingID: library.playingID,
-                                    section: library.section, resignSearch: { searchFocused = false },
-                                    play: play, select: { library.select($0) })
-                        .equatable()
-                }
-                .scrollPosition(id: Binding(get: { library.scrollID }, set: { library.updateScroll($0, for: key) }), anchor: .top)
-                .id(key)
+                XtreamTitleList(revision: library.visibleRevision, items: items,
+                                categoryNames: library.categoryNames, playingID: library.playingID,
+                                selectedID: library.selected?.id, section: library.section,
+                                scrollPosition: library.scrollPosition,
+                                rememberPosition: { library.updateScroll($0, for: key) },
+                                play: play, select: { library.select($0) })
+                    .equatable()
+                    .id(key)
             }
             Spacer(minLength: 0)
         }
@@ -253,48 +262,67 @@ struct XtreamPanel: View, Equatable {
     }
 }
 
-private struct XtreamTitleList: View, Equatable {
+struct XtreamTitleList: View, Equatable {
     let revision: Int
     let items: [XtreamItem]
     let categoryNames: [String: String]
     let playingID: String?
+    let selectedID: String?
     let section: XtreamSection
-    let resignSearch: () -> Void
+    let scrollPosition: CatalogViewportPosition?
+    let rememberPosition: (CatalogViewportPosition?) -> Void
     let play: (XtreamItem) -> Void
     let select: (XtreamItem) -> Void
+    @State private var highlightedID: String?
 
     nonisolated static func == (lhs: XtreamTitleList, rhs: XtreamTitleList) -> Bool {
-        lhs.revision == rhs.revision && lhs.playingID == rhs.playingID && lhs.section == rhs.section
+        lhs.revision == rhs.revision && lhs.playingID == rhs.playingID
+            && lhs.selectedID == rhs.selectedID && lhs.section == rhs.section
+    }
+
+    private var selection: Binding<String?> {
+        Binding(get: { highlightedID }, set: { id in
+            highlightedID = id
+            guard let item = items.first(where: { $0.id == id }) else { return }
+            if section == .live { play(item) } else { select(item) }
+        })
     }
 
     var body: some View {
-        LazyVStack(alignment: .leading, spacing: 0) {
+        List(selection: selection) {
             ForEach(items) { item in
-                HStack(spacing: 0) {
-                    Button {
-                        resignSearch()
-                        if section == .live { play(item) } else { select(item) }
-                    } label: {
-                        HStack(spacing: 8) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(item.name).lineLimit(2)
-                                if let categoryID = item.categoryID, let category = categoryNames[categoryID] {
-                                    Text(category).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                                }
-                            }
-                            Spacer(minLength: 0)
-                            Image(systemName: playingID == XtreamLibrary.playingKey(section, item.id) ? "checkmark" : section == .live ? "play.fill" : "chevron.right")
-                                .font(.caption).foregroundStyle(.secondary).accessibilityHidden(true)
-                        }.frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 8).padding(.vertical, 6).contentShape(Rectangle())
-                    }.buttonStyle(.plain).help(section == .live ? "Load \(item.name)" : "Show details for \(item.name)")
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.name).lineLimit(2)
+                        if let categoryID = item.categoryID, let category = categoryNames[categoryID] {
+                            Text(category).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                    if playingID == XtreamLibrary.playingKey(section, item.id) {
+                        Image(systemName: "checkmark").foregroundStyle(.secondary).accessibilityHidden(true)
+                    }
                     if section == .live {
-                        Button { resignSearch(); select(item) } label: { Image(systemName: "info.circle") }
-                            .buttonStyle(.plain).padding(.trailing, 8).help("Programme guide for \(item.name)")
+                        Button { select(item) } label: { Image(systemName: "info.circle") }
+                            .buttonStyle(.borderless)
+                            .help("Programme guide for \(item.name)")
                             .accessibilityLabel("Programme guide for \(item.name)")
                     }
                 }
+                .libraryRowStyle()
+                .tag(item.id)
+                .help(section == .live ? "Load \(item.name)" : "Show details for \(item.name)")
             }
-        }.scrollTargetLayout()
+        }
+        .libraryListStyle()
+        .background(CatalogListScrollPosition(position: scrollPosition, ids: items.map(\.id), changed: rememberPosition)
+            .allowsHitTesting(false).accessibilityHidden(true))
+        .accessibilityLabel(section == .live ? "Channels" : "Titles")
+        .onAppear {
+            highlightedID = selectedID
+        }
+        .onChange(of: selectedID) { _, id in
+            highlightedID = id
+        }
     }
 }

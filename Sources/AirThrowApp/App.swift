@@ -48,7 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var playbackMenuItems: [MenuCommand: NSMenuItem] = [:]
     private var menuCardView: MenuCardView?
     private var menuCardItem: NSMenuItem?
-    private var menuControlRow: MenuControlRow?
+    private var menuControlsMenu: MenuControlsMenu?
     private var menuControlsItem: NSMenuItem?
     private var terminating = false
     private var didFinishLaunching = false
@@ -159,6 +159,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(findInCatalog) {
+            return window?.isKeyWindow == true && !presentation.settingsVisible
+                && CatalogSearchField.field(in: window) != nil
+        }
         if menuItem.action == #selector(toggleLibrarySidebar) {
             menuItem.title = presentation.playlistVisible ? "Hide Sidebar" : "Show Sidebar"
             return window?.isVisible == true && !presentation.settingsVisible
@@ -184,6 +188,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     @objc private func toggleLibrarySidebar() {
         guard window?.isVisible == true, !presentation.settingsVisible else { return }
         presentation.playlistVisible.toggle()
+    }
+
+    @objc private func findInCatalog() {
+        guard !presentation.settingsVisible else { return }
+        CatalogSearchField.focus(in: window)
     }
 
     func windowWillBeginSheet(_ notification: Notification) {
@@ -614,6 +623,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        edit.addItem(.separator())
+        let find = edit.addItem(withTitle: "Find in Catalog…", action: #selector(findInCatalog), keyEquivalent: "f")
+        find.target = self
         editItem.submenu = edit
         main.addItem(editItem)
         let viewItem = NSMenuItem()
@@ -695,12 +707,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 menu.addItem(.separator())
             case .controls(let controls):
                 let item = NSMenuItem()
-                let row = MenuControlRow(controls: controls, target: self,
-                    action: #selector(runMenuControl(_:)))
-                item.view = row
+                let row = MenuControlsMenu(controls: controls, target: self,
+                    action: #selector(runMenuCommand(_:)))
+                item.submenu = row
                 item.setAccessibilityLabel("Playback controls")
                 menu.addItem(item)
-                menuControlRow = row
+                menuControlsMenu = row
                 menuControlsItem = item
             case .command(let command):
                 if command == .quit {
@@ -728,7 +740,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menuIsOpen = false
         menuCardView = nil
         menuCardItem = nil
-        menuControlRow = nil
+        menuControlsMenu = nil
         menuControlsItem = nil
     }
 
@@ -742,13 +754,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 menuCardView?.update(title: title, status: status, detail: detail)
                 menuCardItem?.setAccessibilityLabel("\(title). \(status). \(detail)")
             case .controls(let controls):
-                if menuControlRow?.commands != MenuModel.controlCommands(for: controls) {
-                    let row = MenuControlRow(controls: controls, target: self,
-                                             action: #selector(runMenuControl(_:)))
-                    menuControlsItem?.view = row
-                    menuControlRow = row
+                if menuControlsMenu?.commands != MenuModel.controlCommands(for: controls) {
+                    let row = MenuControlsMenu(controls: controls, target: self,
+                                             action: #selector(runMenuCommand(_:)))
+                    menuControlsItem?.submenu = row
+                    menuControlsMenu = row
                 } else {
-                    menuControlRow?.update(controls: controls)
+                    menuControlsMenu?.update(controls: controls)
                 }
             default:
                 break
@@ -767,12 +779,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         case .showController: "Open AirThrow"
         case .quit: "Quit AirThrow"
         }
-    }
-
-    @objc private func runMenuControl(_ sender: NSButton) {
-        guard let rawValue = sender.identifier?.rawValue,
-              let command = MenuCommand(rawValue: rawValue) else { return }
-        run(command)
     }
 
     @objc private func runMenuCommand(_ sender: NSMenuItem) {
