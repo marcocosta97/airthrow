@@ -150,6 +150,95 @@ struct PreparationChecks {
         }
         print("PASS profile 7 Dolby Vision single-track and dual-track files copy only the base layer's own HDR10 picture, with no enhancement layer/RPU left behind")
     }
+    /// AC-3 and E-AC-3 are copied into an HLS audio rendition with an AAC
+    /// stereo rendition beside them. A file that already has AAC copies that
+    /// too. TrueHD is not playable on AirPlay and becomes AAC stereo.
+    static func surroundAudio(preparer: MediaPreparer, base: String, directory: URL) async throws {
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let finder = HelperExecutables(environment: ProcessInfo.processInfo.environment)
+        guard let ffprobe = finder.executable("ffprobe", override: "AIRTHROW_FFPROBE") else {
+            try check(false, "Missing fixture inspector"); return
+        }
+        func codecs(_ file: URL) async throws -> [String] {
+            let output = try await HelperProcess.run(executable: ffprobe, arguments: [
+                "-v", "error", "-show_entries", "stream=codec_name,codec_type", "-of", "json", file.path
+            ], outputLimit: 16 * 1024)
+            let streams = (try JSONSerialization.jsonObject(with: output) as! [String: Any])["streams"] as! [[String: Any]]
+            return streams.compactMap { $0["codec_type"] as? String == "audio" ? $0["codec_name"] as? String : nil }
+        }
+        func playlistSegment(root: URL, name: String) async throws -> URL {
+            let (body, _) = try await session.data(from: root.appendingPathComponent(name))
+            let segment = String(decoding: body, as: UTF8.self)
+                .split(whereSeparator: \.isNewline)
+                .map(String.init)
+                .last { !$0.isEmpty && !$0.hasPrefix("#") }
+            guard let segment else { throw NSError(domain: "PreparationChecks", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing \(name) segment"]) }
+            let (data, _) = try await session.data(from: root.appendingPathComponent(segment))
+            let local = directory.appendingPathComponent(name + "-" + segment)
+            try data.write(to: local)
+            return local
+        }
+        for (name, codec) in [("h264-ac3.mkv", "ac3"), ("h264-eac3.mkv", "eac3")] {
+            let prepared = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/" + name)!, needsPreparation: true))
+            try check(prepared.playbackPath == .audioConversion, "\(name) did not keep a copied Dolby track plus an encoded AAC fallback")
+            let (master, _) = try await session.data(from: prepared.url)
+            let text = String(decoding: master, as: UTF8.self)
+            try check(text.contains("URI=\"stream_1.m3u8\"") && text.contains("URI=\"stream_2.m3u8\"")
+                      && text.contains("DEFAULT=YES") && text.contains("CHANNELS=\"6\""),
+                      "\(name) master playlist is missing the Dolby and stereo renditions")
+            let root = prepared.url.deletingLastPathComponent()
+            try check(try await codecs(playlistSegment(root: root, name: "stream_1.m3u8")) == [codec],
+                      "\(name) surround rendition was not copied")
+            try check(try await codecs(playlistSegment(root: root, name: "stream_2.m3u8")) == ["aac"],
+                      "\(name) stereo rendition was not AAC")
+            prepared.stop()
+        }
+        let file = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/h264-ac3.mkv")!, needsPreparation: true),
+                                              mode: .completeFile)
+        let (mp4, _) = try await session.data(from: file.url)
+        let saved = directory.appendingPathComponent("ac3-fallback.mp4")
+        try mp4.write(to: saved)
+        try check(mp4.range(of: Data("fall".utf8)) != nil, "Complete AC-3 file is missing the AAC fallback reference")
+        let stored = try await codecs(saved)
+        try check(stored.contains("ac3") && stored.contains("aac"), "Complete AC-3 file lost a track: \(stored)")
+        try check(try await AVURLAsset(url: saved).load(.isPlayable), "Complete AC-3 file is not playable")
+        file.stop()
+        let both = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/h264-ac3-aac.mkv")!, needsPreparation: true),
+                                              mode: .completeFile)
+        try check(both.playbackPath == .remux, "Existing AAC beside AC-3 was re-encoded")
+        both.stop()
+        let trueHD = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/h264-truehd.mkv")!, needsPreparation: true),
+                                                mode: .completeFile)
+        try check(trueHD.playbackPath == .audioConversion, "TrueHD was not decoded")
+        let (trueHDData, _) = try await session.data(from: trueHD.url)
+        let trueHDFile = directory.appendingPathComponent("truehd.mp4")
+        try trueHDData.write(to: trueHDFile)
+        try check(try await codecs(trueHDFile) == ["aac"], "TrueHD output was not stereo AAC")
+        trueHD.stop()
+        let dts = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/h264-dts.mkv")!, needsPreparation: true),
+                                             mode: .completeFile)
+        try check(dts.playbackPath == .audioConversion, "DTS was not decoded")
+        let (dtsData, _) = try await session.data(from: dts.url)
+        let dtsFile = directory.appendingPathComponent("dts.mp4")
+        try dtsData.write(to: dtsFile)
+        try check(try await codecs(dtsFile) == ["aac"], "DTS output was not stereo AAC")
+        dts.stop()
+        let hevc = try await preparer.prepare(ResolvedSource(url: URL(string: base + "/hevc-ac3.mkv")!, needsPreparation: true))
+        try check(hevc.playbackPath == .audioConversion, "HEVC + AC-3 did not keep a copied Dolby track")
+        let (hevcMaster, hevcResponse) = try await session.data(from: hevc.url)
+        try check((hevcResponse as? HTTPURLResponse)?.statusCode == 200, "HEVC + AC-3 master playlist was not served")
+        let hevcText = String(decoding: hevcMaster, as: UTF8.self)
+        try check(hevcText.contains("URI=\"stream_1.m3u8\"") && hevcText.contains("URI=\"stream_2.m3u8\"")
+                  && hevcText.contains("#EXT-X-STREAM-INF:"), "HEVC + AC-3 did not publish fragmented renditions")
+        let hevcRoot = hevc.url.deletingLastPathComponent()
+        for name in ["stream_0.m3u8", "stream_1.m3u8", "stream_2.m3u8", "init0.mp4", "init1.mp4", "init2.mp4"] {
+            let (body, response) = try await session.data(from: hevcRoot.appendingPathComponent(name))
+            try check((response as? HTTPURLResponse)?.statusCode == 200 && !body.isEmpty, "Missing HEVC rendition file \(name)")
+        }
+        hevc.stop()
+        print("PASS AC-3 and E-AC-3 copy with an AAC stereo fallback; TrueHD and DTS decode to AAC stereo")
+    }
     static func oddDimensions(_ url: URL) async throws {
         var environment = ProcessInfo.processInfo.environment
         environment["AIRTHROW_MEDIA_HOST"] = "127.0.0.1"
@@ -243,6 +332,10 @@ struct PreparationChecks {
         let preparer = MediaPreparer(environment: environment, preferences: PreparationPreferences(retainAll: true))
         if CommandLine.arguments.contains("--live-hevc-only") {
             try await liveHEVC(preparer: preparer, base: base, directory: directory)
+            return
+        }
+        if CommandLine.arguments.contains("--surround-only") {
+            try await surroundAudio(preparer: preparer, base: base, directory: directory)
             return
         }
         let session = URLSession(configuration: .ephemeral)
@@ -461,6 +554,7 @@ struct PreparationChecks {
         hevcCopy.stop()
         try await hdrCopy(preparer: preparer, base: base, directory: directory)
         try await dolbyVision7Copy(preparer: preparer, base: base, directory: directory)
+        try await surroundAudio(preparer: preparer, base: base, directory: directory)
         do {
             _ = try await preparer.prepare(uhdSource.withConversionPolicy(.allowVideo).withEnhancement(.upscale1080))
             try check(false, "Explicit 1080p preparation downscaled a 4K source")

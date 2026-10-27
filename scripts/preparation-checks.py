@@ -264,9 +264,31 @@ if not (OUT / 'hevc-main10-dv7-dual.mp4').exists():
            '-tag:v:0', 'hvc1', '-tag:v:1', 'hvc1', OUT / 'hevc-main10-dv7-dual.mp4')
     inject_dvcc(OUT / 'hevc-main10-dv7-dual.mp4', 0, profile=7, level=6, rpu=0, el=1, bl=0, compat=0)
     inject_dvcc(OUT / 'hevc-main10-dv7-dual.mp4', 1, profile=7, level=6, rpu=0, el=0, bl=1, compat=1)
+# AC-3 and E-AC-3 are copied; an AAC stereo rendition is added beside them.
+# TrueHD is not an AirPlay codec and is decoded to AAC stereo.
+if not (OUT / 'h264-ac3.mkv').exists():
+    ffmpeg('-i', OUT / 'combined.mkv', '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy',
+           '-c:a', 'ac3', '-ac', '6', '-b:a', '192k', '-ar', '48000', OUT / 'h264-ac3.mkv')
+if not (OUT / 'h264-eac3.mkv').exists():
+    ffmpeg('-i', OUT / 'combined.mkv', '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy',
+           '-c:a', 'eac3', '-ac', '6', '-b:a', '384k', '-ar', '48000', OUT / 'h264-eac3.mkv')
+if not (OUT / 'h264-ac3-aac.mkv').exists():
+    ffmpeg('-i', OUT / 'combined.mkv', '-i', OUT / 'h264-ac3.mkv',
+           '-map', '0:v:0', '-map', '1:a:0', '-map', '0:a:0', '-c', 'copy', OUT / 'h264-ac3-aac.mkv')
+if not (OUT / 'h264-truehd.mkv').exists():
+    ffmpeg('-i', OUT / 'combined.mkv', '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy',
+           '-c:a', 'truehd', '-strict', 'experimental', '-ac', '2', OUT / 'h264-truehd.mkv')
+if not (OUT / 'h264-dts.mkv').exists():
+    ffmpeg('-i', OUT / 'combined.mkv', '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy',
+           '-c:a', 'dca', '-strict', 'experimental', '-ac', '2', '-ar', '48000', OUT / 'h264-dts.mkv')
+if not (OUT / 'hevc-ac3.mkv').exists():
+    ffmpeg('-i', OUT / 'hevc-sdr.mkv', '-i', OUT / 'h264-ac3.mkv',
+           '-map', '0:v:0', '-map', '1:a:0', '-c', 'copy', OUT / 'hevc-ac3.mkv')
 FILES = {f'/{name}': (OUT / name).read_bytes() for name in ['hevc-main10-sdr.mkv', 'hevc-main10-hdr10.mkv',
                                                             'hevc-main10-hlg.mkv', 'hevc-main10-dv5.mkv',
                                                             'hevc-main10-dv7-single.mp4', 'hevc-main10-dv7-dual.mp4',
+                                                            'h264-ac3.mkv', 'h264-eac3.mkv', 'h264-ac3-aac.mkv',
+                                                            'h264-truehd.mkv', 'h264-dts.mkv', 'hevc-ac3.mkv',
                                                             'odd-width.mkv', 'combined.mp4', 'combined.mkv', 'subtitles.mkv', 'video.mp4', 'audio.m4a',
                                                             'flac.mkv', 'multitrack.mkv', 'long.mp4', 'vp9-opus.mkv',
                                                             'hdr.mkv', 'uhd.mkv', 'hevc-sdr.mkv', 'highfps.mkv', 'tenbit.mkv',
@@ -393,10 +415,13 @@ try:
              ROOT / 'Sources/AirThrowApp/XtreamLibrary.swift',
              ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
              ROOT / 'Tests/PreparationChecks/main.swift', '-o', binary], timeout=90)
-        run([binary, f'http://127.0.0.1:{server.server_port}', OUT,
-             *(['--live-hevc-only'] if '--live-hevc-only' in sys.argv else [])], live=True, timeout=180)
+        focused = [flag for flag in ('--live-hevc-only', '--surround-only') if flag in sys.argv]
+        run([binary, f'http://127.0.0.1:{server.server_port}', OUT, *focused], live=True, timeout=180)
         if '--live-hevc-only' in sys.argv:
             print('PASS focused live Main 10 SDR remux checks')
+            raise SystemExit(0)
+        if '--surround-only' in sys.argv:
+            print('PASS focused surround audio checks')
             raise SystemExit(0)
         # Compare each compressed packet: this establishes stream copying rather than merely matching codec names.
         def packets(path):

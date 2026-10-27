@@ -488,11 +488,26 @@ private struct HLSPlaylist {
     /// Completed segment names in playlist order. The first entry is safe to
     /// probe: `-hls_flags temp_file` only publishes atomically renamed files.
     let segments: [String]
-    init(directory: URL, name: String = "media.m3u8", initialization: String = "init.mp4") throws {
-        let data = try Data(contentsOf: directory.appendingPathComponent(name))
+    init(directory: URL, name: String = "media.m3u8", initialization: String = "init.mp4",
+         followMaster: Bool = true) throws {
+        var playlistName = name
+        var mapName = initialization
+        var data = try Data(contentsOf: directory.appendingPathComponent(playlistName))
         guard data.count <= 4 * 1024 * 1024, let text = String(data: data, encoding: .utf8),
               text.hasPrefix("#EXTM3U") else { throw PreparationFailure.failed }
-        let lines = text.split(separator: "\n").map(String.init)
+        var lines = text.split(separator: "\n").map(String.init)
+        // A Dolby copy publishes a master playlist under this name and keeps
+        // the video media playlist at stream_0.m3u8. Readiness follows the video.
+        if followMaster, lines.contains(where: { $0.hasPrefix("#EXT-X-STREAM-INF:") }),
+           !lines.contains(where: { $0.hasPrefix("#EXTINF:") }) {
+            guard lines.contains("stream_0.m3u8") else { throw PreparationFailure.failed }
+            playlistName = "stream_0.m3u8"
+            mapName = "init0.mp4"
+            data = try Data(contentsOf: directory.appendingPathComponent(playlistName))
+            guard data.count <= 4 * 1024 * 1024, let text = String(data: data, encoding: .utf8),
+                  text.hasPrefix("#EXTM3U") else { throw PreparationFailure.failed }
+            lines = text.split(separator: "\n").map(String.init)
+        }
         let durations = lines.filter { $0.hasPrefix("#EXTINF:") }.compactMap {
             $0.dropFirst(8).split(separator: ",").first.flatMap { Double($0) }
         }
@@ -502,8 +517,8 @@ private struct HLSPlaylist {
             return ((try? FileManager.default.attributesOfItem(atPath: path)[.size] as? NSNumber)?.int64Value ?? 0) > 0
         }
         if names.contains(where: { $0.hasSuffix(".m4s") }) {
-            guard MediaHTTPServer.isInitName(initialization), lines.contains("#EXT-X-MAP:URI=\"\(initialization)\""),
-                  isNonEmptyFile(initialization) else { throw PreparationFailure.failed }
+            guard MediaHTTPServer.isInitName(mapName), lines.contains("#EXT-X-MAP:URI=\"\(mapName)\""),
+                  isNonEmptyFile(mapName) else { throw PreparationFailure.failed }
         }
         guard !names.isEmpty, names.count == durations.count,
               durations.allSatisfy({ $0.isFinite && $0 > 0 }),
@@ -695,7 +710,8 @@ public struct MediaPreparer: Sendable {
             }
             let plan = try Self.plan(videoInput: videoInput, audioInput: audioInput,
                                      separateAudio: source.audio != nil, policy: source.conversionPolicy,
-                                     enhancement: source.enhancement, appleProcessing: usesAppleProcessing)
+                                     enhancement: source.enhancement, appleProcessing: usesAppleProcessing,
+                                     preserveSurround: !usesAppleProcessing)
             let videoDuration = source.isLive ? nil : try videoInput.finiteDuration
             let audioDuration = source.isLive ? nil : try audioInput.finiteDuration
             if let videoDuration, let audioDuration, abs(videoDuration - audioDuration) > 2 {
@@ -750,6 +766,13 @@ public struct MediaPreparer: Sendable {
                 catch { try Task.checkCancellation(); remuxTimeline = nil } // Unsupported indexes retain sequential remux.
             }
             bounded = bounded || remuxTimeline != nil
+            // AC-3/E-AC-3 is copied into its own HLS rendition beside an AAC
+            // stereo fallback. The demand cache publishes a single media
+            // playlist, so that pair stays on one sequential HLS output.
+            if plan.stereoFallback != nil {
+                bounded = false
+                remuxTimeline = nil
+            }
             let videoBytes = Int64(videoInput.format.size ?? "") ?? 0
             let audioBytes = source.audio == nil ? 0 : (Int64(audioInput.format.size ?? "") ?? 0)
             // MPEG-TS packetization and per-segment tables add overhead the source
@@ -820,7 +843,7 @@ public struct MediaPreparer: Sendable {
                     arguments += try Self.inputArguments(url: audio.url, headers: audio.headers,
                                                          hls: allowHLSInput)
                 }
-                arguments += ["-map", "0:\(plan.video.index)", "-map", "\(plan.audioInput):\(plan.audio.index)"]
+                arguments += ["-map", "0:\(plan.video.index)"] + Self.audioMaps(plan)
                 if mode == .completeFile {
                     for subtitle in subtitleTracks {
                         arguments += ["-map", "\(subtitle.input):\(subtitle.stream.index)"]
@@ -829,7 +852,7 @@ public struct MediaPreparer: Sendable {
                 arguments += Self.videoArguments(stream: plan.video, action: plan.videoAction,
                                                  encoder: encoder, enhancement: plan.enhancement,
                                                  hardwareFrames: accelerate)
-                    + Self.audioArguments(stream: plan.audio, action: precise ? .convert : plan.audioAction)
+                    + Self.audioCodecArguments(plan: plan, action: precise ? .convert : plan.audioAction)
                 if mode == .completeFile && !subtitleTracks.isEmpty {
                     arguments += ["-c:s", "mov_text"]
                 }
@@ -924,11 +947,13 @@ public struct MediaPreparer: Sendable {
                 let size = (try FileManager.default.attributesOfItem(atPath: output.path)[.size] as? NSNumber)?.int64Value ?? 0
                 guard size > 0 else { throw PreparationFailure.failed }
                 guard size < maximumBytes else { throw PreparationFailure.storageLimit }
+                if plan.stereoFallback != nil { try Self.linkDolbyFallback(in: output) }
                 let verified = try await probe(output, headers: [:], executable: ffprobe, local: true)
                 try Self.validateConverted(verified, plan: plan)
                 let duration = try verified.finiteDuration
                 let expectedSubtitles = subtitleTracks.count
-                guard verified.streams.count == 2 + expectedSubtitles,
+                let expectedAudio = plan.stereoFallback == nil ? 1 : 2
+                guard verified.streams.count == 1 + expectedAudio + expectedSubtitles,
                       verified.streams.contains(where: {
                           $0.codec_type == "video" && (plan.videoAction == .convert || $0.copyableVideo)
                       }),
@@ -1345,10 +1370,10 @@ public struct MediaPreparer: Sendable {
                       host: String, playbackPath: PlaybackPath, plan: PreparationPlan,
                       maximumBytes: Int64, ffprobe: String, transportInput: Bool) async throws -> PreparedMedia {
         let playlist = workspace.directory.appendingPathComponent("media.m3u8")
-        let arguments = arguments + ["-f", "hls", "-hls_segment_type", plan.fragmentedHLS ? "fmp4" : "mpegts", "-hls_time", "2",
+        let arguments = Self.appendingHLSOutput(to: arguments + ["-f", "hls", "-hls_segment_type", plan.fragmentedHLS ? "fmp4" : "mpegts", "-hls_time", "2",
             "-hls_list_size", "6", "-hls_delete_threshold", "3",
-            "-hls_flags", "delete_segments+temp_file"]
-            + Self.hlsSegmentFiles(in: workspace.directory, fragmented: plan.fragmentedHLS) + [playlist.path]
+            "-hls_flags", "delete_segments+temp_file"],
+            directory: workspace.directory, fragmented: plan.fragmentedHLS, playlist: playlist, plan: plan)
         let server = try await MediaHTTPServer.start(file: playlist, host: host, hls: true)
         let prepared = PreparedMedia(server: server, workspace: workspace, playbackPath: playbackPath,
                                      videoHeight: plan.video.height, videoFrameRate: plan.video.frameRate)
@@ -1393,9 +1418,9 @@ public struct MediaPreparer: Sendable {
         let playlist = workspace.directory.appendingPathComponent("media.m3u8")
         // Apple HLS requires HEVC in fragmented MP4, including copied HEVC.
         let fragmented = plan.fragmentedHLS
-        let arguments = arguments + ["-f", "hls", "-hls_segment_type", fragmented ? "fmp4" : "mpegts", "-hls_time", "2",
-            "-hls_playlist_type", "event", "-hls_list_size", "0", "-hls_flags", "temp_file"]
-            + Self.hlsSegmentFiles(in: workspace.directory, fragmented: fragmented) + [playlist.path]
+        let arguments = Self.appendingHLSOutput(to: arguments + ["-f", "hls", "-hls_segment_type", fragmented ? "fmp4" : "mpegts", "-hls_time", "2",
+            "-hls_playlist_type", "event", "-hls_list_size", "0", "-hls_flags", "temp_file"],
+            directory: workspace.directory, fragmented: fragmented, playlist: playlist, plan: plan)
         let server = try await MediaHTTPServer.start(file: playlist, host: host, hls: true)
         let prepared = PreparedMedia(server: server, workspace: workspace, sourceDuration: duration,
                                      playbackPath: playbackPath, videoHeight: plan.video.height,
@@ -1442,17 +1467,294 @@ public struct MediaPreparer: Sendable {
             + (fragmented ? ["-hls_fmp4_init_filename", initialization] : [])
     }
 
+    /// One media playlist, or a master playlist whose audio group carries a
+    /// copied AC-3/E-AC-3 rendition and an AAC stereo rendition. `%v` is the
+    /// variant index, so segment names stay numeric and the HTTP allowlist
+    /// does not have to grow a second pattern.
+    private static func appendingHLSOutput(to arguments: [String], directory: URL, fragmented: Bool,
+                                           playlist: URL, plan: PreparationPlan) -> [String] {
+        guard plan.stereoFallback != nil else {
+            return arguments + Self.hlsSegmentFiles(in: directory, fragmented: fragmented) + [playlist.path]
+        }
+        let ext = fragmented ? "m4s" : "ts"
+        var result = arguments + ["-var_stream_map", Self.renditionMap(plan),
+                                  "-master_pl_name", playlist.lastPathComponent,
+                                  "-master_pl_publish_rate", "1",
+                                  "-hls_segment_filename", directory.appendingPathComponent("segment%v%06d.\(ext)").path]
+        if fragmented { result += ["-hls_fmp4_init_filename", "init%v.mp4"] }
+        result.append(directory.appendingPathComponent("stream_%v.m3u8").path)
+        return result
+    }
+
+    private static func renditionMap(_ plan: PreparationPlan) -> String {
+        let language = [plan.audio, plan.stereoFallback].compactMap { stream -> String? in
+            guard let stream, let language = stream.tags?.language?.lowercased(),
+                  language.range(of: "^[a-z]{2,3}$", options: .regularExpression) != nil,
+                  language != "und" else { return nil }
+            return language
+        }.first
+        let lang = language.map { ",language:\($0)" } ?? ""
+        return "v:0,agroup:aud a:0,agroup:aud\(lang),default:yes a:1,agroup:aud\(lang),default:no"
+    }
+
+    private static func audioMaps(_ plan: PreparationPlan) -> [String] {
+        var maps = ["-map", "\(plan.audioInput):\(plan.audio.index)"]
+        if let fallback = plan.stereoFallback {
+            maps += ["-map", "\(plan.audioInput):\(fallback.index)"]
+        }
+        return maps
+    }
+
+    private static func audioCodecArguments(plan: PreparationPlan, action: TrackAction) -> [String] {
+        guard let fallbackAction = plan.stereoFallbackAction else {
+            return audioArguments(stream: plan.audio, action: action)
+        }
+        var arguments = ["-c:a:0"]
+        if action == .copy { arguments.append("copy") }
+        else { arguments += ["aac", "-ac:a:0", "2", "-ar:a:0", "48000", "-b:a:0", "160k"] }
+        arguments += ["-c:a:1"]
+        if fallbackAction == .copy { arguments.append("copy") }
+        else { arguments += ["aac", "-ac:a:1", "2", "-ar:a:1", "48000", "-b:a:1", "160k"] }
+        return arguments
+    }
+
+    /// Point the copied Dolby track at the AAC stereo track with the fallback
+    /// reference Apple TV uses to choose a track it can decode. ffmpeg writes
+    /// both audio tracks in one alternate group; this disables the Dolby track,
+    /// leaves AAC enabled, and inserts a `tref`/`fall` box. Growing `moov`
+    /// shifts every later byte, so chunk offsets past the insertion move with it.
+    private static func linkDolbyFallback(in file: URL) throws {
+        let input = try FileHandle(forReadingFrom: file)
+        defer { try? input.close() }
+        let fileSize = try input.seekToEnd()
+        guard let moov = try locateBox(type: "moov", handle: input, fileSize: fileSize),
+              moov.size >= 8, moov.size <= 32 * 1024 * 1024 else { throw PreparationFailure.failed }
+        try input.seek(toOffset: moov.offset)
+        guard let moovData = try input.read(upToCount: Int(moov.size)), moovData.count == Int(moov.size) else {
+            throw PreparationFailure.failed
+        }
+        var patched = moovData
+        try patchDolbyFallback(in: &patched, fileOffset: moov.offset)
+        let temp = file.appendingPathExtension("fallback")
+        if FileManager.default.fileExists(atPath: temp.path) { try FileManager.default.removeItem(at: temp) }
+        FileManager.default.createFile(atPath: temp.path, contents: nil)
+        let output = try FileHandle(forWritingTo: temp)
+        try input.seek(toOffset: 0)
+        try copyBytes(from: input, to: output, count: moov.offset)
+        try output.write(contentsOf: patched)
+        try input.seek(toOffset: moov.offset + moov.size)
+        try copyBytes(from: input, to: output, count: fileSize - moov.offset - moov.size)
+        try output.close()
+        _ = try FileManager.default.replaceItemAt(file, withItemAt: temp)
+    }
+
+    private struct LocatedBox { let offset: UInt64; let size: UInt64 }
+
+    private static func locateBox(type: String, handle: FileHandle, fileSize: UInt64) throws -> LocatedBox? {
+        var position: UInt64 = 0
+        while position + 8 <= fileSize {
+            let box = try readBox(at: position, handle: handle, fileSize: fileSize)
+            if box.type == type { return LocatedBox(offset: position, size: box.size) }
+            guard box.size > 0 else { throw PreparationFailure.failed }
+            position += box.size
+        }
+        return nil
+    }
+
+    private static func readBox(at offset: UInt64, handle: FileHandle, fileSize: UInt64) throws -> (size: UInt64, type: String) {
+        try handle.seek(toOffset: offset)
+        guard let header = try handle.read(upToCount: 8), header.count == 8 else { throw PreparationFailure.failed }
+        let size32 = u32(header, 0)
+        let type = String(bytes: header[4..<8], encoding: .ascii) ?? ""
+        let size: UInt64
+        if size32 == 1 {
+            guard let extended = try handle.read(upToCount: 8), extended.count == 8 else { throw PreparationFailure.failed }
+            size = u64(extended, 0)
+        } else if size32 == 0 {
+            size = fileSize - offset
+        } else {
+            size = UInt64(size32)
+        }
+        guard size >= 8, offset + size <= fileSize else { throw PreparationFailure.failed }
+        return (size, type)
+    }
+
+    private static func patchDolbyFallback(in moov: inout Data, fileOffset: UInt64) throws {
+        let children = try boxes(in: moov, from: 8, to: moov.count)
+        struct AudioBox { let entry: String; let trak: Range<Int>; let tkhd: Range<Int> }
+        var audio: [AudioBox] = []
+        for child in children where child.type == "trak" {
+            guard let tkhd = try firstBox(type: "tkhd", in: moov, within: child.range),
+                  let stsd = try firstBox(type: "stsd", in: moov, within: child.range),
+                  stsd.range.count >= 24 else { throw PreparationFailure.failed }
+            let entry = String(bytes: moov[stsd.range.lowerBound + 20..<stsd.range.lowerBound + 24], encoding: .ascii) ?? ""
+            if ["ac-3", "ec-3", "mp4a"].contains(entry) {
+                audio.append(AudioBox(entry: entry, trak: child.range, tkhd: tkhd.range))
+            }
+        }
+        guard let dolby = audio.first(where: { $0.entry == "ac-3" || $0.entry == "ec-3" }),
+              let aac = audio.first(where: { $0.entry == "mp4a" }),
+              dolby.tkhd.count >= 44 else { throw PreparationFailure.failed }
+        for track in [dolby, aac] {
+            let version = moov[track.tkhd.lowerBound + 8]
+            guard version == 0 || version == 1 else { throw PreparationFailure.failed }
+            var flags = u24(moov, track.tkhd.lowerBound + 9)
+            if track.entry == "mp4a" { flags |= 1 } else { flags &= ~1 }
+            setU24(&moov, track.tkhd.lowerBound + 9, flags)
+            let alternate = track.tkhd.lowerBound + (version == 0 ? 42 : 54)
+            guard alternate + 2 <= track.tkhd.upperBound else { throw PreparationFailure.failed }
+            setU16(&moov, alternate, 1)
+        }
+        let idOffset = aac.tkhd.lowerBound + (moov[aac.tkhd.lowerBound + 8] == 0 ? 20 : 28)
+        let aacID = u32(moov, idOffset)
+        var tref = Data(count: 20)
+        setU32(&tref, 0, 20); tref.replaceSubrange(4..<8, with: Data("tref".utf8))
+        setU32(&tref, 8, 12); tref.replaceSubrange(12..<16, with: Data("fall".utf8))
+        setU32(&tref, 16, aacID)
+        let insert = dolby.tkhd.upperBound
+        moov.insert(contentsOf: tref, at: insert)
+        setU32(&moov, dolby.trak.lowerBound, u32(moov, dolby.trak.lowerBound) + 20)
+        setU32(&moov, 0, u32(moov, 0) + 20)
+        try shiftChunkOffsets(&moov, insertAt: fileOffset + UInt64(insert), delta: 20)
+    }
+
+    private struct ParsedBox { let type: String; let range: Range<Int> }
+
+    private static func boxes(in data: Data, from start: Int, to end: Int) throws -> [ParsedBox] {
+        var position = start
+        var result: [ParsedBox] = []
+        while position + 8 <= end {
+            let size = Int(u32(data, position))
+            guard size >= 8, position + size <= end else { throw PreparationFailure.failed }
+            let type = String(bytes: data[position + 4..<position + 8], encoding: .ascii) ?? ""
+            result.append(ParsedBox(type: type, range: position..<position + size))
+            position += size
+        }
+        guard position == end else { throw PreparationFailure.failed }
+        return result
+    }
+
+    private static func firstBox(type: String, in data: Data, within range: Range<Int>) throws -> ParsedBox? {
+        let nested = try boxes(in: data, from: range.lowerBound + 8, to: range.upperBound)
+        for box in nested {
+            if box.type == type { return box }
+            if ["trak", "mdia", "minf", "stbl", "edts"].contains(box.type),
+               let found = try firstBox(type: type, in: data, within: box.range) { return found }
+        }
+        return nil
+    }
+
+    private static func shiftChunkOffsets(_ moov: inout Data, insertAt: UInt64, delta: UInt64) throws {
+        func visit(_ start: Int, _ end: Int) throws {
+            var position = start
+            while position + 8 <= end {
+                let size = Int(u32(moov, position))
+                guard size >= 8, position + size <= end else { throw PreparationFailure.failed }
+                let type = String(bytes: moov[position + 4..<position + 8], encoding: .ascii) ?? ""
+                if type == "stco" {
+                    let count = Int(u32(moov, position + 12))
+                    guard position + 16 + count * 4 <= position + size else { throw PreparationFailure.failed }
+                    for index in 0..<count {
+                        let offset = position + 16 + index * 4
+                        let value = UInt64(u32(moov, offset))
+                        guard value < insertAt || value <= UInt64(UInt32.max) - delta else { throw PreparationFailure.failed }
+                        if value >= insertAt { setU32(&moov, offset, UInt32(value + delta)) }
+                    }
+                } else if type == "co64" {
+                    let count = Int(u32(moov, position + 12))
+                    guard position + 16 + count * 8 <= position + size else { throw PreparationFailure.failed }
+                    for index in 0..<count {
+                        let offset = position + 16 + index * 8
+                        let value = u64(moov, offset)
+                        if value >= insertAt { setU64(&moov, offset, value + delta) }
+                    }
+                } else if ["trak", "mdia", "minf", "stbl", "edts"].contains(type) {
+                    try visit(position + 8, position + size)
+                }
+                position += size
+            }
+        }
+        try visit(8, moov.count)
+    }
+
+    private static func copyBytes(from input: FileHandle, to output: FileHandle, count: UInt64) throws {
+        var remaining = count
+        while remaining > 0 {
+            let length = Int(min(remaining, 1024 * 1024))
+            guard let chunk = try input.read(upToCount: length), !chunk.isEmpty else { throw PreparationFailure.failed }
+            try output.write(contentsOf: chunk)
+            remaining -= UInt64(chunk.count)
+        }
+    }
+
+    private static func u24(_ data: Data, _ offset: Int) -> UInt32 {
+        UInt32(data[offset]) << 16 | UInt32(data[offset + 1]) << 8 | UInt32(data[offset + 2])
+    }
+    private static func u32(_ data: Data, _ offset: Int) -> UInt32 {
+        u24(data, offset) << 8 | UInt32(data[offset + 3])
+    }
+    private static func u64(_ data: Data, _ offset: Int) -> UInt64 {
+        UInt64(u32(data, offset)) << 32 | UInt64(u32(data, offset + 4))
+    }
+    private static func setU16(_ data: inout Data, _ offset: Int, _ value: UInt16) {
+        data[offset] = UInt8(value >> 8); data[offset + 1] = UInt8(value & 0xff)
+    }
+    private static func setU24(_ data: inout Data, _ offset: Int, _ value: UInt32) {
+        data[offset] = UInt8((value >> 16) & 0xff)
+        data[offset + 1] = UInt8((value >> 8) & 0xff)
+        data[offset + 2] = UInt8(value & 0xff)
+    }
+    private static func setU32(_ data: inout Data, _ offset: Int, _ value: UInt32) {
+        setU24(&data, offset, value >> 8)
+        data[offset + 3] = UInt8(value & 0xff)
+    }
+    private static func setU64(_ data: inout Data, _ offset: Int, _ value: UInt64) {
+        setU32(&data, offset, UInt32(value >> 32))
+        setU32(&data, offset + 4, UInt32(value & 0xffff_ffff))
+    }
+
     /// Converted tracks are verified against a completed segment before the
     /// URL is handed off. A copy remux reuses source packets and is validated
     /// by the caller's fixtures.
     @MainActor
     private func verifyStartupSegment(_ segment: String?, of prepared: PreparedMedia, directory: URL,
                                       plan: PreparationPlan, executable: String) async throws {
-        guard plan.fragmentedHLS || plan.videoAction == .convert || plan.audioAction == .convert else { return }
+        guard plan.fragmentedHLS || plan.videoAction == .convert || plan.audioAction == .convert
+                || plan.stereoFallback != nil else { return }
         guard let segment else { throw PreparationFailure.failed }
+        if plan.stereoFallback != nil {
+            let initialization = plan.fragmentedHLS ? "init0.mp4" : "init.mp4"
+            let probed = try await probeSegment(segment, directory: directory, fragmented: plan.fragmentedHLS,
+                                                executable: executable, initialization: initialization)
+            try Self.validateConverted(probed, plan: plan, requireAudio: false)
+            try await validateAudioRendition("stream_1.m3u8", initialization: plan.fragmentedHLS ? "init1.mp4" : "init.mp4",
+                                             directory: directory, plan: plan, executable: executable, surround: true)
+            try await validateAudioRendition("stream_2.m3u8", initialization: plan.fragmentedHLS ? "init2.mp4" : "init.mp4",
+                                             directory: directory, plan: plan, executable: executable, surround: false)
+            if plan.videoAction == .convert {
+                let video = probed.streams.first(where: { $0.codec_type == "video" })
+                prepared.recordInspectedVideo(height: video?.height, frameRate: video?.frameRate)
+            }
+            return
+        }
         let video = try await inspectConverted(segment, directory: directory, fragmented: plan.fragmentedHLS,
                                                executable: executable, plan: plan)
         if plan.videoAction == .convert { prepared.recordInspectedVideo(height: video.height, frameRate: video.frameRate) }
+    }
+
+    private func validateAudioRendition(_ name: String, initialization: String, directory: URL,
+                                        plan: PreparationPlan, executable: String, surround: Bool) async throws {
+        let playlist = try HLSPlaylist(directory: directory, name: name, initialization: initialization, followMaster: false)
+        guard let segment = playlist.segments.first else { throw PreparationFailure.failed }
+        let probed = try await probeSegment(segment, directory: directory, fragmented: plan.fragmentedHLS,
+                                            executable: executable, initialization: initialization)
+        guard let audio = probed.streams.first(where: { $0.codec_type == "audio" }) else { throw PreparationFailure.failed }
+        if surround {
+            guard audio.codec_name == plan.audio.codec_name else { throw PreparationFailure.failed }
+        } else {
+            guard audio.codec_name == "aac", (1...2).contains(audio.channels ?? 0),
+                  let rate = Int(audio.sample_rate ?? ""), (1...48000).contains(rate) else { throw PreparationFailure.failed }
+        }
     }
 
     private func inspectConverted(_ segment: String, directory: URL, fragmented: Bool, executable: String,
@@ -1499,13 +1801,19 @@ public struct MediaPreparer: Sendable {
         let audioInput: Int
         let videoAction: TrackAction
         let audioAction: TrackAction
+        /// AAC stereo kept beside a copied AC-3/E-AC-3 track so a receiver that
+        /// cannot decode Dolby still has audio. The same stream as `audio` when
+        /// the fallback is encoded from it; a different stream when the file
+        /// already has AAC.
+        let stereoFallback: Stream?
+        let stereoFallbackAction: TrackAction?
         let enhancement: VideoEnhancement
         var fragmentedHLS: Bool {
             enhancement.targetHeight == 2160 || (videoAction == .copy && video.codec_name == "hevc")
         }
         var path: PlaybackPath {
             if videoAction == .convert { return .videoConversion }
-            if audioAction == .convert { return .audioConversion }
+            if audioAction == .convert || stereoFallbackAction == .convert { return .audioConversion }
             return .remux
         }
     }
@@ -1514,7 +1822,7 @@ public struct MediaPreparer: Sendable {
     /// missing. Video encoding requires an explicit `.allowVideo` policy.
     private static func plan(videoInput: Probe, audioInput: Probe, separateAudio: Bool,
                              policy: ConversionPolicy, enhancement: VideoEnhancement,
-                             appleProcessing: Bool = false) throws -> PreparationPlan {
+                             appleProcessing: Bool = false, preserveSurround: Bool = true) throws -> PreparationPlan {
         // A Dolby Vision enhancement layer muxed as its own track (profile 7
         // dual-track files) is never a candidate: it has no base layer of its
         // own and isn't a displayable picture.
@@ -1522,9 +1830,38 @@ public struct MediaPreparer: Sendable {
         let video = videoCandidates.first(where: { $0.copyableVideo })
             ?? videoCandidates.first(where: { $0.convertibleVideo })
         guard let video else { throw PreparationFailure.unsupported }
-        let audio = audioInput.streams.first(where: { $0.copyableAudio })
-            ?? audioInput.streams.first(where: { $0.convertibleAudio })
-        guard let audio else { throw PreparationFailure.unsupported }
+        let dolby = audioInput.streams.first(where: { $0.codec_name == "eac3" && $0.copyableDolbyAudio })
+            ?? audioInput.streams.first(where: \.copyableDolbyAudio)
+        let aac = audioInput.streams.first(where: \.copyableAudio)
+        let audio: Stream
+        let audioAction: TrackAction
+        let stereoFallback: Stream?
+        let stereoFallbackAction: TrackAction?
+        if preserveSurround, let dolby {
+            audio = dolby
+            audioAction = .copy
+            if let aac, aac.index != dolby.index {
+                stereoFallback = aac
+                stereoFallbackAction = .copy
+            } else {
+                // No AAC track to copy. Encode the stereo fallback from the
+                // Dolby stream; the surround packets themselves stay copied.
+                stereoFallback = dolby
+                stereoFallbackAction = .convert
+            }
+        } else if let aac {
+            audio = aac
+            audioAction = .copy
+            stereoFallback = nil
+            stereoFallbackAction = nil
+        } else if let convertible = audioInput.streams.first(where: \.convertibleAudio) {
+            audio = convertible
+            audioAction = .convert
+            stereoFallback = nil
+            stereoFallbackAction = nil
+        } else {
+            throw PreparationFailure.unsupported
+        }
         let videoAction: TrackAction = enhancement == .original && video.copyableVideo ? .copy : .convert
         guard videoAction == .copy || policy == .allowVideo else {
             throw PreparationFailure.videoConversionRequired(height: video.height, frameRate: video.frameRate)
@@ -1543,7 +1880,8 @@ public struct MediaPreparer: Sendable {
             }
         }
         return PreparationPlan(video: video, audio: audio, audioInput: separateAudio ? 1 : 0,
-                               videoAction: videoAction, audioAction: audio.copyableAudio ? .copy : .convert,
+                               videoAction: videoAction, audioAction: audioAction,
+                               stereoFallback: stereoFallback, stereoFallbackAction: stereoFallbackAction,
                                enhancement: enhancement)
     }
 
@@ -1683,7 +2021,8 @@ public struct MediaPreparer: Sendable {
     /// Verifies the first completed converted segment against the bounded H.264
     /// profile. Applied only to locally generated MPEG-TS, never to a source.
     private static func validateConverted(_ probe: Probe, plan: PreparationPlan,
-                                          normalization: AppleInputNormalization? = nil) throws {
+                                          normalization: AppleInputNormalization? = nil,
+                                          requireAudio: Bool = true) throws {
         guard let video = probe.streams.first(where: { $0.codec_type == "video" }) else {
             throw PreparationFailure.failed
         }
@@ -1723,10 +2062,19 @@ public struct MediaPreparer: Sendable {
                 guard !video.hasMultiplexedDolbyVisionEnhancementLayer else { throw PreparationFailure.failed }
             }
         }
-        guard let audio = probe.streams.first(where: { $0.codec_type == "audio" }) else {
-            throw PreparationFailure.failed
+        let audios = probe.streams.filter { $0.codec_type == "audio" }
+        if audios.isEmpty {
+            guard !requireAudio else { throw PreparationFailure.failed }
+            return
         }
-        if plan.audioAction == .convert {
+        if plan.stereoFallback != nil, audios.count >= 2 {
+            guard audios.contains(where: { $0.codec_name == plan.audio.codec_name }),
+                  audios.contains(where: { $0.copyableAudio }) else { throw PreparationFailure.failed }
+            return
+        }
+        guard let audio = audios.first else { throw PreparationFailure.failed }
+        if plan.stereoFallback != nil, audio.codec_name == plan.audio.codec_name { return }
+        if plan.audioAction == .convert || plan.stereoFallbackAction == .convert {
             guard audio.codec_name == "aac", (1...2).contains(audio.channels ?? 0),
                   let rate = Int(audio.sample_rate ?? ""), (1...48000).contains(rate) else {
                 throw PreparationFailure.failed
@@ -2098,6 +2446,13 @@ public struct MediaPreparer: Sendable {
             codec_type == "audio" && codec_name == "aac" && !encrypted && profile == "LC"
                 && (1...2).contains(channels ?? 0) && (1...48000).contains(Int(sample_rate ?? "") ?? 0)
         }
+        /// Dolby Digital or Dolby Digital Plus, including Atmos carried as
+        /// E-AC-3 JOC. Apple's HLS authoring spec accepts both, so the packets
+        /// are copied instead of downmixed. 48 kHz is the rate those receivers play.
+        var copyableDolbyAudio: Bool {
+            codec_type == "audio" && !encrypted && ["ac3", "eac3"].contains(codec_name ?? "")
+                && (1...8).contains(channels ?? 0) && Int(sample_rate ?? "") == 48000
+        }
         /// A known, decodable audio codec with bounded channels and rate. The
         /// output is downmixed to AAC stereo at 48 kHz.
         var convertibleAudio: Bool {
@@ -2112,7 +2467,7 @@ public struct MediaPreparer: Sendable {
             "h264", "hevc", "vp9", "vp8", "av1", "mpeg4", "mpeg2video", "mpeg1video", "prores", "mjpeg", "theora", "wmv3", "vc1"
         ]
         private static let convertibleAudioCodecs: Set<String> = [
-            "aac", "flac", "opus", "vorbis", "mp3", "mp2", "ac3", "eac3", "alac",
+            "aac", "flac", "opus", "vorbis", "mp3", "mp2", "ac3", "eac3", "alac", "truehd", "dts",
             "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_f32le", "pcm_f64le",
             "pcm_u8", "pcm_s16be", "pcm_s24be", "pcm_mulaw", "pcm_alaw",
             "pcm_s16le_planar", "pcm_s24le_planar", "pcm_f32le_planar"

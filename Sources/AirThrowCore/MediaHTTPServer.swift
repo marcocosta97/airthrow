@@ -250,6 +250,10 @@ public final class MediaHTTPServer {
             resource = file
             contentType = mediaContentType
         } else if hls, requested.hasPrefix(prefix),
+                  Self.isRenditionPlaylist(String(requested.dropFirst(prefix.count))) {
+            resource = file.deletingLastPathComponent().appendingPathComponent(String(requested.dropFirst(prefix.count)))
+            contentType = "application/vnd.apple.mpegurl"
+        } else if hls, requested.hasPrefix(prefix),
                   (Self.isSegmentName(String(requested.dropFirst(prefix.count)))
                    || Self.isInitName(String(requested.dropFirst(prefix.count)))) {
             resource = file.deletingLastPathComponent().appendingPathComponent(String(requested.dropFirst(prefix.count)))
@@ -280,7 +284,8 @@ public final class MediaHTTPServer {
                     })
                 }, finish: { [weak self, weak client] in if let client { self?.finish(client) } })
             if client.stream == nil { reply(client, code: "404 Not Found") }
-        } else if requested != path, let loadResource {
+        } else if requested != path, let loadResource,
+                  !Self.isRenditionPlaylist(String(requested.dropFirst(prefix.count))) {
             armTimeout(client, seconds: 600)
             let name = String(requested.dropFirst(prefix.count))
             // Stop clears the server's callbacks while this request may still
@@ -414,6 +419,11 @@ public final class MediaHTTPServer {
         guard client.keepAlive, !stopped, clients[ObjectIdentifier(client)] != nil else { finish(client); return }
         armTimeout(client, seconds: Self.silentRequestSeconds)
         nextRequest(client)
+    }
+
+    /// Audio rendition playlists published next to a Dolby master playlist.
+    nonisolated static func isRenditionPlaylist(_ name: String) -> Bool {
+        ["stream_0.m3u8", "stream_1.m3u8", "stream_2.m3u8"].contains(name)
     }
 
     nonisolated static func isSegmentName(_ name: String) -> Bool {

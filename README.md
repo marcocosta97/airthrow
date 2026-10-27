@@ -114,8 +114,10 @@ are available when provided by the server.
   HDR10/HDR10+/HLG source, including a compatible Dolby Vision base layer
   (profiles 7 and 8.1/8.2/8.4 — any enhancement layer and profile 7's RPU are
   dropped, leaving its underlying HDR10 picture), copies through unmodified at
-  Original quality; re-encoding HDR/Dolby Vision, profile 5 and surround
-  preservation are unsupported.
+  Original quality. Re-encoding HDR/Dolby Vision and profile 5 are unsupported.
+  AC-3 and E-AC-3, including Dolby Atmos carried as E-AC-3 JOC, are copied,
+  with AAC stereo kept beside them so a receiver can play the track it
+  supports. TrueHD and DTS are decoded to that AAC stereo.
 - Image-based subtitles, subtitle burn-in and subtitles in Mac-prepared live
   streams are unsupported.
 
@@ -128,7 +130,8 @@ are available when provided by the server.
 | MP4/M4V/MOV · H.264 or HEVC + AAC | 🟢 |
 | HLS URL · H.264 or HEVC + AAC | 🟢 |
 | MKV · H.264 or HEVC + AAC | 🔁 |
-| MKV · H.264 or HEVC + FLAC/Opus | 🔧 audio |
+| MKV · H.264 or HEVC + AC-3/E-AC-3, including Atmos JOC | 🔁 + AAC stereo |
+| MKV · H.264 or HEVC + FLAC/Opus/TrueHD/DTS | 🔧 audio |
 | WebM · VP9/AV1 SDR 8-bit + Opus | 🔧 |
 | MKV · HEVC Main 10 HDR10/HDR10+/HLG or Dolby Vision 7/8.1/8.2/8.4 (base layer) | 🔁 Original only |
 | HDR/DV re-encode (tone mapping), Dolby Vision profile 5 | 🚫 |
