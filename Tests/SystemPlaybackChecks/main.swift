@@ -2,6 +2,11 @@ import Foundation
 import AVFoundation
 import MediaPlayer
 
+/// Exercise MediaPlayer's background request contract without mutating artwork.
+private struct ArtworkRequest: @unchecked Sendable {
+    let artwork: MPMediaItemArtwork
+}
+
 /// Reports a simulated route while native items supply tracks and seek ranges.
 /// Transport never starts local audio or video playback.
 private final class RemotePlayer: AVPlayer, @unchecked Sendable {
@@ -156,6 +161,13 @@ struct SystemPlaybackChecks {
         try await wait { artwork.artwork != nil }
         try check(updates == 1 && artwork.artwork!.bounds.width <= 640 && artwork.artwork!.bounds.height <= 640,
                   "Static video artwork was not bounded or published exactly once")
+        let poster = artwork.artwork!
+        let request = ArtworkRequest(artwork: poster)
+        let backgroundImageSize = await Task.detached {
+            request.artwork.image(at: CGSize(width: 320, height: 180))?.size
+        }.value
+        try check(backgroundImageSize == poster.bounds.size,
+                  "Now Playing artwork could not be requested from a background queue")
         artwork.load(url: url("artwork.mp4"), allowVideoFrame: false) { updates += 1 }
         try await wait { artwork.artwork != nil }
         try check(artwork.artwork!.bounds.size == CGSize(width: 64, height: 64), "Embedded artwork was not preferred")

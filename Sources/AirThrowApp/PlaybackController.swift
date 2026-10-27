@@ -3264,8 +3264,12 @@ final class NowPlayingArtworkLoader {
                     }
                 }
                 guard !Task.isCancelled, self.requestID == id, let image else { return }
-                let poster = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
-                self.artwork = MPMediaItemArtwork(boundsSize: poster.size) { _ in poster }
+                let size = NSSize(width: image.width, height: image.height)
+                // MediaPlayer requests artwork on its own queue. Capture the
+                // immutable bitmap without inheriting this task's MainActor.
+                self.artwork = MPMediaItemArtwork(boundsSize: size) { @Sendable _ in
+                    NSImage(cgImage: image, size: size)
+                }
                 changed()
             } catch { /* Optional metadata must never fail playback or expose source errors. */ }
         }
