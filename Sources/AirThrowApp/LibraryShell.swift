@@ -36,25 +36,19 @@ struct LibraryShell: View {
     var body: some View {
         let compact = sizeClass == .compact
         VStack(spacing: 0) {
-            if presentation.sourceVisible {
-                SourceBar(controller: controller, presentation: presentation, compact: compact, url: $sourceDraft)
-                Divider()
-            } else if controller.iptvImporting {
-                importStrip
-                Divider()
+            NavigationSplitView(columnVisibility: sidebarVisibility) {
+                sidebar
+                    .toolbar(removing: presentation.settingsVisible ? .sidebarToggle : nil)
+                    // Apply sizing last so toolbar customization does not mask
+                    // the native sidebar's minimum and maximum widths.
+                    .navigationSplitViewColumnWidth(min: LibraryMetrics.sidebarMinimumWidth,
+                                                    ideal: LibraryMetrics.sidebarWidth,
+                                                    max: LibraryMetrics.sidebarMaximumWidth)
+            } detail: {
+                mainContent
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            HStack(spacing: 0) {
-                if presentation.playlistVisible {
-                    sidebar
-                        .frame(width: compact ? nil : LibraryMetrics.sidebarWidth)
-                        .frame(maxWidth: compact ? .infinity : nil, maxHeight: .infinity)
-                    if !compact { Divider() }
-                }
-                if !compact || !presentation.playlistVisible {
-                    libraryContent
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-            }
+            .navigationSplitViewStyle(.balanced)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
             ControllerView(controller: controller, presentation: presentation, wide: !compact)
@@ -76,7 +70,7 @@ struct LibraryShell: View {
         .onChange(of: controller.sourceInput, initial: true) { _, input in
             if let input { sourceDraft = input }
         }
-        .onChange(of: controller.inspectorPage) { _, _ in
+        .onChange(of: presentation.focusSourceRequest) { _, _ in
             if sizeClass == .compact { presentation.playlistVisible = false }
         }
         .onChange(of: presentation.openFileRequest) { _, _ in
@@ -119,6 +113,21 @@ struct LibraryShell: View {
     }
 
     @State private var dropTargeted = false
+
+    private var mainContent: some View {
+        VStack(spacing: 0) {
+            if presentation.sourceVisible {
+                SourceBar(controller: controller, presentation: presentation,
+                          compact: sizeClass == .compact, url: $sourceDraft)
+                Divider()
+            } else if controller.iptvImporting {
+                importStrip
+                Divider()
+            }
+            libraryContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
 
     private var importStrip: some View {
         HStack(spacing: 8) {
@@ -164,52 +173,66 @@ struct LibraryShell: View {
     }
 
     private var sidebar: some View {
+        sidebarList
+        .listStyle(.sidebar)
+        .accessibilityLabel("Library")
+    }
+
+    private var sidebarList: some View {
         List(selection: selectionBinding) {
-            Section {
+            Section("Library") {
                 Label("Queue", systemImage: "list.bullet").tag(LibrarySelection.queue)
                 Label("History", systemImage: "clock").tag(LibrarySelection.history)
                 Label("Playlists", systemImage: "rectangle.stack").tag(LibrarySelection.tv)
             }
-            if !controller.iptvPlaylists.isEmpty {
-                Section("TV") {
+            if !controller.iptvPlaylists.isEmpty || !controller.xtreamPlaylists.isEmpty {
+                Section("Saved Playlists") {
                     ForEach(controller.iptvPlaylists) { playlist in
                         Label(playlist.title, systemImage: "tv")
+                            .lineLimit(1)
                             .tag(LibrarySelection.iptv(playlist.id))
                             .help(playlist.title)
                     }
-                }
-            }
-            ForEach(controller.xtreamPlaylists) { playlist in
-                Section {
-                    DisclosureGroup(isExpanded: Binding(
-                        get: { !collapsedPlaylists.contains(playlist.id) },
-                        set: { expanded in
-                            if expanded { collapsedPlaylists.remove(playlist.id) }
-                            else { collapsedPlaylists.insert(playlist.id) }
-                        })) {
-                        ForEach(XtreamSection.allCases, id: \.self) { section in
-                            Label(section.sidebarTitle, systemImage: section.sidebarSymbol)
-                                .tag(LibrarySelection.xtream(playlist.id, section))
-                                .contextMenu {
-                                    Button("Rename Playlist…") { renamingPlaylist = playlist }
-                                }
+                    ForEach(controller.xtreamPlaylists) { playlist in
+                        DisclosureGroup(isExpanded: playlistExpanded(playlist.id)) {
+                            playlistSections(playlist)
+                        } label: {
+                            playlistHeading(playlist)
                         }
-                    } label: {
-                        Label(playlist.title, systemImage: "rectangle.stack")
-                            .lineLimit(1).help(playlist.title)
-                    }
-                    .contextMenu {
-                        Button("Rename Playlist…") { renamingPlaylist = playlist }
                     }
                 }
             }
         }
-        // Sidebar style only lays out inside a navigation split. In this column
-        // it keeps the width and draws the rows outside the window.
-        .listStyle(.inset)
-        .scrollContentBackground(.hidden)
-        .background(Color(nsColor: SurfaceColor.window))
-        .accessibilityLabel("Library")
+    }
+
+    private func playlistExpanded(_ id: UUID) -> Binding<Bool> {
+        Binding(get: { !collapsedPlaylists.contains(id) }, set: { expanded in
+            if expanded { collapsedPlaylists.remove(id) }
+            else { collapsedPlaylists.insert(id) }
+        })
+    }
+
+    private func playlistSections(_ playlist: XtreamPlaylistSummary) -> some View {
+        ForEach(XtreamSection.allCases, id: \.self) { section in
+            Label(section.sidebarTitle, systemImage: section.sidebarSymbol)
+                .tag(LibrarySelection.xtream(playlist.id, section))
+                .contextMenu {
+                    Button("Rename Playlist…") { renamingPlaylist = playlist }
+                }
+        }
+    }
+
+    private func playlistHeading(_ playlist: XtreamPlaylistSummary) -> some View {
+        Label(playlist.title, systemImage: "rectangle.stack")
+            .lineLimit(1).help(playlist.title)
+            .contextMenu {
+                Button("Rename Playlist…") { renamingPlaylist = playlist }
+            }
+    }
+
+    private var sidebarVisibility: Binding<NavigationSplitViewVisibility> {
+        Binding(get: { presentation.playlistVisible ? .all : .detailOnly },
+                set: { presentation.playlistVisible = $0 != .detailOnly })
     }
 
     private var selectionBinding: Binding<LibrarySelection> {
@@ -222,7 +245,6 @@ struct LibraryShell: View {
                 controller.openXtreamPlaylist(id, section: section)
             case .iptv(let id): controller.selectIPTVPlaylist(id)
             }
-            if sizeClass == .compact { presentation.playlistVisible = false }
         })
     }
 
@@ -417,7 +439,9 @@ private struct SourceBar: View {
 }
 
 private enum LibraryMetrics {
+    static let sidebarMinimumWidth: CGFloat = 180
     static let sidebarWidth: CGFloat = 212
+    static let sidebarMaximumWidth: CGFloat = 320
     static let regularWidth: CGFloat = 720
     static let expandedWidth: CGFloat = 1100
 }

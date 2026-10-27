@@ -63,15 +63,6 @@ struct ControllerWindowView: View {
     private var compact: Bool { width < 720 }
 
     @ToolbarContentBuilder private var windowToolbar: some ToolbarContent {
-        ToolbarItem(placement: .navigation) {
-            Toggle(isOn: $presentation.playlistVisible) {
-                Image(systemName: "sidebar.left")
-            }
-            .toggleStyle(.button)
-            .disabled(presentation.settingsVisible)
-            .help(presentation.playlistVisible ? "Hide sidebar" : "Show sidebar")
-            .accessibilityLabel(presentation.playlistVisible ? "Hide sidebar" : "Show sidebar")
-        }
         if !compact, let label = receiverConnection.toolbarLabel {
             if #available(macOS 26, *) {
                 ToolbarItem(placement: .principal) {

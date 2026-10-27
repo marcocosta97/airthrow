@@ -159,6 +159,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(toggleLibrarySidebar) {
+            menuItem.title = presentation.playlistVisible ? "Hide Sidebar" : "Show Sidebar"
+            return window?.isVisible == true && !presentation.settingsVisible
+        }
         if menuItem.action == #selector(addXtreamPlaylist) {
             return controller.httpLoginRequest == nil && !presentation.xtreamPlaylistVisible
         }
@@ -175,6 +179,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             return window?.isVisible == true
         }
         return true
+    }
+
+    @objc private func toggleLibrarySidebar() {
+        guard window?.isVisible == true, !presentation.settingsVisible else { return }
+        presentation.playlistVisible.toggle()
     }
 
     func windowWillBeginSheet(_ notification: Notification) {
@@ -607,6 +616,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editItem.submenu = edit
         main.addItem(editItem)
+        let viewItem = NSMenuItem()
+        let view = NSMenu(title: "View")
+        let sidebar = view.addItem(withTitle: "Hide Sidebar", action: #selector(toggleLibrarySidebar), keyEquivalent: "s")
+        sidebar.keyEquivalentModifierMask = [.control, .command]
+        sidebar.target = self
+        viewItem.submenu = view
+        main.addItem(viewItem)
         let playbackItem = NSMenuItem()
         let playback = NSMenu(title: "Playback")
         addPlaybackItem(.togglePlayback, to: playback)
