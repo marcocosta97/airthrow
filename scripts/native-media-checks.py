@@ -209,11 +209,11 @@ threading.Thread(target=server.serve_forever, daemon=True).start()
 base = f'http://{args.bind}:{server.server_port}'
 try:
     binary = out / 'MediaChecks'
-    run(['swiftc', '-swift-version', '6', '-parse-as-library',
+    run(['swiftc', '-I', str(ROOT / 'Sources/CSQLite'), '-swift-version', '6', '-parse-as-library',
          *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
          ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift',
          ROOT / 'Sources/AirThrowApp/InterfaceCopy.swift',
-         ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
+         ROOT / 'Sources/AirThrowApp/PlaybackController.swift', ROOT / 'Sources/AirThrowApp/NetworkLibraryModel.swift',
          ROOT / 'Sources/AirThrowApp/XtreamLibrary.swift',
          ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
          ROOT / 'Tests/MediaChecks/main.swift', '-o', binary])

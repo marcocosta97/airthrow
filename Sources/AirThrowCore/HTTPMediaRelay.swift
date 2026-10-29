@@ -159,9 +159,17 @@ public final class HTTPMediaRelay {
         relay.sourceHeaders = sourceHeaders
         relay.readAheadBytes = min(8 * 1024 * 1024, max(256 * 1024, readAheadBytes))
         if credentials == nil, readAheadBytes > 256 * 1024, source.pathExtension.lowercased() != "m3u8" {
-            do { relay.preparationCache = try await PreparationInputCache.open(url: source, headers: sourceHeaders) }
+            do {
+                relay.preparationCache = try await PreparationInputCache.open(url: source, headers: sourceHeaders)
+                if relay.preparationCache?.validator == nil { relay.readAheadBytes = 256 * 1024 }
+            }
             catch is CancellationError { throw CancellationError() }
-            catch { try Task.checkCancellation() } // No ranges/validator: preserve bounded streaming.
+            catch {
+                try Task.checkCancellation()
+                // Without reusable validated ranges, keep streaming read-ahead
+                // small. Probes and seeks often close these responses early.
+                relay.readAheadBytes = 256 * 1024
+            }
         }
         let server = try await MediaHTTPServer.start(file: source, host: host, hls: source.pathExtension.lowercased() == "m3u8", relay: relay)
         relay.server = server; relay.url = server.url
@@ -323,6 +331,8 @@ final class HTTPRelayStream {
         guard let cache = preparationCache else { transfer.start(); return }
         cachedTransfer = Task { [weak self] in
             guard let self else { return }
+            let scope = UUID()
+            defer { Task { await cache.release(scope: scope) } }
             do {
                 let size = cache.size
                 var range = requestedHeaders["range"]
@@ -333,11 +343,24 @@ final class HTTPRelayStream {
                 }
                 let start = span?.0 ?? 0, end = span?.1 ?? size - 1
                 var fields = ["Content-Type": cache.mime, "Content-Length": String(end - start + 1), "Accept-Ranges": "bytes"]
-                fields[cache.validatorHeader] = cache.validator
+                if let header = cache.validatorHeader, let value = cache.validator { fields[header] = value }
                 if span != nil { fields["Content-Range"] = "bytes \(start)-\(end)/\(size)" }
                 guard let response = HTTPURLResponse(url: upstreamURL, statusCode: span == nil ? 200 : 206, httpVersion: "HTTP/1.1", headerFields: fields) else { throw PreparationFailure.failed }
                 _ = received(response)
                 if method == "HEAD" { return }
+                if requestedHeaders[PreparationInputCache.metadataHeader] == "1", end - start + 1 <= 32 * 1024 * 1024 {
+                    let data = try await cache.readMetadata(offset: start, count: Int(end - start + 1))
+                    for offset in stride(from: 0, to: data.count, by: Self.sendChunkBytes) {
+                        try Task.checkCancellation()
+                        guard finish != nil else { return }
+                        while pendingBytes > readAheadBytes / 2 {
+                            try Task.checkCancellation(); try await Task.sleep(for: .milliseconds(2))
+                        }
+                        received(data.subdata(in: offset..<min(offset + Self.sendChunkBytes, data.count)))
+                    }
+                    completed(nil)
+                    return
+                }
                 var offset = start
                 while offset <= end {
                     try Task.checkCancellation()
@@ -345,7 +368,7 @@ final class HTTPRelayStream {
                     while pendingBytes > readAheadBytes / 2 {
                         try Task.checkCancellation(); try await Task.sleep(for: .milliseconds(2))
                     }
-                    let data = try await cache.read(offset: offset, maximum: Int(min(64 * 1024, end - offset + 1)))
+                    let data = try await cache.read(offset: offset, maximum: Int(min(64 * 1024, end - offset + 1)), scope: scope, requestEnd: end, requestStart: start)
                     received(data); offset += Int64(data.count)
                 }
                 completed(nil)

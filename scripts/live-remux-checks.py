@@ -71,11 +71,11 @@ with tempfile.TemporaryDirectory(prefix='live-remux-', dir=ROOT / 'build') as te
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         binary = output / 'LiveRemuxChecks'
-        run('swiftc', '-swift-version', '6', '-parse-as-library',
+        run('swiftc', '-I', str(ROOT / 'Sources/CSQLite'), '-swift-version', '6', '-parse-as-library',
             *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
             ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift',
             ROOT / 'Sources/AirThrowApp/InterfaceCopy.swift',
-            ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
+            ROOT / 'Sources/AirThrowApp/PlaybackController.swift', ROOT / 'Sources/AirThrowApp/NetworkLibraryModel.swift',
             ROOT / 'Sources/AirThrowApp/XtreamLibrary.swift',
             ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
             ROOT / 'Tests/LiveRemuxChecks/main.swift', '-o', binary)

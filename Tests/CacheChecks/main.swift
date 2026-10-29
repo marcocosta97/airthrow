@@ -93,6 +93,36 @@ struct CacheChecks {
         do {
             let workspace = try PreparationWorkspace()
             let producer = CacheProducer()
+            let gate = ChunkGate()
+            let cache = try CachedHLS(workspace: workspace, duration: 30, fragmented: false,
+                                     preferences: PreparationPreferences()) { index, _, _, directory in
+                if index == 0 {
+                    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                        gate.store { continuation.resume() }
+                    }
+                }
+                return try await producer.produce(index, directory: directory)
+            }
+            defer { cache.stop() }
+            let opening = Task { try await cache.resource("segment000000.ts") }
+            try await waitUntil("Opening job did not acquire its lease", { gate.isWaiting })
+            let oldFirst = Task { try await cache.resource("segment000001.ts") }
+            let oldSecond = Task { try await cache.resource("segment000002.ts") }
+            try await Task.sleep(for: .milliseconds(30))
+            let seek = Task { try await cache.prepareSeek(at: 18) }
+            try await Task.sleep(for: .milliseconds(30))
+            gate.release()
+            try await seek.value
+            let resources = try await [opening.value, oldFirst.value, oldSecond.value]
+            for resource in resources { cache.release(resource) }
+            try check(producer.started.prefix(2).elementsEqual([0, 3]) && producer.maximumActive == 1
+                      && producer.finished.contains(1) && producer.finished.contains(2),
+                      "Seek did not overtake queued HTTP work, failed old clients, or overlapped muxers")
+            report("PASS seek overtakes queued HTTP work without failing clients or overlapping muxers")
+        }
+        do {
+            let workspace = try PreparationWorkspace()
+            let producer = CacheProducer()
             let cache = try CachedHLS(workspace: workspace, duration: 600, fragmented: false,
                                      preferences: PreparationPreferences()) { index, _, _, directory in
                 try await producer.produce(index, directory: directory)

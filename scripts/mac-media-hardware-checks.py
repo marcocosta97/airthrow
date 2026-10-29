@@ -91,7 +91,7 @@ def main():
                        'if case=="software" and any(v.endswith("_videotoolbox") for v in a): sys.exit(1)\n'
                        'os.execv('+repr(ffmpeg)+', ['+repr(ffmpeg)+']+a)\n')
     wrapper.chmod(0o700)
-    run(['swiftc', '-swift-version', '6', '-parse-as-library',
+    run(['swiftc', '-I', str(ROOT / 'Sources/CSQLite'), '-swift-version', '6', '-parse-as-library',
          *sorted((ROOT/'Sources/AirThrowCore').glob('*.swift')),
          ROOT/'Tests/MacMediaHardwareChecks/main.swift', '-o', out/'checks'], timeout=120)
     run([out/'checks', out], timeout=180)

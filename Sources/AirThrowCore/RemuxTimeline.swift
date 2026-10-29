@@ -22,17 +22,19 @@ struct RemuxTimeline: Sendable {
         let dts: Int64?
         /// The next keyframe after this cut, including one that was too close to keep.
         var followingKeyframe: Int64? = nil
+        var precedingKeyframe: Int64? = nil
     }
     let cuts: [Cut]
     let videoTimeBase: Double
     let audioTimeBase: Double
     let sourceStart: Double
-    let inspectBoundaries: Bool
-    /// Matroska does not seek by PTS. When the video has a reorder delay, ffmpeg
-    /// subtracts 3/23 s before the backward seek, so an exact keyframe time
-    /// selects the previous one.
-    let containerSeekSlop: Bool
+    let usesSyncPacketIntervals: Bool
+    /// Reordered Matroska needs packets before a cut to establish its initial
+    /// DTS values. Seek to a preceding keyframe and trim on the known clock.
+    let needsDecodePreroll: Bool
     var audioOffset = 0.0
+    var remoteValidation: RemoteRemuxIndex.Validation?
+    private(set) var presentationReorderAllowance = 0.15
     var starts: [Double] { cuts.map { Double($0.pts - cuts[0].pts) * videoTimeBase } }
 
     init(packets: Data, file: URL, codec: String, videoTimeBase: String?, audioTimeBase: String?,
@@ -42,8 +44,8 @@ struct RemuxTimeline: Sendable {
         self.videoTimeBase = try Self.timeBase(videoTimeBase)
         self.audioTimeBase = try Self.timeBase(audioTimeBase)
         self.sourceStart = sourceStart
-        self.inspectBoundaries = false
-        self.containerSeekSlop = matroska && reorderDelay
+        self.usesSyncPacketIntervals = false
+        self.needsDecodePreroll = matroska && reorderDelay
         let reader = try FileHandle(forReadingFrom: file)
         defer { try? reader.close() }
         var cuts: [Cut] = []
@@ -52,6 +54,8 @@ struct RemuxTimeline: Sendable {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(5))
         var packetCount = 0
+        var reorderDelaySeconds = 0.0
+        var previousKeyframe: Int64?
         for line in String(decoding: packets, as: UTF8.self).split(separator: "\n") {
             let fields = Self.packetLine(line)
             packetCount += 1
@@ -65,6 +69,7 @@ struct RemuxTimeline: Sendable {
                 throw PreparationFailure.unsupported
             }
             if let dts {
+                reorderDelaySeconds = max(reorderDelaySeconds, (Double(pts) - Double(dts)) * self.videoTimeBase)
                 guard (sourceStart - 2...sourceStart + duration + 2).contains(Double(dts) * self.videoTimeBase) else {
                     throw PreparationFailure.unsupported
                 }
@@ -77,6 +82,8 @@ struct RemuxTimeline: Sendable {
             }
             lastPTS = max(lastPTS, Double(pts) * self.videoTimeBase)
             guard fields.isKeyframe else { continue }
+            let precedingKeyframe = previousKeyframe
+            previousKeyframe = pts
             if let last = cuts.indices.last, cuts[last].followingKeyframe == nil, pts > cuts[last].pts {
                 cuts[last].followingKeyframe = pts
             }
@@ -85,8 +92,8 @@ struct RemuxTimeline: Sendable {
             guard let position = fields.position,
                   let size = fields.size, size > 0,
                   try Self.isRefreshPoint(reader, position: position, size: size, codec: codec, matroska: matroska) else {
-                // A CRA/recovery point can depend on the previous GOP. Wait for
-                // an IDR; sources without usable IDRs keep sequential delivery.
+                // Only immediate, exact AVC recovery points and HEVC IDR/CRA
+                // can restart decoding. Leading pictures use a continuous clock.
                 continue
             }
             if let last = cuts.last {
@@ -96,10 +103,10 @@ struct RemuxTimeline: Sendable {
                 guard abs(seconds - sourceStart) < 0.1 else { throw PreparationFailure.unsupported }
             }
             if let dts {
-                guard Double(pts - dts) * self.videoTimeBase >= 0,
-                      Double(pts - dts) * self.videoTimeBase < 2 else { throw PreparationFailure.unsupported }
+                guard (Double(pts) - Double(dts)) * self.videoTimeBase >= 0,
+                      (Double(pts) - Double(dts)) * self.videoTimeBase < 2 else { throw PreparationFailure.unsupported }
             }
-            cuts.append(Cut(pts: pts, dts: dts))
+            cuts.append(Cut(pts: pts, dts: dts, precedingKeyframe: precedingKeyframe))
         }
         guard let first = cuts.first, let last = cuts.last,
               duration - Double(last.pts - first.pts) * self.videoTimeBase <= 30,
@@ -109,6 +116,7 @@ struct RemuxTimeline: Sendable {
         // A keyframe at the very end can leave only an audio/container tail.
         if cuts.count > 1, duration - Double(last.pts - first.pts) * self.videoTimeBase < 0.25 { cuts.removeLast() }
         self.cuts = cuts
+        presentationReorderAllowance = Self.reorderAllowance(delay: reorderDelaySeconds)
     }
 
     static func timeBase(_ value: String?) throws -> Double {
@@ -119,7 +127,7 @@ struct RemuxTimeline: Sendable {
     }
 
     init(cuts: [Cut], videoTimeBase: Double, audioTimeBase: Double,
-         sourceStart: Double, duration: Double, inspectBoundaries: Bool, containerSeekSlop: Bool = false) throws {
+         sourceStart: Double, duration: Double, usesSyncPacketIntervals: Bool, needsDecodePreroll: Bool = false) throws {
         guard sourceStart.isFinite, abs(sourceStart) < 86_400, duration.isFinite, duration > 0, duration <= 14_400,
               let first = cuts.first, let last = cuts.last,
               abs(Double(first.pts) * videoTimeBase - sourceStart) < 0.1,
@@ -127,74 +135,142 @@ struct RemuxTimeline: Sendable {
               duration - Double(last.pts - first.pts) * videoTimeBase <= 30,
               zip(cuts, cuts.dropFirst()).allSatisfy({
                   $1.pts > $0.pts && Double($1.pts - $0.pts) * videoTimeBase <= 30
-                  && (inspectBoundaries || ($1.dts != nil && ($0.dts == nil || $1.dts! > $0.dts!)))
+                  && (usesSyncPacketIntervals || ($1.dts != nil && ($0.dts == nil || $1.dts! > $0.dts!)))
               }) else { throw PreparationFailure.unsupported }
         self.cuts = cuts; self.videoTimeBase = videoTimeBase; self.audioTimeBase = audioTimeBase
-        self.sourceStart = sourceStart; self.inspectBoundaries = inspectBoundaries
-        self.containerSeekSlop = containerSeekSlop
+        self.sourceStart = sourceStart; self.usesSyncPacketIntervals = usesSyncPacketIntervals
+        self.needsDecodePreroll = needsDecodePreroll
     }
 
-    /// Container sync flags may describe recovery/CRA points. Require an IDR
-    /// slice in the bounded prefix; unknown/oversized layouts fall back safely.
+    /// AVC accepts IDR or an explicitly signalled immediate exact intra recovery;
+    /// HEVC accepts IDR/CRA. Retain leading pictures on a continuous media clock.
     static func isRefreshPoint(_ data: Data, codec: String) -> Bool {
         for width in [4, 2, 1] {
             var offset = 0
+            var recovery = false
             for _ in 0..<64 {
                 guard offset + width + 1 <= data.count else { break }
                 let length = data[offset..<offset + width].reduce(0) { ($0 << 8) | Int($1) }
                 guard length > 0 else { break }
-                let type = codec == "h264" ? data[offset + width] & 0x1f : (data[offset + width] >> 1) & 0x3f
-                if codec == "h264", (1...5).contains(type) { return type == 5 }
-                if codec == "hevc", type <= 31 { return type == 19 || type == 20 }
+                let header = data[offset + width]
+                guard header & 0x80 == 0 else { break }
+                let type = codec == "h264" ? header & 0x1f : (header >> 1) & 0x3f
+                if codec == "h264", (1...5).contains(type) {
+                    if type == 5 { return true }
+                    guard recovery, type == 1 else { return false }
+                    // An exact recovery SEI must accompany an intra slice.
+                    let end = min(data.count, offset + width + length)
+                    var bits = AVCBits(rbsp(data[(offset + width + 1)..<end]))
+                    guard bits.ue() != nil, let slice = bits.ue(), slice <= 9 else { return false }
+                    return slice % 5 == 2
+                }
+                if codec == "hevc", type <= 31 { return type == 19 || type == 20 || type == 21 }
                 guard length <= data.count - offset - width else { break }
+                if codec == "h264", type == 6 {
+                    recovery = recovery || immediateAVCRecovery(data[(offset + width + 1)..<(offset + width + length)])
+                }
                 offset += width + length
             }
         }
         return false
     }
 
-    func boundaryInterval(index: Int, duration: Double) -> String {
-        let start = max(sourceStart, Double(cuts[index].pts) * videoTimeBase - 3)
-        let end = index + 1 < cuts.count ? Double(cuts[index + 1].pts) * videoTimeBase + 1 : sourceStart + duration + 1
-        return "\(start)%\(end)"
+    private static func rbsp(_ data: Data.SubSequence) -> [UInt8] {
+        var result: [UInt8] = [], zeros = 0
+        for byte in data {
+            if zeros >= 2, byte == 3 { zeros = 0; continue }
+            result.append(byte)
+            zeros = byte == 0 ? zeros + 1 : 0
+        }
+        return result
     }
 
-    func boundaries(_ packets: Data, index: Int) throws -> (Int64?, Int64?) {
-        var current: Int64?, next: Int64?
-        for line in String(decoding: packets, as: UTF8.self).split(separator: "\n") {
-            let fields = Self.packetLine(line)
-            guard let pts = fields.pts else { continue }
-            let dts = fields.dts
-            if pts == cuts[index].pts { current = dts }
-            if index + 1 < cuts.count, pts == cuts[index + 1].pts { next = dts }
+    /// H.264 D.1.7: accept only recovery_frame_cnt=0, exact_match=1,
+    /// broken_link=0 and changing_slice_group_idc=0. Delayed/approximate
+    /// recovery and a mere container keyframe flag are insufficient.
+    private static func immediateAVCRecovery(_ data: Data.SubSequence) -> Bool {
+        let bytes = rbsp(data)
+        var at = 0
+        for _ in 0..<64 {
+            var type = 0, size = 0
+            while at < bytes.count, bytes[at] == 255 { type += 255; at += 1 }
+            guard at < bytes.count else { return false }
+            type += Int(bytes[at]); at += 1
+            while at < bytes.count, bytes[at] == 255 { size += 255; at += 1 }
+            guard at < bytes.count else { return false }
+            size += Int(bytes[at]); at += 1
+            guard size > 0, size <= bytes.count - at else { return false }
+            if type == 6 { return size == 1 && bytes[at] == 0xc4 }
+            at += size
         }
-        guard index == 0 || current != nil, index + 1 == cuts.count || next != nil else {
-            throw PreparationFailure.unsupported
-        }
-        return (current, next)
+        return false
     }
 
-    func arguments(index: Int, length: Double, boundaries: (Int64?, Int64?)? = nil) -> (input: [String], audio: [String], output: [String]) {
+    private struct AVCBits {
+        let bytes: [UInt8]
+        var at = 0
+        init(_ bytes: [UInt8]) { self.bytes = bytes }
+        mutating func bit() -> Int? {
+            guard at < bytes.count * 8 else { return nil }
+            defer { at += 1 }
+            return Int((bytes[at / 8] >> (7 - at % 8)) & 1)
+        }
+        mutating func ue() -> Int? {
+            var zeros = 0
+            while true {
+                guard let value = bit(), zeros < 31 else { return nil }
+                if value == 1 { break }
+                zeros += 1
+            }
+            var value = 1
+            for _ in 0..<zeros {
+                guard let next = bit() else { return nil }
+                value = value * 2 + next
+            }
+            return value - 1
+        }
+    }
+
+    static func reorderAllowance(delay: Double) -> Double {
+        // The first and last decoded packets can each precede the presentation
+        // edge. Bound tolerance by observed reordering, never by source length.
+        max(0.15, min(1, 2 * delay + 0.01))
+    }
+
+    func arguments(index: Int, length: Double) -> (input: [String], audio: [String], output: [String]) {
         let cut = cuts[index]
         let seconds = Double(cut.pts) * videoTimeBase
-        var videoDrop = index == 0 ? "0" : "lt(dts,\(boundaries?.0 ?? cut.dts!))"
+        let videoDrop: String
+        if usesSyncPacketIntervals {
+            // Matroska stores presentation clocks. Toggle at the indexed sync
+            // packets in decode order; leading pictures stay with their GOP,
+            // even when their PTS precedes its recovery frame.
+            var toggle = "if(eq(pts,\(cut.pts)),st(0,1),0)"
+            if index + 1 < cuts.count {
+                toggle = "if(eq(pts,\(cut.pts)),st(0,1),if(eq(pts,\(cuts[index + 1].pts)),st(0,0),0))"
+            }
+            videoDrop = toggle + ";1-ld(0)"
+        } else {
+            var drop = index == 0 ? "0" : "lt(dts,\(cut.dts!))"
+            if index + 1 < cuts.count { drop += "+gte(dts,\(cuts[index + 1].dts!))" }
+            videoDrop = drop
+        }
         var audioDrop = index == 0 ? "0" : "lt(pts,\(Int64(ceil(seconds / audioTimeBase))))"
         if index + 1 < cuts.count {
             let next = cuts[index + 1]
-            videoDrop += "+gte(dts,\(boundaries?.1 ?? next.dts!))"
             audioDrop += "+gte(pts,\(Int64(ceil(Double(next.pts) * videoTimeBase / audioTimeBase))))"
         }
         let origin = max(0, seconds - sourceStart)
-        let span = MediaClock.seconds(length + 4)
-        // Cancel ffmpeg's fixed subtraction (3*AV_TIME_BASE/23) and one timebase
-        // tick of rounding. A keyframe inside that window would be skipped, so
-        // the cut time stays put and the drop filter discards the previous GOP.
-        let slop = 3.0 / 23.0 + videoTimeBase
-        let following = cut.followingKeyframe ?? (index + 1 < cuts.count ? cuts[index + 1].pts : nil)
-        let gap = following.map { Double($0 - cut.pts) * videoTimeBase }
-        let videoAt = containerSeekSlop && (gap == nil || gap! > slop) ? origin + slop : origin
-        return (["-ss", MediaClock.seconds(videoAt), "-t", span],
-                ["-ss", MediaClock.seconds(max(0, origin - 0.001)), "-t", span],
+        // Starting exactly on a reordered GOP can leave its first DTS values
+        // unknown; the lower-bound filter would then discard the recovery
+        // frame. Reading the preceding GOP establishes DTS before the cut.
+        let predecessor = cut.precedingKeyframe.flatMap { $0 < cut.pts ? $0 : nil }
+            ?? (index > 0 ? cuts[index - 1].pts : cut.pts)
+        let videoAt = needsDecodePreroll && index > 0
+            ? max(0, Double(predecessor) * videoTimeBase - sourceStart) : origin
+        let videoSpan = MediaClock.seconds(length + max(0, origin - videoAt) + 4)
+        return (["-ss", MediaClock.seconds(videoAt), "-t", videoSpan],
+                ["-ss", MediaClock.seconds(max(0, origin - 0.001)), "-t", MediaClock.seconds(length + 4)],
                 ["-copyts", "-bsf:v", "noise=amount=0:drop='\(videoDrop)'",
                  "-bsf:a", "noise=amount=0:drop='\(audioDrop)'", "-output_ts_offset", MediaClock.seconds(-seconds)])
     }
@@ -249,6 +325,9 @@ struct RemuxTimeline: Sendable {
             start += UInt64(width + 3)
             guard start <= end, UInt64(size) <= end - start else { return false }
         }
+        try reader.seek(toOffset: start)
+        let prefix = try reader.read(upToCount: min(size, 4096)) ?? Data()
+        let recovery = codec == "h264" && Self.isRefreshPoint(prefix, codec: codec)
         for width in [4, 2, 1] {
             var offset = 0
             var refresh = false
@@ -263,10 +342,10 @@ struct RemuxTimeline: Sendable {
                 let length = header.prefix(width).reduce(0) { ($0 << 8) | Int($1) }
                 guard length > 0, length <= size - offset - width else { break }
                 let type = codec == "h264" ? header[width] & 0x1f : (header[width] >> 1) & 0x3f
-                if codec == "h264" ? type == 5 : type == 19 || type == 20 { refresh = true }
+                if codec == "h264" ? type == 5 : type == 19 || type == 20 || type == 21 { refresh = true }
                 offset += width + length
             }
-            if offset == size { return refresh }
+            if offset == size { return refresh || recovery }
         }
         return false
     }

@@ -42,6 +42,26 @@ enum HelperProcess {
                           outputLimit: outputLimit, monitor: monitor)
     }
 
+    /// Match only fixed error signatures. Never decode, return or persist the
+    /// helper's descriptions, file paths, arguments, metadata or URLs.
+    static func failureKind(_ bytes: Data) -> PreparationDiagnostics.HelperFailure {
+        let patterns: [(PreparationDiagnostics.HelperFailure, [String])] = [
+            (.missingMovieHeader, ["moov atom not found"]),
+            (.missingTrackDefaults, ["could not find corresponding trex", "trun track id unknown", "could not find corresponding tfhd"]),
+            (.invalidNAL, ["Invalid NAL unit size", "Error splitting the input into NAL units", "No start code is found", "PPS id out of range"]),
+            (.fileAccess, ["No such file or directory", "Permission denied"]),
+            (.diskFull, ["No space left on device"]),
+            (.memoryLimit, ["Cannot allocate memory", "Too many open files"]),
+            (.protocolBlocked, ["not on whitelist"]),
+            (.network, ["Connection reset", "Connection refused", "HTTP error", "Server returned", "Operation timed out"]),
+            (.invalidHeader, ["error reading header", "Error reading header"]),
+            (.invalidData, ["Invalid data found when processing input"]),
+            (.endOfFile, ["End of file"])
+        ]
+        for (kind, matches) in patterns where matches.contains(where: { bytes.range(of: Data($0.utf8)) != nil }) { return kind }
+        return .other
+    }
+
     private static func execute(executable: String, arguments: [String], timeout: Duration?,
                                 outputLimit: Int, monitor: (@Sendable () throws -> Void)?) async throws -> Result {
         try Task.checkCancellation()
@@ -143,6 +163,11 @@ enum HelperProcess {
             }
             // One more drain after exit collects bytes written immediately before termination.
             if reaped && readBytes == 0 {
+                if status != 0 {
+                    let code = status & 0x7f == 0 ? (status >> 8) & 0xff : 128 + (status & 0x7f)
+                    let kind = failureKind(stderrData)
+                    PreparationTrace.current?.update { $0.helperExitCode = Int(code); $0.helperFailure = kind }
+                }
                 return Result(output: data, stderr: stderrData, succeeded: status == 0)
             }
             if !reaped {

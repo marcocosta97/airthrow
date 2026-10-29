@@ -255,9 +255,10 @@ public final class MediaHTTPServer {
             contentType = "application/vnd.apple.mpegurl"
         } else if hls, requested.hasPrefix(prefix),
                   (Self.isSegmentName(String(requested.dropFirst(prefix.count)))
-                   || Self.isInitName(String(requested.dropFirst(prefix.count)))) {
+                   || Self.isInitName(String(requested.dropFirst(prefix.count)))
+                   || Self.isCachedRenditionResource(String(requested.dropFirst(prefix.count)))) {
             resource = file.deletingLastPathComponent().appendingPathComponent(String(requested.dropFirst(prefix.count)))
-            contentType = resource.pathExtension == "ts" ? "video/mp2t" : "video/mp4"
+            contentType = resource.pathExtension == "vtt" ? "text/vtt; charset=utf-8" : resource.pathExtension == "ts" ? "video/mp2t" : "video/mp4"
         } else { reply(client, code: "404 Not Found"); return }
         guard request[0] == "GET" || request[0] == "HEAD" else { reply(client, code: "405 Method Not Allowed", extra: "Allow: GET, HEAD\r\n"); return }
         var headers: [String: String] = [:]
@@ -423,7 +424,16 @@ public final class MediaHTTPServer {
 
     /// Audio rendition playlists published next to a Dolby master playlist.
     nonisolated static func isRenditionPlaylist(_ name: String) -> Bool {
-        ["stream_0.m3u8", "stream_1.m3u8", "stream_2.m3u8"].contains(name)
+        ["stream_0.m3u8", "stream_1.m3u8", "stream_2.m3u8", "audio0.m3u8"].contains(name)
+            || (0..<8).contains { name == "subtitle\($0).m3u8" }
+    }
+
+    nonisolated static func isCachedRenditionResource(_ name: String) -> Bool {
+        guard let dash = name.firstIndex(of: "-") else { return false }
+        let prefix = String(name[..<dash]), suffix = String(name[name.index(after: dash)...])
+        if prefix == "audio0" { return isSegmentName(suffix) || isInitName(suffix) }
+        guard (0..<8).contains(where: { prefix == "subtitle\($0)" }), suffix.hasSuffix(".vtt") else { return false }
+        return isSegmentName(String(suffix.dropLast(4)) + ".ts")
     }
 
     nonisolated static func isSegmentName(_ name: String) -> Bool {

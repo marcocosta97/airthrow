@@ -290,6 +290,62 @@ public struct NativePlaybackMetrics: Codable, Sendable, Equatable {
     public init() {}
 }
 
+/// Fixed phases and numeric observations only; never source URLs, headers,
+/// stream titles, helper arguments or stderr.
+public struct PreparationDiagnostics: Codable, Sendable, Equatable {
+    public enum Stage: String, Codable, Sendable {
+        case starting, sourceProbe, audioProbe, planning, index, subtitleIndex
+        case chunkBoundaryProbe, chunkMux, chunkManifest, chunkProbe, chunkValidation
+        case fallbackAudioMux, subtitleRead, subtitleMux, progressiveMux, completeMux, liveMux, ready
+    }
+    public enum Codec: String, Codable, Sendable {
+        case h264, hevc, av1, vp9, mpeg2video, aac, ac3, eac3, truehd, dts, flac, mp3, opus, vorbis, alac, other
+    }
+    public enum HelperFailure: String, Codable, Sendable {
+        case missingMovieHeader, missingTrackDefaults, invalidNAL, invalidHeader, invalidData
+        case fileAccess, diskFull, memoryLimit, protocolBlocked, network, endOfFile, other
+    }
+    public var stage: Stage = .starting
+    public var phaseSeconds: Double = 0
+    public var errorCode: Int?
+    public var failureReason: MediaFailureReason?
+    public var helperExitCode: Int?
+    public var helperFailure: HelperFailure?
+    public var videoBitDepth: Int?
+    public var dolbyVisionProfile: Int?
+    public var audioChannels: Int?
+    public var audioSampleRate: Int?
+    public struct FragmentTrack: Codable, Sendable, Equatable {
+        public let id: UInt32
+        public let samples: UInt64
+        public let decodeTime: UInt64?
+        public init(id: UInt32, samples: UInt64, decodeTime: UInt64?) { self.id = id; self.samples = samples; self.decodeTime = decodeTime }
+    }
+    public var fragmentTracks: [FragmentTrack]?
+    public var videoCurrentDTS: Int64?
+    public var videoNextDTS: Int64?
+    public var videoTimeBase: Double?
+    public var initializationBytes: Int64?
+    public var segmentBytes: Int64?
+    public var inspectionBytes: Int64?
+    public var videoCodec: Codec?
+    public var audioCodec: Codec?
+    public var width: Int?
+    public var height: Int?
+    public var frameRate: Double?
+    public var sourceDuration: Double?
+    public var sourceBytes: Int64?
+    public var subtitleCount: Int?
+    public var playbackPath: PlaybackPath?
+    public var remuxCache: Bool?
+    public var retainAll: Bool?
+    public var maximumBytes: Int64?
+    public var chunkIndex: Int?
+    public var requestedSeconds: Double?
+    public var producedSeconds: Double?
+    public init() {}
+}
+
 public struct PlaybackDiagnostics: Codable, Sendable, Equatable {
     public enum SampleInspectionStatus: String, Codable, Sendable { case pending, unavailable, complete }
     public var itemStatus: String?
@@ -307,6 +363,7 @@ public struct PlaybackDiagnostics: Codable, Sendable, Equatable {
     public var nativeMetrics: NativePlaybackMetrics?
     /// Numeric format identifiers and encoded dimensions, when local tracks are available.
     public var videoCodecTypes: [UInt32]?
+    public var audioCodecTypes: [UInt32]?
     public var videoWidth: Int?
     public var videoHeight: Int?
     public var sampledVideo: StreamingVideoCharacteristics?
@@ -315,6 +372,7 @@ public struct PlaybackDiagnostics: Codable, Sendable, Equatable {
     public var hlsVariants: [HLSVariantSummary]?
     public var sampleInspectionStatus: SampleInspectionStatus?
     public var livePipeline: LivePipelineDiagnostics?
+    public var preparation: PreparationDiagnostics?
     /// Only numeric errors: log URIs, addresses and provider text are never exposed.
     public var errorStatusCodes: [Int]?
     public var itemErrorCode: Int?

@@ -30,6 +30,7 @@ struct RemuxCacheChecks {
         if CommandLine.arguments.contains("--remote-only") { cases = [] }
         if base != nil { cases += ["remote-remux-h264.mkv", "remote-remux-hevc.mkv", "remote-remux-variable.mp4", "remote-remux-tail.mp4", "remote-remux-video.mp4", "remote-remux-large.mp4", "remote-remux-offset-video.mp4"] }
         if CommandLine.arguments.contains("--fallback-only") { cases = [] }
+        if CommandLine.arguments.contains("--large-only") { cases = ["remote-remux-large.mp4"] }
         for name in cases {
             let remote = name.hasPrefix("remote-")
             let sourceName = remote ? String(name.dropFirst(7)) : name
@@ -91,7 +92,7 @@ struct RemuxCacheChecks {
             try check(item.status == .readyToPlay && abs(item.duration.seconds - media.sourceDuration!) < 0.2,
                       "Native remux duration/readiness: \(String(describing: item.error))")
             let moved = await player.seek(to: CMTime(seconds: 15, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
-            try check(moved && abs(player.currentTime().seconds - 15) < 0.2, "Native remux distant seek failed")
+            try check(moved && abs(player.currentTime().seconds - 15) < 0.2, "Native remux distant seek failed: moved=\(moved) time=\(player.currentTime().seconds) production=\(String(describing: media.productionFailure)) status=\(item.status.rawValue)")
             _ = await player.seek(to: CMTime(seconds: 4, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
             player.play()
             deadline = Date().addingTimeInterval(20)
@@ -102,6 +103,7 @@ struct RemuxCacheChecks {
             media.stop(); await media.waitForProducer()
             print("PASS \(name): copy-only cache beyond input budget, demand seek, eviction/regeneration, native playback")
         }
+        if CommandLine.arguments.contains("--large-only") { return }
         if let base {
             let headers = ["User-Agent": "AirThrow-RemuxChecks"]
             for prefix in ["no-range-", "bad-range-"] {
@@ -140,14 +142,14 @@ struct RemuxCacheChecks {
             .prepare(ResolvedSource(url: directory.appendingPathComponent("remux-variable.mp4")))
         try check(!direct.usesBoundedCache && direct.playbackPath == .direct, "Remux option changed direct delivery")
         direct.stop(); await direct.waitForProducer()
-        for name in ["remux-mp3.mkv", "remux-subtitles.mkv", "remux-open-gop.mkv"] {
+        for name in ["remux-mp3.mkv", "remux-subtitles.mkv", "remux-open-gop.mkv", "remux-subtitles.mp4"] {
             print("Checking fallback: \(name)")
             var fallbackEnvironment = environment
-            if name == "remux-mp3.mkv" { fallbackEnvironment.removeValue(forKey: "AIRTHROW_FFMPEG") }
+            if name != "remux-open-gop.mkv" { fallbackEnvironment.removeValue(forKey: "AIRTHROW_FFMPEG") }
             let media = try await MediaPreparer(environment: fallbackEnvironment,
                 preferences: PreparationPreferences(maximumBytes: 16 * 1024 * 1024, remuxCache: true))
                 .prepare(ResolvedSource(url: directory.appendingPathComponent(name), needsPreparation: true))
-            try check(!media.usesBoundedCache, "Unsupported copy layout did not preserve sequential preparation: \(name)")
+            try check(media.usesBoundedCache == (name != "remux-subtitles.mp4"), "Audio/subtitle incremental selection: \(name)")
             media.stop(); await media.waitForProducer()
         }
         print("PASS direct/remote, non-AAC, subtitle and non-IDR alternatives")

@@ -37,9 +37,12 @@ if not reuse:
     run([FFMPEG, '-v', 'error', '-n', '-i', OUT / 'remux-h264.mkv', '-c:v', 'copy', '-c:a', 'libmp3lame', OUT / 'remux-mp3.mkv'], timeout=30)
     (OUT / 'subtitle.srt').write_text('1\n00:00:00,000 --> 00:00:01,000\nHello\n')
     run([FFMPEG, '-v', 'error', '-n', '-i', OUT / 'remux-h264.mkv', '-i', OUT / 'subtitle.srt', '-map', '0', '-map', '1', '-c', 'copy', OUT / 'remux-subtitles.mkv'], timeout=30)
-    # Only its first GOP is an IDR; all later recovery points are unsafe cache cuts.
+    # Only its first GOP is IDR; later exact recovery points use the continuous clock.
     run([FFMPEG, '-v', 'error', '-n', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24', '-f', 'lavfi', '-i', 'sine=sample_rate=48000',
          '-t', '35', '-c:v', 'libx264', '-g', '48', '-sc_threshold', '0', '-x264-params', 'open-gop=1', '-c:a', 'aac', '-ac', '2', OUT / 'remux-open-gop.mkv'], timeout=45)
+if not (OUT / 'remux-subtitles.mp4').exists():
+    run([FFMPEG, '-v', 'error', '-n', '-i', OUT / 'remux-h264.mkv', '-i', OUT / 'subtitle.srt',
+         '-map', '0', '-map', '1', '-c:v', 'copy', '-c:a', 'alac', '-c:s', 'mov_text', OUT / 'remux-subtitles.mp4'], timeout=30)
 # Fail if any actual job attempts encoding, including silent AAC re-encoding.
 (OUT / 'copy-only-ffmpeg').write_text('#!/usr/bin/python3\nimport os,sys\na=sys.argv[1:]\nfor flag in ["-c:v","-c:a"]:\n if flag not in a or a[a.index(flag)+1]!="copy": sys.exit(1)\nos.execv(' + repr(FFMPEG) + ',[' + repr(FFMPEG) + ']+a)\n')
 (OUT / 'no-index-ffprobe').write_text('#!/usr/bin/python3\nimport os,sys\nif "-show_packets" in sys.argv: sys.exit(1)\nos.execv(' + repr(FFPROBE) + ',[' + repr(FFPROBE) + ']+sys.argv[1:])\n')
@@ -121,15 +124,17 @@ server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 binary = OUT / 'RemuxCacheChecks'
 try:
-    run(['swiftc', '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
+    run(['swiftc', '-I', str(ROOT / 'Sources/CSQLite'), '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
          ROOT / 'Tests/RemuxCacheChecks/main.swift', '-o', binary], timeout=90)
-    print(run([binary, OUT, f'http://127.0.0.1:{server.server_port}', *[a for a in sys.argv[1:] if a in ['--remote-only', '--fallback-only']]], timeout=300).stdout, end='')
+    print(run([binary, OUT, f'http://127.0.0.1:{server.server_port}', *[a for a in sys.argv[1:] if a in ['--remote-only', '--fallback-only', '--large-only']]], timeout=300).stdout, end='')
     def packets(path):
         data = json.loads(run([FFPROBE, '-v', 'error', '-show_packets', '-show_entries', 'packet=stream_index,data_hash',
                                '-show_data_hash', 'sha256', '-of', 'json', path], timeout=30).stdout)['packets']
         return [[p['data_hash'] for p in data if p['stream_index'] == st] for st in [0, 1]]
     names = [] if '--remote-only' in sys.argv else ['remux-h264.mkv', 'remux-hevc.mkv', 'remux-variable.mp4']
     names += ['remote-remux-h264.mkv', 'remote-remux-hevc.mkv', 'remote-remux-variable.mp4', 'remote-remux-tail.mp4', 'remote-remux-video.mp4', 'remote-remux-large.mp4', 'remote-remux-offset-video.mp4']
+    if '--large-only' in sys.argv: names = ['remote-remux-large.mp4']
+    if '--fallback-only' in sys.argv: names = []
     for name in names:
         chunks = sorted((OUT / (name + '-cached')).glob('*.mp4'), key=lambda p: int(p.stem))
         copied = [[], []]

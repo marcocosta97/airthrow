@@ -41,7 +41,8 @@ public enum HTTPLoginFailure: Error {
 
 /// Each task owns an ephemeral session. Credentials are offered only to the exact
 /// origin, realm and authentication method that requested them; never to a proxy.
-/// The delegate queue is main, matching the delivery server's connection queue.
+/// A serial worker queue gates data delivery on downstream capacity. Merely
+/// suspending a URLSession task does not drain already queued delegate callbacks.
 @MainActor
 final class HTTPMediaTransfer: NSObject, URLSessionDataDelegate {
     private var session: URLSession?
@@ -63,7 +64,10 @@ final class HTTPMediaTransfer: NSObject, URLSessionDataDelegate {
         config.httpShouldSetCookies = false
         config.timeoutIntervalForRequest = 15
         config.timeoutIntervalForResource = 24 * 60 * 60
-        let session = URLSession(configuration: config, delegate: self, delegateQueue: .main)
+        let queue = OperationQueue()
+        queue.maxConcurrentOperationCount = 1
+        queue.qualityOfService = .utility
+        let session = URLSession(configuration: config, delegate: self, delegateQueue: queue)
         self.session = session
         task = session.dataTask(with: request)
     }
@@ -80,7 +84,7 @@ final class HTTPMediaTransfer: NSObject, URLSessionDataDelegate {
     nonisolated func urlSession(_ session: URLSession, task: URLSessionTask,
                                didReceive challenge: URLAuthenticationChallenge,
                                completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        MainActor.assumeIsolated {
+        Task { @MainActor in
             let space = challenge.protectionSpace
             if let login = HTTPLoginChallenge(space) {
                 self.challenge = login
@@ -99,31 +103,47 @@ final class HTTPMediaTransfer: NSObject, URLSessionDataDelegate {
                                completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
         // Redirects must authenticate again at their destination. Never follow
         // a TLS-to-cleartext downgrade or a URL carrying embedded credentials.
-        let source = MainActor.assumeIsolated { origin }
-        guard let old = response.url, let next = request.url,
-              ["http", "https"].contains(next.scheme?.lowercased() ?? ""),
-              next.user == nil, next.password == nil,
-              !(old.scheme == "https" && next.scheme != "https"),
-              RelayAddress.allows(next, from: source) else { completionHandler(nil); return }
-        var safe = request
-        // A redirect can also enter a different realm on the same origin.
-        safe.setValue(nil, forHTTPHeaderField: "Authorization")
-        completionHandler(safe)
+        Task { @MainActor in
+            let source = origin
+            guard let old = response.url, let next = request.url,
+                  ["http", "https"].contains(next.scheme?.lowercased() ?? ""),
+                  next.user == nil, next.password == nil,
+                  !(old.scheme == "https" && next.scheme != "https"),
+                  RelayAddress.allows(next, from: source) else { completionHandler(nil); return }
+            var safe = request
+            // A redirect can also enter a different realm on the same origin.
+            safe.setValue(nil, forHTTPHeaderField: "Authorization")
+            completionHandler(safe)
+        }
     }
 
     nonisolated func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
                                didReceive response: URLResponse,
                                completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void) {
-        MainActor.assumeIsolated {
+        Task { @MainActor in
             guard let http = response as? HTTPURLResponse else { completionHandler(.cancel); return }
             completionHandler(self.response?(http) == true ? .allow : .cancel)
         }
     }
     nonisolated func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        MainActor.assumeIsolated { self.data?(data) }
+        // Waiting happens only on this transfer's delegate worker, never on the
+        // main thread. At most one callback's data is handed to the main actor.
+        let delivered = DispatchSemaphore(value: 0)
+        Task { @MainActor [weak self] in
+            defer { delivered.signal() }
+            guard let self else { return }
+            for offset in stride(from: 0, to: data.count, by: 64 * 1024) {
+                while self.suspended, self.task != nil {
+                    try? await Task.sleep(for: .milliseconds(2))
+                }
+                guard self.task != nil, let receive = self.data else { return }
+                receive(data.subdata(in: offset..<min(data.count, offset + 64 * 1024)))
+            }
+        }
+        delivered.wait()
     }
     nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        MainActor.assumeIsolated {
+        Task { @MainActor in
             let callback = completed
             response = nil; data = nil; completed = nil
             self.task = nil; self.session = nil

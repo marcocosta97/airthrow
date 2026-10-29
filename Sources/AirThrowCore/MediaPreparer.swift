@@ -13,11 +13,11 @@ private func completionTolerance(for duration: Double) -> Double {
 /// shorter: container duration can include an audio tail, and ffmpeg stops at
 /// the video.
 enum ChunkOutputCheck {
-    static func accepts(produced: Double, requested: Double, final: Bool) -> Bool {
+    static func accepts(produced: Double, requested: Double, final: Bool, leadingPictureAllowance: Double = 0.15) -> Bool {
         guard produced.isFinite, requested.isFinite, produced > 0, requested > 0,
-              produced <= requested + 0.15 else { return false }
+              produced <= requested + leadingPictureAllowance else { return false }
         if final { return true }
-        return requested - produced < 0.15
+        return requested - produced < leadingPictureAllowance
     }
 }
 
@@ -78,6 +78,40 @@ public enum PreparationFailure: Error, Sendable, Equatable {
         case .delivery: .deliveryUnavailable
         }
     }
+}
+
+/// Per-load trace propagated through the existing async preparation scope.
+public final class PreparationDiagnosticRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var began = ContinuousClock.now
+    private var value = PreparationDiagnostics()
+    public init() {}
+    public var snapshot: PreparationDiagnostics {
+        lock.lock(); defer { lock.unlock() }
+        var result = value
+        if result.errorCode == nil && result.stage != .ready { result.phaseSeconds = began.duration(to: .now).timeInterval }
+        return result
+    }
+    public func update(_ change: (inout PreparationDiagnostics) -> Void) {
+        lock.lock(); defer { lock.unlock() }; change(&value)
+    }
+    public func mark(_ stage: PreparationDiagnostics.Stage) {
+        lock.lock(); defer { lock.unlock() }
+        began = .now
+        value.stage = stage; value.phaseSeconds = 0
+        value.errorCode = nil; value.failureReason = nil; value.helperExitCode = nil; value.helperFailure = nil
+    }
+    public func failed(_ error: Error) {
+        update {
+            if $0.errorCode == nil { $0.phaseSeconds = began.duration(to: .now).timeInterval }
+            $0.errorCode = (error as NSError).code
+            $0.failureReason = (error as? PreparationFailure)?.reason ?? (error as? ResolutionFailure)?.reason
+        }
+    }
+}
+public enum PreparationTrace {
+    @TaskLocal public static var current: PreparationDiagnosticRecorder?
+    static func mark(_ stage: PreparationDiagnostics.Stage) { current?.mark(stage) }
 }
 
 /// Held for the lifetime of the prepared AVPlayer item. Stopping closes delivery before deleting media.
@@ -623,8 +657,10 @@ public struct MediaPreparer: Sendable {
                 }
             }
             await prepared.retain(upstream)
+            PreparationTrace.mark(.ready)
             return prepared
         } catch {
+            PreparationTrace.current?.failed(error)
             await upstream.stop()
             throw error
         }
@@ -667,25 +703,48 @@ public struct MediaPreparer: Sendable {
             if let upstream = PreparationPrivacy.upstream {
                 source = try await upstream.localized(source)
             }
+            PreparationTrace.current?.update {
+                $0.remuxCache = preferences.remuxCache; $0.retainAll = preferences.retainAll
+                $0.maximumBytes = preferences.maximumBytes
+            }
+            PreparationTrace.mark(.sourceProbe)
             let videoInput = try await probe(source.url, headers: source.headers, executable: ffprobe,
                                              hls: allowHLSInput)
             let audioInput: Probe
             if let audio = source.audio {
+                PreparationTrace.mark(.audioProbe)
                 audioInput = try await probe(audio.url, headers: audio.headers, executable: ffprobe,
                                               hls: allowHLSInput)
             } else { audioInput = videoInput }
-            // Keep text subtitles as soft tracks in finite MP4 delivery. MPEG-TS
-            // EVENT output cannot carry these tracks as selectable renditions,
-            // so a finite request that has them uses the complete-file path.
+            // Complete-file delivery retains native MP4 subtitle tracks. The
+            // on-demand path publishes indexed Matroska text as WebVTT renditions.
             let subtitleInputs: [(input: Int, stream: Stream)] =
                 videoInput.streams.filter(\.supportedTextSubtitle).prefix(8).map { (0, $0) }
                 + (source.audio == nil ? [] : audioInput.streams.filter(\.supportedTextSubtitle)
                     .prefix(8).map { (1, $0) })
-            if !source.isLive && !subtitleInputs.isEmpty { mode = .completeFile }
+            let indexedSubtitleContainers = subtitleInputs.allSatisfy {
+                ($0.input == 0 ? videoInput : audioInput).format.format_name == "matroska,webm"
+            }
+            if !source.isLive && !subtitleInputs.isEmpty
+                && (!preferences.remuxCache || preferences.retainAll || !indexedSubtitleContainers) { mode = .completeFile }
             let subtitleTracks = source.isLive ? [] : Array(subtitleInputs.prefix(8))
             let videoForProcessing = videoInput.streams.first(where: { $0.copyableVideo })
                 ?? videoInput.streams.first(where: { $0.convertibleVideo })
                 ?? videoInput.streams.first(where: { $0.codec_type == "video" && $0.disposition?.attached_pic != 1 })
+            PreparationTrace.current?.update {
+                $0.videoCodec = videoForProcessing?.codec_name.map { PreparationDiagnostics.Codec(rawValue: $0) ?? .other }
+                $0.audioCodec = audioInput.streams.first(where: { $0.codec_type == "audio" })?.codec_name.map { PreparationDiagnostics.Codec(rawValue: $0) ?? .other }
+                $0.width = videoForProcessing?.width; $0.height = videoForProcessing?.height
+                $0.frameRate = videoForProcessing?.frameRate.flatMap { $0.isFinite ? $0 : nil }
+                let pixel = videoForProcessing?.pix_fmt ?? ""
+                $0.videoBitDepth = pixel.contains("10") ? 10 : pixel.contains("12") ? 12 : ["yuv420p", "nv12"].contains(pixel) ? 8 : nil
+                $0.dolbyVisionProfile = videoForProcessing?.side_data_list?.compactMap(\.dv_profile).first
+                let audio = audioInput.streams.first(where: { $0.codec_type == "audio" })
+                $0.audioChannels = audio?.channels; $0.audioSampleRate = Int(audio?.sample_rate ?? "")
+                if let duration = Double(videoInput.format.duration ?? ""), duration.isFinite, duration > 0 { $0.sourceDuration = duration }
+                $0.sourceBytes = Int64(videoInput.format.size ?? ""); $0.subtitleCount = subtitleTracks.count
+            }
+            PreparationTrace.mark(.planning)
             let noiseReduction: CleanupNoiseReduction
             if preferences.noiseReduction == .automatic {
                 if #available(macOS 26, *), videoForProcessing.map(Self.nativeGPUInput) == true, subtitleTracks.isEmpty {
@@ -699,7 +758,7 @@ public struct MediaPreparer: Sendable {
             }
             let usesAppleProcessing = source.upscaler.isAI && source.enhancement != .original
                 || source.enhancement.cleansUp && noiseReduction != .ffmpeg
-            if usesAppleProcessing && preferences.aiBeforePlayback { mode = .completeFile }
+            if usesAppleProcessing && (preferences.aiBeforePlayback || !subtitleInputs.isEmpty) { mode = .completeFile }
             // The inspect step copies HDR10/HLG and compatible Dolby Vision Main
             // 10 video unmodified at Original quality; it rejects encrypted,
             // attached-picture and unknown tracks, refuses HDR/Dolby Vision for
@@ -712,6 +771,8 @@ public struct MediaPreparer: Sendable {
                                      separateAudio: source.audio != nil, policy: source.conversionPolicy,
                                      enhancement: source.enhancement, appleProcessing: usesAppleProcessing,
                                      preserveSurround: !usesAppleProcessing)
+            PreparationTrace.current?.update { $0.playbackPath = plan.path }
+            if plan.videoAction == .convert && !subtitleTracks.isEmpty { mode = .completeFile }
             let videoDuration = source.isLive ? nil : try videoInput.finiteDuration
             let audioDuration = source.isLive ? nil : try audioInput.finiteDuration
             if let videoDuration, let audioDuration, abs(videoDuration - audioDuration) > 2 {
@@ -727,16 +788,19 @@ public struct MediaPreparer: Sendable {
             if bounded { bounded = try await Self.supportsRandomAccess(source.url, headers: source.headers) }
             if bounded, let audio = source.audio { bounded = try await Self.supportsRandomAccess(audio.url, headers: audio.headers) }
             var remuxTimeline: RemuxTimeline?
+            var remuxIndexFailure: RemuxIndexFailure?
             if mode == .progressiveHLS, !source.isLive, !preferences.retainAll, preferences.remuxCache,
-               plan.videoAction == .copy, plan.audioAction == .copy,
-               plan.audio.codec_name == "aac",
+               plan.videoAction == .copy,
                ["h264", "hevc"].contains(plan.video.codec_name ?? ""),
                ["mov,mp4,m4a,3gp,3g2,mj2", "matroska,webm"].contains(videoInput.format.format_name ?? "") {
                 do {
+                    PreparationTrace.mark(.index)
                     var randomAudio = true
                     if let audio = source.audio { randomAudio = try await Self.supportsRandomAccess(audio.url, headers: audio.headers) }
                     if randomAudio {
-                        if source.url.isFileURL {
+                        let localVolume = source.url.isFileURL
+                            && (try? source.url.resourceValues(forKeys: [.volumeIsLocalKey]).volumeIsLocal) == true
+                        if localVolume {
                             let arguments = ["-v", "error"] + (try Self.inputArguments(url: source.url, headers: [:]))
                                 + ["-select_streams", String(plan.video.index), "-show_packets", "-show_entries",
                                    "packet=pts,dts,flags,pos,size", "-of", "compact=p=0"]
@@ -751,6 +815,8 @@ public struct MediaPreparer: Sendable {
                                 duration: videoDuration!, matroska: videoInput.format.format_name == "matroska,webm",
                                 reorderDelay: (plan.video.has_b_frames ?? 0) > 0)
                         } else {
+                            // Mounted SMB is a file URL too: use its container
+                            // index instead of scanning every packet over the NAS.
                             remuxTimeline = try await RemoteRemuxIndex.timeline(url: source.url, headers: source.headers,
                                 stream: plan.video.index, codec: plan.video.codec_name!, videoTimeBase: plan.video.time_base,
                                 audioTimeBase: plan.audio.time_base, sourceStart: Double(videoInput.format.start_time ?? "") ?? 0,
@@ -763,15 +829,20 @@ public struct MediaPreparer: Sendable {
                         remuxTimeline?.audioOffset = audioOffset
                     }
                 } catch is CancellationError { throw CancellationError() }
+                catch let error as URLError {
+                    try Task.checkCancellation()
+                    throw AppFailure(.playbackFailed, "Could not read the remote media index (network error \(error.code.rawValue)). Check the connection and load the video again.")
+                }
+                catch let failure as RemuxIndexFailure {
+                    try Task.checkCancellation(); remuxIndexFailure = failure; remuxTimeline = nil
+                }
                 catch { try Task.checkCancellation(); remuxTimeline = nil } // Unsupported indexes retain sequential remux.
             }
             bounded = bounded || remuxTimeline != nil
-            // AC-3/E-AC-3 is copied into its own HLS rendition beside an AAC
-            // stereo fallback. The demand cache publishes a single media
-            // playlist, so that pair stays on one sequential HLS output.
-            if plan.stereoFallback != nil {
-                bounded = false
-                remuxTimeline = nil
+            if plan.stereoFallback != nil && remuxTimeline == nil { bounded = false }
+            if !subtitleTracks.isEmpty && mode == .progressiveHLS && !bounded {
+                let reason = remuxIndexFailure?.message ?? "Incremental remux does not support this container's seek layout."
+                throw AppFailure(.unsupportedOperation, reason + " No complete-file preparation was started.")
             }
             let videoBytes = Int64(videoInput.format.size ?? "") ?? 0
             let audioBytes = source.audio == nil ? 0 : (Int64(audioInput.format.size ?? "") ?? 0)
@@ -843,7 +914,12 @@ public struct MediaPreparer: Sendable {
                     arguments += try Self.inputArguments(url: audio.url, headers: audio.headers,
                                                          hls: allowHLSInput)
                 }
-                arguments += ["-map", "0:\(plan.video.index)"] + Self.audioMaps(plan)
+                let separateDecodedAudio = alignRemux && remuxTimeline != nil && plan.audioAction == .convert && source.audio == nil
+                if separateDecodedAudio {
+                    arguments += try Self.inputArguments(url: source.url, headers: source.headers, hls: allowHLSInput)
+                }
+                arguments += ["-map", "0:\(plan.video.index)"]
+                    + (separateDecodedAudio ? ["-map", "1:\(plan.audio.index)"] : Self.audioMaps(plan))
                 if mode == .completeFile {
                     for subtitle in subtitleTracks {
                         arguments += ["-map", "\(subtitle.input):\(subtitle.stream.index)"]
@@ -884,11 +960,8 @@ public struct MediaPreparer: Sendable {
                                                     precise: plan.videoAction == .convert, alignRemux: true),
                                                 executable: ffmpeg, host: host, duration: videoDuration!,
                                                 plan: plan, ffprobe: ffprobe, startPosition: source.preparationPosition,
-                                                remuxTimeline: remuxTimeline,
-                                                remuxProbe: remuxTimeline?.inspectBoundaries == true
-                                                    ? (["-v", "error"] + (try Self.inputArguments(url: source.url, headers: source.headers))
-                                                        + ["-select_streams", String(plan.video.index), "-show_packets", "-show_entries",
-                                                           "packet=pts,dts", "-of", "compact=p=0"]) : nil)
+                                                source: source, subtitles: subtitleTracks,
+                                                remuxTimeline: remuxTimeline)
                     } catch {
                         // Retry copy in the original delivery mode only before
                         // handing off a URL. Cancellation/quota/disk failures
@@ -897,13 +970,14 @@ public struct MediaPreparer: Sendable {
                         if let failure = error as? PreparationFailure {
                             canFallBack = [.failed, .unsupported, .stalled].contains(failure)
                         } else if case ResolutionFailure.failed = error { canFallBack = true }
-                        guard remuxTimeline != nil, canFallBack else { throw error }
+                        guard remuxTimeline != nil, canFallBack, subtitleTracks.isEmpty, plan.audioAction == .copy, plan.stereoFallback == nil else { throw error }
                         try Task.checkCancellation()
                         try validateSequentialCopySize()
                     }
                 }
                 let arguments = try conversionArguments(encoder: encoder, hardwareFrames: hardwareFrames)
                 if source.isLive {
+                    PreparationTrace.mark(.liveMux)
                     return try await live(workspace: workspace, arguments: arguments, executable: ffmpeg,
                                           host: host, playbackPath: plan.path, plan: plan,
                                           maximumBytes: liveLimit, ffprobe: ffprobe,
@@ -911,6 +985,7 @@ public struct MediaPreparer: Sendable {
                 }
                 if mode == .progressiveHLS {
                     do {
+                        PreparationTrace.mark(.progressiveMux)
                         return try await progressive(workspace: workspace, arguments: arguments, executable: ffmpeg,
                                                      host: host, duration: videoDuration!, playbackPath: plan.path,
                                                      plan: plan, ffprobe: ffprobe)
@@ -924,6 +999,7 @@ public struct MediaPreparer: Sendable {
                     }
                 }
                 // -n never overwrites, so clear a partial output from a prior attempt.
+                PreparationTrace.mark(.completeMux)
                 var attempt = 0
                 while true {
                     try? FileManager.default.removeItem(at: output)
@@ -994,6 +1070,7 @@ public struct MediaPreparer: Sendable {
             }
         } catch is CancellationError { throw CancellationError() }
         catch let error as AppFailure { throw error }
+        catch let error as RemuxIndexFailure { throw AppFailure(.playbackFailed, error.message) }
         catch let error as PreparationFailure { throw error }
         catch ResolutionFailure.timedOut { throw PreparationFailure.limit }
         catch { throw PreparationFailure.failed }
@@ -1098,7 +1175,9 @@ public struct MediaPreparer: Sendable {
                 let cache = try await CachedHLS(workspace: workspace, duration: duration, fragmented: plan.fragmentedHLS, preferences: preferences) { index, start, length, directory in
                     try await piece(index: index, start: start, length: length, directory: directory, hls: true)
                     let initialization = String(format: "init%06d.mp4", index)
+                    PreparationTrace.mark(.chunkManifest)
                     let manifest = try HLSPlaylist(directory: directory, name: "part.m3u8", initialization: initialization)
+                    PreparationTrace.current?.update { $0.producedSeconds = manifest.duration.isFinite ? manifest.duration : nil }
                     guard manifest.complete, manifest.count == 1, abs(manifest.duration - length) < 0.15,
                           let segment = manifest.segments.first else { throw PreparationFailure.failed }
                     let probe = try await self.probeSegment(segment, directory: directory, fragmented: plan.fragmentedHLS,
@@ -1288,27 +1367,103 @@ public struct MediaPreparer: Sendable {
     private func cached(workspace: PreparationWorkspace, arguments: [String], executable: String,
                         host: String, duration: Double, plan: PreparationPlan, ffprobe: String,
                         startPosition: Double? = nil,
-                        remuxTimeline: RemuxTimeline? = nil, remuxProbe: [String]? = nil) async throws -> PreparedMedia {
-        let fragmented = remuxTimeline != nil || plan.fragmentedHLS
+                        source: ResolvedSource? = nil, subtitles: [(input: Int, stream: Stream)] = [],
+                        remuxTimeline: RemuxTimeline? = nil) async throws -> PreparedMedia {
+        let fragmented = remuxTimeline != nil || plan.fragmentedHLS || plan.stereoFallback != nil
+        var subtitleSources: [(RemoteRemuxIndex.SubtitleIndex, Int)] = []
+        for input in [0, 1] {
+            let selected = subtitles.filter { $0.input == input }
+            guard !selected.isEmpty else { continue }
+            guard let source else { throw PreparationFailure.unsupported }
+            let url = input == 0 ? source.url : source.audio!.url
+            let headers = input == 0 ? source.headers : source.audio!.headers
+            do {
+                PreparationTrace.mark(.subtitleIndex)
+                let index = try await RemoteRemuxIndex.subtitles(url: url, headers: headers, streams: selected.map { $0.stream.index })
+                subtitleSources += selected.indices.map { (index, $0) }
+            } catch is CancellationError { throw CancellationError() }
+            catch let error as URLError {
+                try Task.checkCancellation()
+                throw AppFailure(.playbackFailed, "Could not read the remote subtitle index (network error \(error.code.rawValue)). Check the connection and load the video again.")
+            }
+            catch {
+                throw AppFailure(.unsupportedOperation, "The subtitle track has no usable Matroska seek index. Incremental playback cannot preserve it safely; no complete-file download was started.")
+            }
+        }
+        let trace = PreparationTrace.current
+        let indexedSubtitles = subtitleSources
+        let continuousRenditions = !subtitles.isEmpty || plan.stereoFallback != nil
+            || ["h264", "hevc"].contains(plan.video.codec_name ?? "")
+        var renditions = subtitles.enumerated().map { index, subtitle in
+            CachedHLS.Rendition(prefix: "subtitle\(index)", label: subtitle.stream.tags?.title ?? subtitle.stream.tags?.language ?? "Subtitles \(index + 1)", language: subtitle.stream.tags?.language, subtitle: true)
+        }
+        if plan.stereoFallback != nil {
+            renditions.append(.init(prefix: "audio0", label: "AAC Stereo", language: plan.audio.tags?.language, subtitle: false))
+        }
         let cache = try await CachedHLS(workspace: workspace, duration: duration, fragmented: fragmented,
-                                      preferences: preferences, starts: remuxTimeline?.starts) { index, start, length, directory in
+                                      preferences: preferences, starts: remuxTimeline?.starts, renditions: renditions,
+                                      continuous: continuousRenditions && remuxTimeline != nil) { index, start, length, directory in
+            return try await PreparationTrace.$current.withValue(trace) {
+            trace?.update {
+                $0.chunkIndex = index; $0.requestedSeconds = length; $0.producedSeconds = nil
+                $0.videoCurrentDTS = nil; $0.videoNextDTS = nil; $0.videoTimeBase = nil
+                $0.fragmentTracks = nil; $0.initializationBytes = nil; $0.segmentBytes = nil; $0.inspectionBytes = nil
+            }
+            trace?.mark(.chunkBoundaryProbe)
             var chunk = arguments
-            if let remuxTimeline {
-                var boundaries: (Int64?, Int64?)?
-                if let remuxProbe {
-                    do {
-                        let packets = try await HelperProcess.run(executable: ffprobe,
-                            arguments: remuxProbe + ["-read_intervals", remuxTimeline.boundaryInterval(index: index, duration: duration)],
-                            timeout: .seconds(20), outputLimit: 1024 * 1024)
-                        boundaries = try remuxTimeline.boundaries(packets, index: index)
-                    } catch ResolutionFailure.timedOut { throw PreparationFailure.stalled }
+            var leadingPictureAllowance = plan.video.codec_name == "hevc"
+                ? remuxTimeline?.presentationReorderAllowance ?? 0.15 : 0.15
+            // The main rendition keeps original Dolby; its AAC alternative is
+            // a separately selectable rendition generated under the same lease.
+            if let fallback = plan.stereoFallback {
+                let mapping = "\(plan.audioInput):\(fallback.index)"
+                if let map = chunk.indices.reversed().first(where: { chunk[$0] == "-map" && $0 + 1 < chunk.count && chunk[$0 + 1] == mapping }) {
+                    chunk.removeSubrange(map...map + 1)
                 }
-                let trim = remuxTimeline.arguments(index: index, length: length, boundaries: boundaries)
+                for flag in ["-c:a:1", "-ac:a:1", "-ar:a:1", "-b:a:1"] {
+                    if let at = chunk.firstIndex(of: flag) { chunk.removeSubrange(at...at + 1) }
+                }
+            }
+            if let remuxTimeline {
+                if plan.videoAction == .copy, plan.video.codec_name == "hevc" {
+                    // Rebuild MP4's HEVC configuration from explicit Annex B
+                    // framing before writing independent hvc1 initializations.
+                    if let at = chunk.firstIndex(of: "-bsf:v") {
+                        chunk[at + 1] += ",hevc_mp4toannexb"
+                    } else {
+                        chunk += ["-bsf:v", "hevc_mp4toannexb"]
+                    }
+                }
+                try await remuxTimeline.remoteValidation?.validate(index: index)
+                trace?.update {
+                    $0.videoCurrentDTS = remuxTimeline.cuts[index].dts
+                    $0.videoNextDTS = index + 1 < remuxTimeline.cuts.count ? remuxTimeline.cuts[index + 1].dts : nil
+                    $0.videoTimeBase = remuxTimeline.videoTimeBase
+                }
+                let trim = remuxTimeline.arguments(index: index, length: length)
                 let inputs = chunk.indices.filter { chunk[$0] == "-i" }
                 for (nth, offset) in inputs.enumerated().reversed() {
                     chunk.insert(contentsOf: nth == 0 ? trim.input : trim.audio, at: offset)
                 }
-                chunk += trim.output
+                var output = trim.output
+                if continuousRenditions, let offset = output.firstIndex(of: "-output_ts_offset") {
+                    // All renditions share one monotonic media clock. Restarted
+                    // zero clocks make native alternate-audio seeks ambiguous.
+                    let firstPTS = Double(remuxTimeline.cuts[0].pts) * remuxTimeline.videoTimeBase
+                    output[offset + 1] = MediaClock.seconds(10 - firstPTS)
+                }
+                if plan.audioAction == .convert {
+                    if let at = output.firstIndex(of: "-bsf:a") { output.removeSubrange(at...at + 1) }
+                    let origin = Double(remuxTimeline.cuts[index].pts) * remuxTimeline.videoTimeBase
+                    output += ["-af", "atrim=start=\(MediaClock.seconds(origin)):end=\(MediaClock.seconds(origin + length)),asetpts=PTS-STARTPTS+\(MediaClock.seconds(origin))/TB"]
+                }
+                if let incoming = output.firstIndex(of: "-bsf:v"), let existing = chunk.firstIndex(of: "-bsf:v") {
+                    // FFmpeg keeps only the last -bsf:v option. Keep packet
+                    // trimming in the same chain as HEVC framing/DV handling.
+                    chunk[existing + 1] += "," + output[incoming + 1]
+                    output.removeSubrange(incoming...incoming + 1)
+                }
+                chunk += output
             } else {
                 // Apply accurate input seeking to video and separately selected audio.
                 for offset in chunk.indices.reversed() where chunk[offset] == "-i" {
@@ -1318,23 +1473,115 @@ public struct MediaPreparer: Sendable {
                 chunk += ["-af", "asetpts=PTS-STARTPTS,apad", "-t", MediaClock.seconds(length)]
             }
             let initialization = fragmented ? String(format: "init%06d.mp4", index) : "init.mp4"
+            if remuxTimeline != nil, continuousRenditions {
+                // Preserve absolute tfdt timestamps in each independent muxing
+                // job. Edit-list offsets alone look correct to ffprobe but
+                // reset AVPlayer's buffered timeline at every fragment.
+                chunk += ["-hls_segment_options", "use_editlist=0:movflags=+frag_discont:avoid_negative_ts=disabled"]
+            }
             chunk += ["-f", "hls", "-hls_segment_type", fragmented ? "fmp4" : "mpegts",
                       "-hls_time", "86400", "-hls_playlist_type", "vod", "-hls_flags", "temp_file",
                       "-start_number", String(index)]
                 + Self.hlsSegmentFiles(in: directory, fragmented: fragmented, initialization: initialization)
                 + [directory.appendingPathComponent("part.m3u8").path]
+            trace?.mark(.chunkMux)
             do {
                 _ = try await HelperProcess.run(executable: executable, arguments: chunk,
                                                 timeout: index == 0 ? startupTimeout : timeout, outputLimit: 64 * 1024,
                                                 monitor: { try workspace.checkSize(maximumBytes) })
             } catch ResolutionFailure.timedOut { throw PreparationFailure.stalled }
+            trace?.mark(.chunkManifest)
             let manifest = try HLSPlaylist(directory: directory, name: "part.m3u8", initialization: initialization)
+            trace?.update { $0.producedSeconds = manifest.duration.isFinite ? manifest.duration : nil }
+            // CRA leading pictures belong to the following decode interval,
+            // but precede its keyframe in presentation order. Keep all packets;
+            // a continuous decoder presents them across the HLS boundary.
             guard manifest.complete, manifest.count == 1,
-                  ChunkOutputCheck.accepts(produced: manifest.duration, requested: length,
-                                           final: start + length >= duration - 0.001),
                   let segment = manifest.segments.first else { throw PreparationFailure.failed }
-            return try await inspectConverted(segment, directory: directory, fragmented: fragmented,
-                                              executable: ffprobe, initialization: initialization, plan: plan)
+            trace?.mark(.chunkProbe)
+            let inspectedProbe = try await probeSegment(segment, directory: directory, fragmented: fragmented,
+                                              executable: ffprobe, initialization: initialization,
+                                              inspectClocks: remuxTimeline != nil)
+            if remuxTimeline != nil {
+                leadingPictureAllowance = max(leadingPictureAllowance,
+                    RemuxTimeline.reorderAllowance(delay: inspectedProbe.videoReorderDelay))
+            }
+            trace?.mark(.chunkValidation)
+            guard ChunkOutputCheck.accepts(produced: manifest.duration, requested: length,
+                                          final: start + length >= duration - 0.001,
+                                          leadingPictureAllowance: leadingPictureAllowance) else { throw PreparationFailure.failed }
+            try Self.validateConverted(inspectedProbe, plan: plan)
+            let inspectedVideo = inspectedProbe.streams.first { $0.codec_type == "video" }
+            let inspected = (height: inspectedVideo?.height, frameRate: inspectedVideo?.frameRate)
+            let videoPTS = Double(inspectedVideo?.start_time ?? "") ?? 0
+            guard videoPTS.isFinite, videoPTS >= 0, videoPTS < duration + 60 else { throw PreparationFailure.failed }
+            if let source, let fallback = plan.stereoFallback {
+                trace?.mark(.fallbackAudioMux)
+                let input = source.audio?.url ?? source.url
+                let headers = source.audio?.headers ?? source.headers
+                let initName = String(format: "audio0-init%06d.mp4", index)
+                let continuousAAC = remuxTimeline != nil && plan.stereoFallbackAction == .convert
+                let frameSamples = 1024.0, sampleRate = 48_000.0
+                func audioEdge(_ seconds: Double) -> Int64 {
+                    Int64(max(0, ceil(seconds * sampleRate / frameSamples - 1e-7))) * 1024
+                }
+                let firstSample = audioEdge(start), endSample = audioEdge(start + length)
+                let decodeSample = max(0, firstSample - 4096)
+                let videoOrigin = remuxTimeline.map { Double($0.cuts[0].pts) * $0.videoTimeBase } ?? 0
+                let inputOffset = remuxTimeline.map { videoOrigin - $0.sourceStart } ?? 0
+                var audio = ["-v", "error", "-nostdin", "-n"]
+                if continuousAAC {
+                    audio += ["-copyts", "-ss", MediaClock.seconds(max(0, Double(decodeSample) / sampleRate + inputOffset)),
+                              "-t", MediaClock.seconds(Double(endSample + 2048 - decodeSample) / sampleRate)]
+                } else {
+                    audio += ["-ss", MediaClock.seconds(start)]
+                }
+                audio += (try Self.inputArguments(url: input, headers: headers))
+                    + ["-map", "0:\(fallback.index)", "-vn", "-sn", "-dn"]
+                audio += Self.audioArguments(stream: fallback, action: plan.stereoFallbackAction ?? .convert)
+                if continuousAAC {
+                    // Encode with preceding PCM context, then keep whole AAC
+                    // frames on one sample clock. Independent encoder priming
+                    // must not overlap the previous fragment at each boundary.
+                    let audioOffset = source.audio == nil ? 0 : remuxTimeline?.audioOffset ?? 0
+                    audio += ["-af", "asetpts=PTS-\(MediaClock.seconds(videoOrigin))/TB+\(MediaClock.seconds(audioOffset))/TB,aresample=48000:first_pts=\(decodeSample),apad=pad_len=2048",
+                              "-bsf:a", "noise=amount=0:drop='lt(pts,\(firstSample))+gte(pts,\(endSample))'"]
+                }
+                if remuxTimeline != nil {
+                    audio += ["-hls_segment_options", "use_editlist=0:movflags=+frag_discont:avoid_negative_ts=disabled"]
+                }
+                if !continuousAAC { audio += ["-t", MediaClock.seconds(length)] }
+                audio += ["-avoid_negative_ts", "disabled", "-output_ts_offset", MediaClock.seconds(continuousAAC ? 10 : videoPTS), "-f", "hls", "-hls_segment_type", "fmp4", "-hls_time", "86400",
+                          "-hls_playlist_type", "vod", "-hls_fmp4_init_filename", initName,
+                          "-hls_segment_filename", directory.appendingPathComponent("audio0-segment%06d.m4s").path,
+                          "-start_number", String(index), directory.appendingPathComponent("audio0-part.m3u8").path]
+                _ = try await HelperProcess.run(executable: executable, arguments: audio, timeout: timeout,
+                    outputLimit: 4096, monitor: { try workspace.checkSize(maximumBytes) })
+            }
+            let origin = remuxTimeline.map { Double($0.cuts[index].pts) * $0.videoTimeBase } ?? start
+            for (track, entry) in indexedSubtitles.enumerated() {
+                trace?.mark(.subtitleRead)
+                let file = directory.appendingPathComponent("subtitle\(track)-input.mkv")
+                let output = directory.appendingPathComponent(String(format: "subtitle%d-segment%06d.vtt", track, index))
+                if let data = try await entry.0.fragment(track: entry.1, start: origin, end: origin + length) {
+                    try data.write(to: file)
+                    try workspace.checkSize(maximumBytes)
+                    defer { try? FileManager.default.removeItem(at: file) }
+                    trace?.mark(.subtitleMux)
+                    _ = try await HelperProcess.run(executable: executable,
+                        arguments: ["-v", "error", "-nostdin", "-n", "-copyts", "-i", file.path, "-map", "0:s:0", "-c:s", "webvtt", output.path],
+                        timeout: timeout, outputLimit: 4096, monitor: { try workspace.checkSize(maximumBytes) })
+                } else { try Data("WEBVTT\n\n".utf8).write(to: output) }
+                let text = try String(contentsOf: output, encoding: .utf8)
+                guard text.hasPrefix("WEBVTT\n") else { throw PreparationFailure.failed }
+                let millis = Int64((max(0, origin) * 1000).rounded())
+                let stamp = String(format: "%02lld:%02lld:%02lld.%03lld", millis / 3_600_000, millis / 60_000 % 60, millis / 1000 % 60, millis % 1000)
+                let mapped = "WEBVTT\nX-TIMESTAMP-MAP=LOCAL:\(stamp),MPEGTS:\(Int64((videoPTS * 90_000).rounded()))\n" + text.dropFirst(7)
+                try Data(mapped.utf8).write(to: output, options: .atomic)
+            }
+            // CachedHLS prunes released chunks before checking the shared quota.
+            return inspected
+            }
         }
         return try await publish(cache: cache, workspace: workspace, host: host, duration: duration, plan: plan, startPosition: startPosition)
     }
@@ -1768,16 +2015,75 @@ public struct MediaPreparer: Sendable {
     }
 
     private func probeSegment(_ name: String, directory: URL, fragmented: Bool, executable: String,
-                              initialization: String = "init.mp4") async throws -> Probe {
+                              initialization: String = "init.mp4", inspectClocks: Bool = false) async throws -> Probe {
         let inspected = directory.appendingPathComponent(fragmented ? "inspection.mp4" : name)
         defer { if fragmented { try? FileManager.default.removeItem(at: inspected) } }
         if fragmented {
             // A fragment needs its initialization section to be inspected.
             // This private file is never served, even while being written.
-            try Self.joinFragment(initialization: directory.appendingPathComponent(initialization),
-                                  segment: directory.appendingPathComponent(name), to: inspected)
+            let initURL = directory.appendingPathComponent(initialization)
+            let segmentURL = directory.appendingPathComponent(name)
+            try Self.joinFragment(initialization: initURL, segment: segmentURL, to: inspected)
+            func bytes(_ file: URL) -> Int64? {
+                (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.int64Value
+            }
+            PreparationTrace.current?.update {
+                $0.initializationBytes = bytes(initURL); $0.segmentBytes = bytes(segmentURL); $0.inspectionBytes = bytes(inspected)
+                $0.fragmentTracks = try? Self.fragmentTrackSummary(segmentURL)
+            }
         }
-        return try await probe(inspected, headers: [:], executable: executable, local: true, mpegts: !fragmented)
+        return try await probe(inspected, headers: [:], executable: executable, local: true,
+                               mpegts: !fragmented, inspectClocks: inspectClocks)
+    }
+
+    /// Read only bounded fMP4 box headers and numeric fragment tables. Skip
+    /// mdat payloads and all descriptive/container metadata.
+    private static func fragmentTrackSummary(_ url: URL) throws -> [PreparationDiagnostics.FragmentTrack] {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let end = Int64(try handle.seekToEnd())
+        func number(_ offset: Int64, _ count: Int) throws -> UInt64 {
+            guard count <= 8, offset >= 0, offset <= end - Int64(count) else { throw PreparationFailure.failed }
+            try handle.seek(toOffset: UInt64(offset))
+            let data = try handle.read(upToCount: count) ?? Data()
+            guard data.count == count else { throw PreparationFailure.failed }
+            return data.reduce(0) { $0 << 8 | UInt64($1) }
+        }
+        struct Box { let kind: UInt64; let start: Int64; let end: Int64 }
+        var budget = 512
+        func boxes(_ start: Int64, _ limit: Int64) throws -> [Box] {
+            var at = start, result: [Box] = []
+            while at < limit {
+                guard budget > 0, at <= limit - 8 else { throw PreparationFailure.failed }
+                budget -= 1
+                var size = try number(at, 4); let kind = try number(at + 4, 4)
+                var header: Int64 = 8
+                if size == 1 { size = try number(at + 8, 8); header = 16 }
+                if size == 0 { size = UInt64(limit - at) }
+                guard size >= UInt64(header), size <= UInt64(limit - at) else { throw PreparationFailure.failed }
+                result.append(Box(kind: kind, start: at + header, end: at + Int64(size)))
+                at += Int64(size)
+            }
+            return result
+        }
+        var result: [PreparationDiagnostics.FragmentTrack] = []
+        for moof in try boxes(0, end) where moof.kind == 0x6d6f6f66 {
+            for traf in try boxes(moof.start, moof.end) where traf.kind == 0x74726166 {
+                let children = try boxes(traf.start, traf.end)
+                guard let tfhd = children.first(where: { $0.kind == 0x74666864 }), tfhd.end - tfhd.start >= 8 else { continue }
+                let id = UInt32(try number(tfhd.start + 4, 4))
+                var samples: UInt64 = 0, time: UInt64?
+                for box in children {
+                    if box.kind == 0x7472756e, box.end - box.start >= 8 { samples += try number(box.start + 4, 4) }
+                    if box.kind == 0x74666474, box.end - box.start >= 8 {
+                        let version = try number(box.start, 1)
+                        time = try number(box.start + 4, version == 1 ? 8 : 4)
+                    }
+                }
+                result.append(.init(id: id, samples: samples, decodeTime: time))
+            }
+        }
+        return result
     }
 
     /// Bound memory even when copied HEVC has unusually long GOPs/segments.
@@ -2109,7 +2415,7 @@ public struct MediaPreparer: Sendable {
     }
 
     private func probe(_ url: URL, headers: [String: String], executable: String, local: Bool = false,
-                       mpegts: Bool = false, hls: Bool = false) async throws -> Probe {
+                       mpegts: Bool = false, hls: Bool = false, inspectClocks: Bool = false) async throws -> Probe {
         let isLocal = local || url.isFileURL
         if isLocal { _ = try MediaInput.localFile(url) }
         else { _ = try MediaInput.url(url.absoluteString) }
@@ -2124,7 +2430,8 @@ public struct MediaPreparer: Sendable {
             options = try Self.inputOptions(headers: headers, hls: hls)
         }
         let arguments = ["-v", "error"] + options + ["-show_entries",
-            "format=duration,size,format_name,start_time:stream=time_base,index,codec_type,codec_name,has_b_frames,codec_tag_string,pix_fmt,width,height,profile,channels,sample_rate,color_range,color_transfer,color_primaries,color_space,avg_frame_rate,r_frame_rate,field_order,sample_aspect_ratio:stream_disposition=attached_pic:stream_side_data:stream_tags=language,title",
+            "format=duration,size,format_name,start_time:stream=time_base,start_time,index,codec_type,codec_name,has_b_frames,codec_tag_string,pix_fmt,width,height,profile,channels,sample_rate,color_range,color_transfer,color_primaries,color_space,avg_frame_rate,r_frame_rate,field_order,sample_aspect_ratio:stream_disposition=attached_pic:stream_side_data:stream_tags=language,title"
+                + (inspectClocks ? ":packet=stream_index,pts,dts" : ""),
             "-of", "json", "-i", isLocal ? url.path : url.absoluteString]
         let data = try await runProbe(executable: executable, arguments: arguments,
                                       timeout: .seconds(mpegts ? 8 : 40), retry: !isLocal)
@@ -2153,6 +2460,16 @@ public struct MediaPreparer: Sendable {
     private struct Probe: Decodable {
         let streams: [Stream]
         let format: Format
+        let packets: [Packet]?
+        struct Packet: Decodable { let stream_index: Int; let pts: Int64?; let dts: Int64? }
+        var videoReorderDelay: Double {
+            guard let video = streams.first(where: { $0.codec_type == "video" }),
+                  let timeBase = try? RemuxTimeline.timeBase(video.time_base) else { return 0 }
+            return (packets ?? []).filter { $0.stream_index == video.index }.reduce(0) { delay, packet in
+                guard let pts = packet.pts, let dts = packet.dts else { return delay }
+                return max(delay, (Double(pts) - Double(dts)) * timeBase)
+            }
+        }
         struct Format: Decodable { let duration: String?; let size: String?; let format_name: String?; let start_time: String? }
         var finiteDuration: Double {
             get throws {
@@ -2275,6 +2592,7 @@ public struct MediaPreparer: Sendable {
     }
 
     private struct Stream: Decodable {
+        let start_time: String?
         let index: Int
         let time_base: String?
         let codec_type: String?
@@ -2313,6 +2631,7 @@ public struct MediaPreparer: Sendable {
         /// stream's display rotation side data.
         struct SideData: Decodable {
             let side_data_type: String?
+            let dv_profile: Int?
             let bl_present_flag: Int?
             let el_present_flag: Int?
             let dv_bl_signal_compatibility_id: Int?

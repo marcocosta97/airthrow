@@ -21,20 +21,28 @@ struct PreparationPacing {
     }
 }
 
-/// A finite VOD timeline backed by regenerable, independently decodable chunks.
-/// Player requests, rather than an unbounded encoder, drive production. Chunk
-/// discontinuities keep independently restarted encoders' timestamps explicit.
+/// A finite VOD timeline backed by regenerable chunks. Player requests drive
+/// production; copy-remux recovery points can share a continuous decoder clock.
+/// Independently restarted encoders retain explicit chunk discontinuities.
 @MainActor
 final class CachedHLS {
     static let chunkSeconds = 6.0
     let workspace: PreparationWorkspace
     let duration: Double
     let fragmented: Bool
+    struct Rendition: Sendable {
+        let prefix: String
+        let label: String
+        let language: String?
+        let subtitle: Bool
+    }
+    private let renditions: [Rendition]
     private let maximumBytes: Int64
     private let windowSeconds: Double
     private let generate: @Sendable (Int, Double, Double, URL) async throws -> (height: Int?, frameRate: Double?)
     private var jobs: [Int: Task<Void, Error>] = [:]
-    private var tail: Task<Void, Error>?
+    private var generationQueue: [Int] = []
+    private var activeGeneration: Int?
     private var prefetch: Task<Void, Never>?
     private var retained: [Int: Date] = [:]
     private var pins: [Int: Int] = [:]
@@ -62,12 +70,15 @@ final class CachedHLS {
     private(set) var videoHeight: Int?
     private(set) var videoFrameRate: Double?
     private let starts: [Double]
+    private var masterPlaylist: (header: String, variant: String)?
+    private var peakBandwidth = 1
     var count: Int { starts.count }
 
     init(workspace: PreparationWorkspace, duration: Double, fragmented: Bool,
-         preferences: PreparationPreferences, starts: [Double]? = nil,
+         preferences: PreparationPreferences, starts: [Double]? = nil, renditions: [Rendition] = [], continuous: Bool = false,
          generate: @escaping @Sendable (Int, Double, Double, URL) async throws -> (height: Int?, frameRate: Double?)) throws {
         self.workspace = workspace; self.duration = duration; self.fragmented = fragmented
+        self.renditions = renditions
         if let starts {
             guard starts.first == 0, starts.count <= 100_000,
                   starts.allSatisfy({ $0.isFinite && $0 >= 0 && $0 < duration }),
@@ -84,13 +95,63 @@ final class CachedHLS {
         let target = Int(ceil(max(Self.chunkSeconds, (0..<count).map { length($0) }.max() ?? Self.chunkSeconds)))
         var playlist = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:\(target)\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MEDIA-SEQUENCE:0\n"
         for index in 0..<count {
-            if index > 0 { playlist += "#EXT-X-DISCONTINUITY\n" }
+            if index > 0 && !continuous { playlist += "#EXT-X-DISCONTINUITY\n" }
             if fragmented { playlist += "#EXT-X-MAP:URI=\"\(initName(index))\"\n" }
             playlist += String(format: "#EXTINF:%.6f,\n", locale: Locale(identifier: "en_US_POSIX"), length(index))
             playlist += segmentName(index) + "\n"
         }
         playlist += "#EXT-X-ENDLIST\n"
-        try Data(playlist.utf8).write(to: workspace.directory.appendingPathComponent("media.m3u8"), options: .atomic)
+        let mainName = renditions.isEmpty ? "media.m3u8" : "stream_0.m3u8"
+        try Data(playlist.utf8).write(to: workspace.directory.appendingPathComponent(mainName), options: .atomic)
+        if !renditions.isEmpty {
+            func quoted(_ value: String) -> String {
+                String(value.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) && $0 != "\"" && $0 != "\\" }.prefix(100))
+            }
+            var master = "#EXTM3U\n#EXT-X-VERSION:7\n"
+            let audio = renditions.contains { !$0.subtitle }
+            let subtitles = renditions.contains { $0.subtitle }
+            if audio { master += "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"Original\",DEFAULT=YES,AUTOSELECT=YES\n" }
+            for rendition in renditions {
+                var text = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:\(target)\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MEDIA-SEQUENCE:0\n"
+                for index in 0..<count {
+                    if index > 0 && !continuous { text += "#EXT-X-DISCONTINUITY\n" }
+                    if !rendition.subtitle { text += "#EXT-X-MAP:URI=\"\(rendition.prefix)-\(initName(index))\"\n" }
+                    text += String(format: "#EXTINF:%.6f,\n", locale: Locale(identifier: "en_US_POSIX"), length(index))
+                    text += rendition.prefix + "-" + String(format: "segment%06d.%@\n", index, rendition.subtitle ? "vtt" : "m4s")
+                }
+                text += "#EXT-X-ENDLIST\n"
+                try Data(text.utf8).write(to: workspace.directory.appendingPathComponent(rendition.prefix + ".m3u8"), options: .atomic)
+                let kind = rendition.subtitle ? "SUBTITLES" : "AUDIO"
+                let group = rendition.subtitle ? "subtitles" : "audio"
+                master += "#EXT-X-MEDIA:TYPE=\(kind),GROUP-ID=\"\(group)\",NAME=\"\(quoted(rendition.label))\",DEFAULT=NO,AUTOSELECT=YES"
+                if let language = rendition.language { master += ",LANGUAGE=\"\(quoted(language))\"" }
+                master += ",URI=\"\(rendition.prefix).m3u8\"\n"
+            }
+            var variant = ""
+            if audio { variant += ",AUDIO=\"audio\"" }
+            if subtitles { variant += ",SUBTITLES=\"subtitles\"" }
+            masterPlaylist = (master, variant + "\nstream_0.m3u8\n")
+            try writeMasterPlaylist()
+        }
+    }
+
+    private func writeMasterPlaylist() throws {
+        guard let masterPlaylist else { return }
+        let text = masterPlaylist.header + "#EXT-X-STREAM-INF:BANDWIDTH=\(peakBandwidth)" + masterPlaylist.variant
+        try Data(text.utf8).write(to: workspace.directory.appendingPathComponent("media.m3u8"), options: .atomic)
+    }
+
+    private func recordBandwidth(_ index: Int) throws {
+        guard masterPlaylist != nil else { return }
+        let files = [segmentName(index)] + renditions.filter { !$0.subtitle }.map { $0.prefix + "-" + segmentName(index) }
+        let bytes = try files.reduce(0.0) { total, file in
+            let attributes = try FileManager.default.attributesOfItem(atPath: directory(index).appendingPathComponent(file).path)
+            return total + ((attributes[.size] as? NSNumber)?.doubleValue ?? 0)
+        }
+        // Warm-up finishes before publication. Advertise measured media bytes,
+        // including alternate audio, rather than a fixed 50 Mbit/s placeholder.
+        let measured = Int(min(1_000_000_000, ceil(bytes * 8 / length(index) * 1.1)))
+        if measured > peakBandwidth { peakBandwidth = measured; try writeMasterPlaylist() }
     }
 
     deinit { prefetch?.cancel(); for job in jobs.values { job.cancel() } }
@@ -103,6 +164,17 @@ final class CachedHLS {
     private func initName(_ index: Int) -> String { String(format: "init%06d.mp4", index) }
 
     private func index(for name: String) -> Int? {
+        if let dash = name.firstIndex(of: "-") {
+            let prefix = String(name[..<dash]), suffix = String(name[name.index(after: dash)...])
+            guard let rendition = renditions.first(where: { $0.prefix == prefix }) else { return nil }
+            if rendition.subtitle {
+                guard suffix.hasPrefix("segment"), suffix.hasSuffix(".vtt"),
+                      let index = Int(suffix.dropFirst(7).dropLast(4)), (0..<count).contains(index),
+                      suffix == String(format: "segment%06d.vtt", index) else { return nil }
+                return index
+            }
+            return index(for: suffix)
+        }
         let digits: Substring
         if name.hasPrefix("segment"), name.hasSuffix(fragmented ? ".m4s" : ".ts") {
             digits = name.dropFirst(7).dropLast(fragmented ? 4 : 3)
@@ -197,6 +269,20 @@ final class CachedHLS {
         }
     }
 
+    /// A single muxer retains the workspace lease. A seek may overtake queued
+    /// old-position HTTP work without failing those clients or interrupting the
+    /// running helper; FIFO order resumes when the target is ready.
+    private func acquireGeneration(_ index: Int) async throws {
+        while true {
+            try Task.checkCancellation()
+            guard !stopped, !productionCancelled else { throw CancellationError() }
+            let requested = Set(seekReservations.values.flatMap { $0 })
+            let next = generationQueue.first { requested.isEmpty || requested.contains($0) }
+            if activeGeneration == nil, next == index { activeGeneration = index; return }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
+
     private func ensure(_ index: Int) async throws {
         try Task.checkCancellation()
         guard !stopped else { throw CancellationError() }
@@ -213,7 +299,7 @@ final class CachedHLS {
                 if jobs[index] == job { jobs[index] = nil }
             }
         }
-        let previous = tail
+        generationQueue.append(index)
         let workspace = workspace
         let generate = generate
         let directory = directory(index)
@@ -221,13 +307,14 @@ final class CachedHLS {
         let length = length(index)
         let job = Task { [weak self] in
             defer {
+                if self?.activeGeneration == index { self?.activeGeneration = nil }
+                self?.generationQueue.removeAll { $0 == index }
                 self?.jobs.removeValue(forKey: index)
                 self?.onActivity?(!(self?.jobs.isEmpty ?? true))
                 self?.schedulePrefetch()
             }
-            if let previous { _ = try? await previous.value }
-            try Task.checkCancellation()
-            guard let self, !self.stopped, !self.productionCancelled else { throw CancellationError() }
+            guard let self else { throw CancellationError() }
+            try await self.acquireGeneration(index)
             let activity = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled],
                                                                  reason: "Preparing requested video")
             defer { ProcessInfo.processInfo.endActivity(activity) }
@@ -237,6 +324,7 @@ final class CachedHLS {
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                 let started = ContinuousClock.now
                 let output = try await generate(index, start, length, directory)
+                try self.recordBandwidth(index)
                 self.videoHeight = output.height; self.videoFrameRate = output.frameRate
                 try Task.checkCancellation()
                 self.retained[index] = Date()
@@ -250,13 +338,13 @@ final class CachedHLS {
                 self.retained.removeValue(forKey: index)
                 if !(error is CancellationError), !self.stopped {
                     self.productionCancelled = true
-                    let failure = (error as? PreparationFailure) ?? .failed
+                    let failure = (error as? PreparationFailure) ?? (error as? RemuxIndexFailure)?.preparationFailure ?? .failed
                     self.onFailure?(failure)
                 }
                 throw error
             }
         }
-        jobs[index] = job; tail = job; onActivity?(true)
+        jobs[index] = job; onActivity?(true)
         try await job.value
     }
 
