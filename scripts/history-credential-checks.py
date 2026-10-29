@@ -13,7 +13,7 @@ build = root / 'build' / 'history-credential-checks'
 build.mkdir(parents=True, exist_ok=True)
 binary = build / 'HistoryCredentialChecks'
 env = dict(os.environ, CLANG_MODULE_CACHE_PATH=str(build / 'ModuleCache'), SWIFT_MODULECACHE_PATH=str(build / 'ModuleCache'))
-subprocess.run(['swiftc', '-swift-version', '6', '-parse-as-library', '-module-cache-path', str(build / 'ModuleCache'),
+subprocess.run(['swiftc', '-I', str(root / 'Sources/CSQLite'), '-swift-version', '6', '-parse-as-library', '-module-cache-path', str(build / 'ModuleCache'),
                 *map(str, sorted((root / 'Sources/AirThrowCore').glob('*.swift'))),
                 str(root / 'Tests/MediaHistoryCredentialChecks/main.swift'), '-o', str(binary)], cwd=root, env=env, check=True, timeout=180)
 subprocess.run([str(binary), *(['--keychain'] if args.keychain else [])], cwd=root, env=env, check=True, timeout=30)

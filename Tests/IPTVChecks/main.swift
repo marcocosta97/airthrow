@@ -593,7 +593,14 @@ struct IPTVChecks {
         try controller.selectSource("automatic")
         try await wait { controller.snapshot.state != .loading }
         try check(controller.selectedIPTVChannelID == channel.id, "Quality reload preserves current channel")
-        try check(controller.history.count == 2, "Channel and quality selections do not clutter source history")
+        try check(controller.recentPlaybackHistory.filter { $0.url == channel.url }.count == 1
+                  && !controller.recentPlaybackHistory.contains(where: { $0.kind == .iptv || $0.kind == .xtream }),
+                  "Channel playback appears once in recent history and quality changes do not duplicate it")
+        let playlistID = controller.selectedIPTVPlaylistID!
+        controller.renameIPTVPlaylist(playlistID, name: "My channels")
+        try check(controller.iptvPlaylists.first(where: { $0.id == playlistID })?.title == "My channels"
+                  && controller.history.first(where: { $0.id == catalogHistory.id })?.title == "My channels",
+                  "Editing the M3U display name updates the library and saved source")
         let currentItem = player.currentItem
         controller.toggleHistoryPin(catalogHistory.id)
         controller.clearHistory()

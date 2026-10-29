@@ -149,9 +149,9 @@ try:
         threading.Event().wait()
     binary = BUILD / 'XtreamChecks'
     env = dict(os.environ, CLANG_MODULE_CACHE_PATH=str(BUILD / 'ModuleCache'))
-    subprocess.run(['swiftc', '-swift-version', '6', '-parse-as-library', '-module-cache-path', str(BUILD / 'ModuleCache'),
+    subprocess.run(['swiftc', '-I', str(ROOT / 'Sources/CSQLite'), '-swift-version', '6', '-parse-as-library', '-module-cache-path', str(BUILD / 'ModuleCache'),
         *map(str, sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift'))),
-        *[str(ROOT / ('Sources/AirThrowApp/' + name)) for name in ['MediaDiagnostics.swift', 'InterfaceCopy.swift', 'PlaybackController.swift', 'ReceiverWaitingScreen.swift', 'XtreamLibrary.swift']],
+        *[str(ROOT / ('Sources/AirThrowApp/' + name)) for name in ['MediaDiagnostics.swift', 'InterfaceCopy.swift', 'PlaybackController.swift', 'NetworkLibraryModel.swift', 'ReceiverWaitingScreen.swift', 'XtreamLibrary.swift']],
         str(ROOT / 'Tests/XtreamChecks/main.swift'), '-o', str(binary)], cwd=ROOT, env=env, check=True, timeout=180)
     app = BUILD / 'XtreamChecks.app'
     target = app / 'Contents/MacOS/XtreamChecks'

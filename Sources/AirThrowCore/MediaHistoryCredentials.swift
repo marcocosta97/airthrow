@@ -15,7 +15,7 @@ public enum MediaHistoryCredentialFailure: Error {
     case cancelled
     public var message: String {
         switch self {
-        case .unavailable: "The saved credentials are unavailable in Keychain. Add the server again."
+        case .unavailable: "The credentials are unavailable. Edit the source to enter them again."
         case .locked: "Keychain access is blocked. Unlock it, then open the playlist again."
         case .cancelled: "Keychain access was cancelled. Open the playlist again to allow access."
         }

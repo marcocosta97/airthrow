@@ -232,8 +232,16 @@ public enum IPTVCatalogLoader {
                     return request
                 },
                 challenge: { challenge in
-                    challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust
-                        ? (.performDefaultHandling, nil) : (.cancelAuthenticationChallenge, nil)
+                    let space = challenge.protectionSpace
+                    if space.authenticationMethod == NSURLAuthenticationMethodServerTrust { return (.performDefaultHandling, nil) }
+                    guard !space.isProxy(), space.host.lowercased() == source.host?.lowercased(),
+                          space.port == (source.port ?? (source.scheme == "https" ? 443 : 80)), space.protocol == source.scheme,
+                          [NSURLAuthenticationMethodHTTPBasic, NSURLAuthenticationMethodHTTPDigest].contains(space.authenticationMethod),
+                          challenge.previousFailureCount == 0, let user = source.user, let password = source.password else {
+                        return (.cancelAuthenticationChallenge, nil)
+                    }
+                    return (.useCredential, URLCredential(user: user.removingPercentEncoding ?? user,
+                                                          password: password.removingPercentEncoding ?? password, persistence: .none))
                 })
         } catch let error as URLError where error.code == .userAuthenticationRequired || error.code == .userCancelledAuthentication {
             throw IPTVCatalogFailure.accessRequired

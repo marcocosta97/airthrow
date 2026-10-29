@@ -40,7 +40,7 @@ share_product = add('ShareProduct', dict(isa='PBXFileReference', explicitFileTyp
 products = add('Products', dict(isa='PBXGroup', children=[app_product, cli_product, share_product], name='Products', sourceTree='<group>'))
 main_group = add('MainGroup', dict(isa='PBXGroup', children=list(files.values()) + [plist, catalog, share_plist, share_entitlements, icon, waiting, products], sourceTree='<group>'))
 
-common = dict(MACOSX_DEPLOYMENT_TARGET='14.0', SWIFT_VERSION='6.0', SDKROOT='macosx', CLANG_ENABLE_MODULES='YES')
+common = dict(MACOSX_DEPLOYMENT_TARGET='14.0', SWIFT_VERSION='6.0', SDKROOT='macosx', CLANG_ENABLE_MODULES='YES', SWIFT_INCLUDE_PATHS='$(SRCROOT)/Sources/CSQLite')
 
 def config_list(name, extra):
     ids = []

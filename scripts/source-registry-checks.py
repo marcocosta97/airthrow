@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / 'build/source-registry-checks'
 BUILD.mkdir(parents=True, exist_ok=True)
 binary = BUILD / 'SourceRegistryChecks'
-subprocess.run(['swiftc', '-swift-version', '6', '-parse-as-library',
+subprocess.run(['swiftc', '-I', str(ROOT / 'Sources/CSQLite'), '-swift-version', '6', '-parse-as-library',
                 '-module-cache-path', str(BUILD / 'ModuleCache'),
                 *map(str, sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift'))),
                 str(ROOT / 'Tests/SourceRegistryChecks/main.swift'), '-o', str(binary)],

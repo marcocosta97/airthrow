@@ -38,6 +38,7 @@ public final class MediaHistoryStore {
     private let defaults: UserDefaults?
     private let credentials: any MediaHistoryCredentials
     public private(set) var credentialError: String?
+    private var sessionOnlyReferences: Set<String> = []
     private var resolvedSources: [String: URL] = [:]
     public private(set) var entries: [MediaHistoryEntry]
 
@@ -64,15 +65,15 @@ public final class MediaHistoryStore {
     }
 
     @discardableResult
-    public func record(_ url: URL, title: String, kind: MediaHistoryEntry.Kind, preservingExistingTitle: Bool = false) -> UUID? {
-        guard (try? MediaInput.source(url.absoluteString)) != nil,
+    public func record(_ url: URL, title: String, kind: MediaHistoryEntry.Kind, preservingExistingTitle: Bool = false, replacing id: UUID? = nil, rememberCredentials: Bool? = nil) -> UUID? {
+        guard ((try? MediaInput.source(url.absoluteString)) != nil || Self.isShareVideo(url)),
               url.absoluteString.utf8.count <= 16_384 else { return nil }
         credentialError = nil
         let protected = Self.containsCredentials(url)
         let storedURL = protected ? Self.sanitized(url) : url
         // A failed redaction must not fall back to the original secret URL.
         if protected && Self.containsCredentials(storedURL) { return nil }
-        let previous = entries.first { entry in
+        let previous = id.flatMap { id in entries.first { $0.id == id } } ?? entries.first { entry in
             guard entry.url == storedURL else { return false }
             if !protected { return entry.credentialReference == nil }
             guard let reference = entry.credentialReference else { return false }
@@ -81,9 +82,19 @@ public final class MediaHistoryStore {
             resolvedSources[reference] = saved
             return saved == url
         }
-        let reference = protected ? (previous?.credentialReference ?? UUID().uuidString) : nil
+        let shouldRemember = rememberCredentials ?? previous?.credentialReference.map { !sessionOnlyReferences.contains($0) } ?? sessionOnlyReferences.isEmpty
+        let reference = protected ? (id != nil ? UUID().uuidString : (previous?.credentialReference ?? UUID().uuidString)) : nil
         if let reference {
-            do { try credentials.save(url, reference: reference); resolvedSources[reference] = url }
+            do {
+                if shouldRemember {
+                    try credentials.save(url, reference: reference)
+                    sessionOnlyReferences.remove(reference)
+                } else {
+                    if previous?.credentialReference != nil && !sessionOnlyReferences.contains(reference) { try credentials.remove(reference: reference) }
+                    sessionOnlyReferences.insert(reference)
+                }
+                resolvedSources[reference] = url
+            }
             catch let error as MediaHistoryCredentialFailure { credentialError = error.message; return nil }
             catch { credentialError = MediaHistoryCredentialFailure.unavailable.message; return nil }
         }
@@ -98,12 +109,16 @@ public final class MediaHistoryStore {
         let sorted = entries.sorted(by: Self.precedes)
         entries = Array(sorted.prefix(Self.maximumEntries))
         deleteCredentials(for: Array(sorted.dropFirst(Self.maximumEntries)))
+        if let previous, previous.credentialReference != reference { deleteCredentials(for: [previous]) }
         persist()
         return id
     }
 
+    public static func redactedSource(_ source: URL) -> URL { MediaURLSecrets.sanitized(source) }
+
     public func source(for entry: MediaHistoryEntry) throws -> URL {
         guard let reference = entry.credentialReference else { return entry.url }
+        if sessionOnlyReferences.contains(reference), let cached = resolvedSources[reference] { return cached }
         do {
             let source = try credentials.source(reference: reference)
             guard Self.sanitized(source) == entry.url else {
@@ -160,6 +175,7 @@ public final class MediaHistoryStore {
     private func deleteCredentials(for removed: [MediaHistoryEntry]) {
         for reference in Set(removed.compactMap(\.credentialReference)) where !entries.contains(where: { $0.credentialReference == reference }) {
             resolvedSources[reference] = nil
+            if sessionOnlyReferences.remove(reference) != nil { continue }
             do { try credentials.remove(reference: reference) }
             catch { credentialError = "Could not remove saved credentials from Keychain." }
         }
@@ -176,7 +192,14 @@ public final class MediaHistoryStore {
         guard !entries.isEmpty else { defaults?.removeObject(forKey: Self.key); return }
         if let data = try? JSONEncoder().encode(entries) { defaults?.set(data, forKey: Self.key) }
     }
+    private static func isShareVideo(_ url: URL) -> Bool {
+        url.scheme == "airthrow-share" && url.host.flatMap(UUID.init(uuidString:)) != nil
+            && url.user == nil && url.password == nil && url.port == nil && url.query == nil && url.fragment == nil
+            && url.path.count > 1 && !url.path.contains("\\")
+            && !url.path.split(separator: "/").contains(where: { $0 == ".." || $0 == "." })
+    }
     private static func validURL(_ url: URL) -> Bool {
+        if isShareVideo(url) { return true }
         // File availability is checked when reopening, so moved/deleted files
         // remain removable history entries rather than disappearing silently.
         if url.isFileURL {

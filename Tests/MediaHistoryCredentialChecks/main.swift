@@ -32,6 +32,17 @@ private struct Failure: Error { let message: String }
         let backend = MemoryMediaHistoryCredentials()
         let store = MediaHistoryStore(defaults: defaults, credentials: backend)
         let url = URL(string: "https://provider.example/proxy/get.php?username=private%2Buser&password=private%26pass&type=m3u_plus&output=ts&token=a%2Bb")!
+        let sessionBackend = CountingCredentials()
+        let sessionStore = MediaHistoryStore(defaults: nil, credentials: sessionBackend)
+        let sessionID = sessionStore.record(url, title: "Session", kind: .xtream, rememberCredentials: false)!
+        try check(sessionBackend.writes == 0 && (try sessionStore.source(for: sessionStore.entries[0])) == url,
+                  "Session credentials are usable without a Keychain write")
+        sessionStore.record(url, title: "Session refreshed", kind: .xtream)
+        try check(sessionBackend.writes == 0, "Refreshing a session source does not persist its credentials")
+        let replacement = URL(string: "https://replacement.example/get.php?username=fixture&password=fixture")!
+        let replacementID = sessionStore.record(replacement, title: "Edited", kind: .xtream, replacing: sessionID, rememberCredentials: true)
+        try check(replacementID == sessionID && sessionStore.entries.count == 1 && sessionBackend.writes == 1,
+                  "Editing keeps source identity and applies the explicit retention choice")
         let counting = CountingCredentials()
         let recent = MediaHistoryStore(defaults: nil, credentials: counting)
         recent.record(url, title: "Account one", kind: .xtream)

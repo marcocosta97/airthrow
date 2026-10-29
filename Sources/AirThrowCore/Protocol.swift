@@ -1044,3 +1044,8 @@ enum ChunkedBody {
         }
     }
 }
+
+/// Explicit retention choice for connection editors. Keep never replaces a secret.
+public enum CredentialStorageChoice: String, CaseIterable, Sendable {
+    case keep, keychain, session
+}
