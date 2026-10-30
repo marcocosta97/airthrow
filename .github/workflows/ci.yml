@@ -33,6 +33,9 @@ jobs:
       - name: Core checks
         run: .build/debug/CoreChecks
 
+      - name: Playback log privacy and storage checks
+        run: .build/debug/PlaybackLogChecks
+
       - name: Upscaler preferences and fallback policy
         run: .build/debug/SuperResolutionChecks
 

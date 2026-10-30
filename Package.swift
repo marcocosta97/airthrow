@@ -14,6 +14,7 @@ let package = Package(
         .executableTarget(name: "AirThrowApp", dependencies: ["AirThrowCore"]),
         .executableTarget(name: "AirThrowCLI", dependencies: ["AirThrowCore"]),
         .executableTarget(name: "CoreChecks", dependencies: ["AirThrowCore"], path: "Tests/CoreChecks"),
+        .executableTarget(name: "PlaybackLogChecks", dependencies: ["AirThrowCore"], path: "Tests/PlaybackLogChecks"),
         .executableTarget(name: "SourceRegistryChecks", dependencies: ["AirThrowCore"], path: "Tests/SourceRegistryChecks"),
         .executableTarget(name: "NativePreparationChecks", dependencies: ["AirThrowCore"], path: "Tests/NativePreparationChecks"),
         .executableTarget(name: "SuperResolutionBench", path: "Tests/SuperResolutionBench"),

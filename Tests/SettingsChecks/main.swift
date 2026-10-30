@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 
 private final class ProbeHarness: @unchecked Sendable {
     private let lock = NSLock()
@@ -39,6 +40,35 @@ struct SettingsChecks {
         try check(condition(), "Cookie check did not settle")
     }
     static func main() async throws {
+        let loggingSuite = "airthrow-logging-checks-" + UUID().uuidString
+        let loggingDefaults = UserDefaults(suiteName: loggingSuite)!
+        let logDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(loggingSuite)
+        defer {
+            loggingDefaults.removePersistentDomain(forName: loggingSuite)
+            try? FileManager.default.removeItem(at: logDirectory)
+        }
+        let playbackLog = PlaybackLog(fileURL: logDirectory.appendingPathComponent("playback.jsonl"))
+        let controller = PlaybackController(player: AVPlayer(), showReceiverWaitingScreen: false,
+            resolveSource: { ResolvedSource(url: $0) }, historyStore: MediaHistoryStore(defaults: nil),
+            playbackDefaults: loggingDefaults, playbackLog: playbackLog, xtreamCatalogDefaults: loggingDefaults,
+            prepareSource: nil, integratesWithSystemPlayback: false)
+        defer { controller.shutdown() }
+        try check(!controller.playbackLogEnabled, "Playback logging was enabled by default")
+        controller.setPlaybackLogEnabled(true)
+        try await Task.sleep(for: .milliseconds(2250))
+        await playbackLog.flush()
+        let samples = try String(contentsOf: playbackLog.fileURL, encoding: .utf8)
+            .split(separator: "\n").filter { $0.contains("\"sample\"") }
+        try check(samples.count >= 3 && loggingDefaults.bool(forKey: PlaybackLog.preferenceKey),
+                  "Logging did not persist or sample a stationary player")
+        controller.setPlaybackLogEnabled(false)
+        await playbackLog.flush()
+        let stoppedLog = try Data(contentsOf: playbackLog.fileURL)
+        try await Task.sleep(for: .milliseconds(1100))
+        await playbackLog.flush()
+        try check(try Data(contentsOf: playbackLog.fileURL) == stoppedLog
+                  && !loggingDefaults.bool(forKey: PlaybackLog.preferenceKey), "Disabling logging left sampling active")
+        print("PASS playback log preference, periodic samples without native clock advancement, and disable")
         let harness = ProbeHarness()
         let model = CookieStatusModel(probe: harness.probe)
         model.refresh(for: .browser("safari"))

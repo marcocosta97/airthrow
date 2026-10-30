@@ -246,7 +246,20 @@ struct SettingsView: View {
                 Text("Use the same player, loading, seeking and source switching in a local video window. Changing output stops the current video. Disconnect AirPlay first. This session-only mode does not emulate the receiver or network transport.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-
+                Toggle("Record playback log", isOn: Binding(
+                    get: { controller.playbackLogEnabled }, set: { controller.setPlaybackLogEnabled($0) }))
+                Text("Save playback timing, buffering, codec and preparation diagnostics on this Mac. Excludes video titles, source URLs and credentials. Keeps up to 4 MB across two files.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Show playback logs in Finder") {
+                    Task { await controller.showPlaybackLogs() }
+                }
+                .disabled(!controller.playbackLogEnabled && !FileManager.default.fileExists(atPath: controller.playbackLogURL.path))
+                if controller.playbackLogFailed {
+                    Text("Could not write the playback log. Check available disk space and enable logging again.")
+                        .font(.caption).foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
         .formStyle(.grouped)

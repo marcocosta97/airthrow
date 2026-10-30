@@ -141,6 +141,40 @@ final class PlaybackController: ObservableObject {
     @Published private(set) var sourceInput: String?
     private let historyStore: MediaHistoryStore
     @Published private(set) var localDebugPlayback = false
+    @Published private(set) var playbackLogEnabled: Bool
+    @Published private(set) var playbackLogFailed = false
+    private let playbackLog: PlaybackLog
+    private var playbackLogTask: Task<Void, Never>?
+    var playbackLogURL: URL { playbackLog.fileURL }
+
+    func setPlaybackLogEnabled(_ enabled: Bool) {
+        playbackLogFailed = false
+        playbackLogEnabled = enabled
+        playbackDefaults.set(enabled, forKey: PlaybackLog.preferenceKey)
+        playbackLog.setEnabled(enabled)
+        updatePlaybackLogTimer()
+        if enabled { refresh() }
+    }
+
+    func showPlaybackLogs() async {
+        await playbackLog.flush()
+        if FileManager.default.fileExists(atPath: playbackLogURL.path) {
+            NSWorkspace.shared.activateFileViewerSelecting([playbackLogURL])
+        }
+    }
+
+    private func updatePlaybackLogTimer() {
+        playbackLogTask?.cancel(); playbackLogTask = nil
+        guard playbackLogEnabled else { return }
+        // Native periodic-time callbacks can stop during preparation/stalls.
+        playbackLogTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                guard let self, self.playbackLogEnabled else { return }
+                self.refresh()
+            }
+        }
+    }
     private var debugWindow: NSWindow?
     private var debugWindowObservation: AnyCancellable?
     var playbackOutputAvailable: Bool { localDebugPlayback || player.isExternalPlaybackActive }
@@ -385,6 +419,7 @@ final class PlaybackController: ObservableObject {
          allowVideoConversion: Bool? = nil,
          preferQuality: Bool? = nil,
          playbackDefaults: UserDefaults = .standard,
+         playbackLog: PlaybackLog? = nil,
          xtreamCatalogStore: XtreamCatalogStore = .shared,
          xtreamCatalogDefaults: UserDefaults = .standard,
          resolvePlaylist: @escaping @Sendable (URL) async throws -> ResolvedPlaylist = {
@@ -398,6 +433,8 @@ final class PlaybackController: ObservableObject {
         self.networkLibrary = networkLibrary ?? NetworkLibraryModel()
         self.player = player
         self.playbackDefaults = playbackDefaults
+        self.playbackLog = playbackLog ?? PlaybackLog()
+        self.playbackLogEnabled = playbackDefaults.bool(forKey: PlaybackLog.preferenceKey)
         self.autoplayVideos = playbackDefaults.bool(forKey: Self.autoplayVideosKey)
         self.integratesWithSystemPlayback = integratesWithSystemPlayback
         self.inspectVideoEvidence = inspectVideoEvidence
@@ -445,7 +482,15 @@ final class PlaybackController: ObservableObject {
             installRemoteCommands()
             updateNowPlaying()
         }
-
+        self.playbackLog.onFailure = { [weak self] in
+            guard let self else { return }
+            self.playbackLogEnabled = false
+            self.playbackLogFailed = true
+            self.playbackDefaults.set(false, forKey: PlaybackLog.preferenceKey)
+            self.updatePlaybackLogTimer()
+        }
+        self.playbackLog.setEnabled(playbackLogEnabled)
+        updatePlaybackLogTimer()
     }
 
     /// A nil generation refreshes for the player's whole lifetime; otherwise only while that load is current.
@@ -2688,6 +2733,7 @@ final class PlaybackController: ObservableObject {
     }
 
     func refresh() {
+        defer { playbackLog.record(snapshot, session: generation) }
         captureLivePipeline()
         waitingScreen.reconcile()
         if waitingScreen.isActive {
@@ -3153,6 +3199,7 @@ final class PlaybackController: ObservableObject {
             let once = ShutdownResume(continuation)
             Task {
                 for job in pending { await job.value }
+                await playbackLog.flush()
                 once.finish()
             }
             Task {
@@ -3163,6 +3210,8 @@ final class PlaybackController: ObservableObject {
     }
 
     func shutdown() {
+        playbackLogTask?.cancel(); playbackLogTask = nil
+        playbackLog.setEnabled(false)
         debugWindowObservation = nil
         (debugWindow?.contentView as? AVPlayerView)?.player = nil
         debugWindow?.close(); debugWindow = nil
