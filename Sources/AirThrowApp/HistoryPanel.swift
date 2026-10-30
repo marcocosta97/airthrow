@@ -37,7 +37,7 @@ struct HistoryPanel: View {
                         Divider()
                     }
                     Button("Clear History", role: .destructive) { confirmClear = true }
-                        .disabled(!controller.history.contains(where: { !$0.isPinned }))
+                        .disabled(!controller.recentPlaybackHistory.contains(where: { !$0.isPinned }))
                         .help("Remove all unpinned entries")
                 } label: {
                     HStack(spacing: 6) {
@@ -47,23 +47,23 @@ struct HistoryPanel: View {
                 }
                     .help("History options").accessibilityLabel("History options")
             }
-            if controller.history.isEmpty {
+            if controller.recentPlaybackHistory.isEmpty {
                 ContentUnavailableView {
-                    Label("No recent sources", systemImage: "clock")
+                    Label("No recent videos", systemImage: "clock")
                 } description: {
-                    Text("Videos and playlists you open appear here for next time.")
+                    Text("Videos you open appear here for next time.")
                 } actions: {
                     if let openSource { Button("Open Video…", systemImage: "plus", action: openSource) }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(controller.history) { entry in
+                List(controller.recentPlaybackHistory) { entry in
                     HStack(spacing: 8) {
                         Button {
                             controller.perform { try controller.selectHistoryEntry(entry.id) }
                         } label: {
                             LibraryItemLabel(title: entry.title,
-                                subtitle: entry.kind == .xtream ? "Xtream · \(entry.location)" : entry.kind == .iptv ? "Channel playlist · \(entry.location)" : entry.location,
+                                subtitle: entry.url.scheme == "airthrow-share" ? "Network share" : entry.kind == .xtream ? "Xtream · \(entry.location)" : entry.kind == .iptv ? "Channel playlist · \(entry.location)" : entry.location,
                                 kind: entry.kind, isPinned: entry.isPinned)
                         }.buttonStyle(.plain).help("Open \(entry.title)").accessibilityLabel("Open \(entry.title)")
                             .accessibilityValue(entry.isPinned ? "Pinned" : "")
@@ -104,7 +104,7 @@ struct HistoryPanel: View {
             Button("Clear History", role: .destructive) { controller.clearHistory() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Unpinned items are removed. Pinned items stay. Account credentials for the removed items are deleted and cannot be restored.")
+            Text("Unpinned items are removed. Pinned items stay. Saved sources stay in Sources and the sidebar.")
         }
     }
 

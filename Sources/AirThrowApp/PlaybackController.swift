@@ -1,5 +1,7 @@
 import Foundation
 import AVFoundation
+import AudioToolbox
+import AVKit
 import MediaPlayer
 import Combine
 import AppKit
@@ -16,15 +18,33 @@ struct HTTPLoginRequest: Identifiable {
     var username = ""
 }
 
+struct PlaylistConnectionDraft: Identifiable {
+    enum Kind: String { case xtream = "Xtream Server", m3u = "M3U Playlist" }
+    let id = UUID()
+    let kind: Kind
+    var existingID: UUID?
+    var libraryID: UUID?
+    var name = ""
+    var address = ""
+    var originalAddress = ""
+    var format: XtreamPlaylist.StreamFormat = .hls
+}
+
 enum InspectorPage { case history, channels, playlist, xtream }
 
-/// One M3U catalog in the library. `source` is how a later import finds the
-/// same playlist; the window shows `title` only.
+/// Saved configurations remain visible before their catalogs are loaded.
+struct IPTVPlaylistSummary: Identifiable {
+    let id: UUID
+    let title: String
+}
+
+/// One loaded M3U catalog; the window shows only its title.
 struct IPTVLibraryPlaylist: Identifiable, Equatable {
     let id: UUID
     let source: URL
     var title: String
     var catalog: IPTVCatalog
+    var historyEntryID: UUID? = nil
 }
 
 private final class ShutdownResume: @unchecked Sendable {
@@ -88,6 +108,15 @@ final class PlaybackController: ObservableObject {
     }
     @Published private(set) var xtreamLibrary: XtreamLibrary?
     @Published private(set) var selectedXtreamSection: XtreamSection = .live
+    var savedIPTVPlaylists: [MediaHistoryEntry] { history.filter { $0.kind == .iptv } }
+    var iptvPlaylistSources: [IPTVPlaylistSummary] {
+        var result = iptvPlaylists.map { IPTVPlaylistSummary(id: $0.id, title: $0.title) }
+        for entry in savedIPTVPlaylists where !iptvPlaylists.contains(where: { $0.historyEntryID == entry.id }) {
+            result.append(IPTVPlaylistSummary(id: entry.id, title: entry.title))
+        }
+        return result
+    }
+
     var savedXtreamPlaylists: [MediaHistoryEntry] { history.filter { $0.kind == .xtream } }
     var xtreamPlaylists: [XtreamPlaylistSummary] {
         var result = savedXtreamPlaylists.map { XtreamPlaylistSummary(id: $0.id, title: $0.title) }
@@ -111,11 +140,53 @@ final class PlaybackController: ObservableObject {
     @Published var inspectorPage: InspectorPage = .history
     @Published private(set) var sourceInput: String?
     private let historyStore: MediaHistoryStore
+    @Published private(set) var localDebugPlayback = false
+    private var debugWindow: NSWindow?
+    private var debugWindowObservation: AnyCancellable?
+    var playbackOutputAvailable: Bool { localDebugPlayback || player.isExternalPlaybackActive }
+
+    func setLocalDebugPlayback(_ enabled: Bool, showWindow: Bool = true) {
+        guard enabled != localDebugPlayback else { return }
+        guard !enabled || !player.isExternalPlaybackActive else {
+            notice = "Disconnect AirPlay before enabling local debug playback."
+            return
+        }
+        stop()
+        localDebugPlayback = enabled
+        player.allowsExternalPlayback = !enabled && integratesWithSystemPlayback
+        if enabled && showWindow {
+            let view = AVPlayerView()
+            view.player = player
+            view.controlsStyle = .none
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 450),
+                                  styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
+            window.title = "AirThrow — Local Debug Playback"
+            window.isReleasedWhenClosed = false
+            window.contentView = view
+            debugWindow = window
+            debugWindowObservation = NotificationCenter.default.publisher(for: NSWindow.willCloseNotification, object: window)
+                .sink { [weak self] _ in
+                    Task { @MainActor in self?.setLocalDebugPlayback(false) }
+                }
+            window.center()
+            window.makeKeyAndOrderFront(nil)
+        } else if !enabled {
+            debugWindowObservation = nil
+            (debugWindow?.contentView as? AVPlayerView)?.player = nil
+            debugWindow?.close(); debugWindow = nil
+        }
+        refresh()
+    }
+
     private var pendingHistoryURL: URL?
     private var iptvImportTask: Task<Void, Never>?
     private var iptvImportID = UUID()
     private let loadIPTVCatalog: @Sendable (URL) async throws -> IPTVCatalog
     private var httpLoginContinuation: CheckedContinuation<HTTPLoginCredentials, Error>?
+    let networkLibrary: NetworkLibraryModel
+    private var sharePlayback: SharePlayback?
+    private var retiredSharePlayback: SharePlayback?
+    private var shareDownloads: Set<URL> = []
     private var authenticatedMedia: HTTPMediaRelay?
     private var variantMediaRelay: HTTPMediaRelay?
     private var retiredVariantMediaRelay: HTTPMediaRelay?
@@ -133,6 +204,7 @@ final class PlaybackController: ObservableObject {
     private var preparationInputRelay: HTTPMediaRelay?
     private var lastLivePipeline: LivePipelineDiagnostics?
     private var lastFailureDiagnostics: PlaybackDiagnostics?
+    private var preparationTrace: PreparationDiagnosticRecorder?
     private var diagnosticsCache: PlaybackDiagnostics?
     private var diagnosticsCacheItem: ObjectIdentifier?
     private var diagnosticsCacheStatus: AVPlayerItem.Status?
@@ -218,6 +290,7 @@ final class PlaybackController: ObservableObject {
     private var sourceChoice: String?
     private var selectedNativeAudioID: String?
     private var nativeAudioGroup: AVMediaSelectionGroup?
+    private var nativeAudioTitles: [Int: String] = [:]
     private var nativeSubtitleGroup: AVMediaSelectionGroup?
     private var subtitlePreference: SubtitlePreference?
     private var changingSource = false
@@ -296,6 +369,7 @@ final class PlaybackController: ObservableObject {
     private static let routeProbeTimeout: Double = 12
 
     init(player: AVPlayer = AVPlayer(),
+         networkLibrary: NetworkLibraryModel? = nil,
          showReceiverWaitingScreen: Bool? = nil,
          waitingScreenURL: @escaping () -> URL? = { Bundle.main.url(forResource: "WaitingScreen", withExtension: nil) },
          resolveSource: (@Sendable (URL) async throws -> ResolvedSource)? = nil,
@@ -321,6 +395,7 @@ final class PlaybackController: ObservableObject {
         guard let raw = UserDefaults.standard.string(forKey: "afterPlaybackBehavior") else { return .keepConnected }
         return AfterPlaybackBehavior(rawValue: raw) ?? .keepConnected
     }, integratesWithSystemPlayback: Bool = true) {
+        self.networkLibrary = networkLibrary ?? NetworkLibraryModel()
         self.player = player
         self.playbackDefaults = playbackDefaults
         self.autoplayVideos = playbackDefaults.bool(forKey: Self.autoplayVideosKey)
@@ -370,6 +445,7 @@ final class PlaybackController: ObservableObject {
             installRemoteCommands()
             updateNowPlaying()
         }
+
     }
 
     /// A nil generation refreshes for the player's whole lifetime; otherwise only while that load is current.
@@ -432,8 +508,8 @@ final class PlaybackController: ObservableObject {
         inspectorPage = .history
         // Explicit handoffs retain their receiver-at-receipt contract. Ordinary
         // selections follow the preference and can wait for a chosen receiver.
-        let shouldPlay = autoplay.map { $0 && player.isExternalPlaybackActive } ?? autoplayVideos
-        let waitForReceiver = autoplay == nil && shouldPlay && !player.isExternalPlaybackActive
+        let shouldPlay = autoplay.map { $0 && playbackOutputAvailable } ?? autoplayVideos
+        let waitForReceiver = autoplay == nil && shouldPlay && !playbackOutputAvailable
         if IPTVPlaylist.isCatalogSource(url) {
             importIPTV(url: url, hlsAutoplay: shouldPlay, waitForReceiver: waitForReceiver)
             return
@@ -455,6 +531,31 @@ final class PlaybackController: ObservableObject {
         }
     }
 
+    func loadShare(_ reference: URL, title: String, download: Bool = false) {
+        if download { shareDownloads.insert(reference) }
+        sourceInput = ""
+        startLoad(reference, autoplay: autoplayVideos, waitForReceiver: autoplayVideos && !playbackOutputAvailable,
+                  titleOverride: title, recordHistory: true)
+    }
+
+    func unmountShare(_ id: UUID) {
+        if let source = originalSourceURL, source.scheme == "airthrow-share", let host = source.host,
+           let current = UUID(uuidString: host), networkLibrary.relatedShares(for: id).contains(current) { stop() }
+        Task { await networkLibrary.unmount(id) }
+    }
+
+    func enqueueShare(_ reference: URL, title: String) {
+        let entry = PlaylistEntry(url: reference, title: title)
+        if let queue {
+            self.queue = QueueState(title: queue.title, entries: queue.entries + [entry], truncated: queue.truncated,
+                                   currentIndex: queue.currentIndex, skipped: queue.skipped)
+        } else if let current = originalSourceURL, snapshot.state != .idle {
+            self.queue = QueueState(title: "Queue", entries: [PlaylistEntry(url: current, title: self.title), entry],
+                                   truncated: false, currentIndex: 0)
+        } else { loadShare(reference, title: title); return }
+        refresh()
+    }
+
     func importIPTV(_ input: String) throws {
         sourceInput = input
         importIPTV(url: try MediaInput.source(input))
@@ -466,7 +567,9 @@ final class PlaybackController: ObservableObject {
         // History loads its stored source internally; it is not a new draft
         // for the editable field, particularly for credential-bearing sources.
         sourceInput = ""
-        if entry.kind == .xtream {
+        if source.scheme == "airthrow-share" {
+            loadShare(source, title: entry.title)
+        } else if entry.kind == .xtream {
             if let library = xtreamLibrary, library.source == source {
                 cancelIPTVImport()
                 historyStore.markOpened(id); history = historyStore.entries
@@ -485,11 +588,25 @@ final class PlaybackController: ObservableObject {
     }
 
     func removeHistoryEntry(_ id: UUID) {
+        if history.first(where: { $0.id == id })?.kind == .xtream { cancelIPTVImport() }
         historyStore.remove(id); publishHistoryChange()
+        iptvPlaylists.removeAll { $0.historyEntryID == id }
+        if !iptvPlaylists.contains(where: { $0.id == selectedIPTVPlaylistID }) {
+            selectedIPTVPlaylistID = nil; selectedIPTVChannelID = nil
+        }
+        if xtreamLibrary?.id == id {
+            cancelIPTVImport()
+            xtreamLibrary?.cancelLoading(); xtreamLibrary?.back()
+            xtreamLibrary = nil
+            inspectorPage = .channels
+        }
     }
     func toggleHistoryPin(_ id: UUID) { historyStore.togglePin(id); history = historyStore.entries }
+    var recentPlaybackHistory: [MediaHistoryEntry] { history.filter { $0.kind == .video || $0.kind == .playlist } }
+
     func clearHistory() {
-        historyStore.clear(); publishHistoryChange()
+        for entry in recentPlaybackHistory where !entry.isPinned { historyStore.remove(entry.id) }
+        publishHistoryChange()
     }
     private func recordHistory(_ url: URL, title: String, kind: MediaHistoryEntry.Kind) {
         historyStore.record(url, title: title, kind: kind); publishHistoryChange()
@@ -573,6 +690,97 @@ final class PlaybackController: ObservableObject {
         library.switchSection(section)
     }
 
+    func playlistConnectionDraft(kind: PlaylistConnectionDraft.Kind, id: UUID? = nil) -> PlaylistConnectionDraft {
+        var draft = PlaylistConnectionDraft(kind: kind)
+        guard let id else { return draft }
+        let playlist = kind == .m3u ? iptvPlaylists.first(where: { $0.id == id }) : nil
+        let entry = history.first(where: { $0.id == (playlist?.historyEntryID ?? id) })
+        draft.existingID = entry?.id
+        draft.libraryID = playlist?.id
+        draft.name = playlist?.title ?? entry?.title ?? xtreamLibrary?.title ?? ""
+        if let source = entry?.url ?? playlist.map({ MediaHistoryStore.redactedSource($0.source) }) {
+            if kind == .xtream {
+                var parts = URLComponents(url: source, resolvingAgainstBaseURL: false)!
+                draft.format = parts.queryItems?.first(where: { $0.name == "output" })?.value == "ts" ? .transportStream : .hls
+                parts.query = nil; parts.fragment = nil
+                parts.path = source.deletingLastPathComponent().path
+                draft.address = parts.url?.absoluteString ?? ""
+            } else { draft.address = source.absoluteString }
+        }
+        draft.originalAddress = draft.address
+        return draft
+    }
+
+    func savePlaylistConnection(_ draft: PlaylistConnectionDraft, username: String, password: String,
+                                storage: CredentialStorageChoice) async throws {
+        guard let name = Self.playlistName(draft.name) else { throw AppFailure(.invalidRequest, "Enter a name for this source.") }
+        let source: URL
+        if storage == .keep {
+            guard let id = draft.existingID, let entry = history.first(where: { $0.id == id }),
+                  draft.address == draft.originalAddress else {
+                throw AppFailure(.invalidRequest, "Choose how to store the new credentials when changing the address.")
+            }
+            // A label-only edit does not retrieve secrets or contact the server.
+            historyStore.rename(id, title: name); publishHistoryChange()
+            if draft.kind == .xtream { renameXtreamPlaylist(id, name: name) }
+            else if let libraryID = draft.libraryID { renameIPTVPlaylist(libraryID, name: name) }
+            _ = entry
+            return
+        } else if draft.kind == .xtream {
+            source = try XtreamPlaylist.url(server: draft.address, username: username, password: password, format: draft.format)
+        } else {
+            let url = try MediaInput.source(draft.address)
+            var parts = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+            if !username.isEmpty || !password.isEmpty {
+                if url.lastPathComponent == "get.php" {
+                    var query = parts.queryItems ?? []
+                    query.removeAll { ["username", "password"].contains($0.name.lowercased()) }
+                    query += [URLQueryItem(name: "username", value: username), URLQueryItem(name: "password", value: password)]
+                    parts.queryItems = query
+                    parts.percentEncodedQuery = parts.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+                } else { parts.user = username; parts.password = password }
+            }
+            guard let url = parts.url else { throw AppFailure(.invalidRequest, "Check the playlist address.") }
+            source = url
+        }
+        cancelIPTVImport()
+        if draft.kind == .xtream {
+            let client = XtreamClient(account: try XtreamAccount(source: source))
+            let info = try await client.authenticate()
+            try Task.checkCancellation()
+            guard let id = historyStore.record(source, title: name, kind: .xtream, replacing: draft.existingID,
+                                               rememberCredentials: storage == .keychain) else {
+                throw AppFailure(.invalidRequest, historyStore.credentialError ?? "Could not save this source.")
+            }
+            publishHistoryChange()
+            xtreamLibrary?.cancelLoading()
+            xtreamLibrary = XtreamLibrary(client: client, accountInfo: info, catalogStore: xtreamCatalogStore, id: id, title: name)
+            selectedXtreamSection = .live; inspectorPage = .xtream
+            xtreamLibrary?.browse(.live)
+        } else {
+            let catalog = try await loadIPTVCatalog(source)
+            try Task.checkCancellation()
+            guard let id = historyStore.record(source, title: name, kind: .iptv, replacing: draft.existingID,
+                                               rememberCredentials: storage == .keychain) else {
+                throw AppFailure(.invalidRequest, historyStore.credentialError ?? "Could not save this source.")
+            }
+            publishHistoryChange()
+            let entry = IPTVLibraryPlaylist(id: draft.libraryID ?? UUID(), source: source, title: name, catalog: catalog, historyEntryID: id)
+            if let index = iptvPlaylists.firstIndex(where: { $0.id == entry.id }) { iptvPlaylists[index] = entry }
+            else { iptvPlaylists.append(entry) }
+            selectedIPTVPlaylistID = entry.id; selectedIPTVChannelID = nil; inspectorPage = .channels
+        }
+    }
+
+    func renameIPTVPlaylist(_ id: UUID, name: String) {
+        guard let name = Self.playlistName(name), let index = iptvPlaylists.firstIndex(where: { $0.id == id }) else { return }
+        iptvPlaylists[index].title = name
+        if let entry = history.first(where: { $0.id == iptvPlaylists[index].historyEntryID }) {
+            historyStore.rename(entry.id, title: name)
+            publishHistoryChange()
+        }
+    }
+
     func renameXtreamPlaylist(_ id: UUID, name: String) {
         guard let name = Self.playlistName(name) else { return }
         historyStore.rename(id, title: name)
@@ -605,8 +813,8 @@ final class PlaybackController: ObservableObject {
     func selectXtreamMedia(_ url: URL, title: String, isLive: Bool = false) throws {
         let url = try MediaInput.url(url.absoluteString)
         let autoplay = autoplayVideos || replacementAutoplay
-        startLoad(url, autoplay: autoplay, waitForReceiver: autoplayVideos && !player.isExternalPlaybackActive,
-                  titleOverride: title, liveChannel: isLive)
+        startLoad(url, autoplay: autoplay, waitForReceiver: autoplayVideos && !playbackOutputAvailable,
+                  titleOverride: title, recordHistory: true, liveChannel: isLive)
         selectedIPTVChannelID = nil
     }
 
@@ -621,7 +829,14 @@ final class PlaybackController: ObservableObject {
                 let catalog = try await loader(url)
                 guard !Task.isCancelled, let self, self.iptvImportID == id else { return }
                 self.storeImportedCatalog(catalog, source: url)
-                self.recordHistory(url, title: catalog.title, kind: .iptv)
+                let historyID = self.historyStore.record(url, title: self.iptvPlaylists.first(where: { $0.source == url })?.title ?? catalog.title, kind: .iptv, preservingExistingTitle: true)
+                self.publishHistoryChange()
+                if let index = self.iptvPlaylists.firstIndex(where: { $0.source == url }) {
+                    self.iptvPlaylists[index].historyEntryID = historyID
+                    if let entry = self.history.first(where: { $0.id == historyID }) {
+                        self.iptvPlaylists[index].title = entry.title
+                    }
+                }
                 self.selectedIPTVChannelID = nil
                 self.iptvImporting = false; self.iptvImportTask = nil
             } catch {
@@ -652,7 +867,14 @@ final class PlaybackController: ObservableObject {
     }
 
     func selectIPTVPlaylist(_ id: UUID) {
-        guard iptvPlaylists.contains(where: { $0.id == id }) else { return }
+        guard iptvPlaylists.contains(where: { $0.id == id }) else {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                do { try self.selectHistoryEntry(id) }
+                catch { self.displayError(error) }
+            }
+            return
+        }
         selectedIPTVPlaylistID = id
         selectedIPTVChannelID = nil
         inspectorPage = .channels
@@ -670,12 +892,12 @@ final class PlaybackController: ObservableObject {
         if let index = iptvPlaylists.firstIndex(where: { $0.source == url }) {
             var playlists = iptvPlaylists
             let id = playlists[index].id
-            playlists[index].title = catalog.title
+            // Keep the user-facing label when refreshing the catalog.
             playlists[index].catalog = catalog
             iptvPlaylists = playlists
             selectedIPTVPlaylistID = id
         } else {
-            let entry = IPTVLibraryPlaylist(id: UUID(), source: url, title: catalog.title, catalog: catalog)
+            let entry = IPTVLibraryPlaylist(id: UUID(), source: url, title: history.first(where: { $0.kind == .iptv && $0.url == url })?.title ?? catalog.title, catalog: catalog)
             iptvPlaylists.append(entry)
             selectedIPTVPlaylistID = entry.id
         }
@@ -687,14 +909,14 @@ final class PlaybackController: ObservableObject {
             throw AppFailure(.invalidRequest, "This channel is no longer available. Choose a channel from the current playlist.")
         }
         let autoplay = autoplayVideos || replacementAutoplay
-        startLoad(channel.url, autoplay: autoplay, waitForReceiver: autoplayVideos && !player.isExternalPlaybackActive,
-                  titleOverride: channel.name, liveChannel: true)
+        startLoad(channel.url, autoplay: autoplay, waitForReceiver: autoplayVideos && !playbackOutputAvailable,
+                  titleOverride: channel.name, recordHistory: true, liveChannel: true)
         selectedIPTVChannelID = id
     }
 
     private var replacementAutoplay: Bool {
         PlaybackPolicy.shouldAutoplayReplacement(pendingPlay: playWhenReady, playbackRequested: playbackRequested,
-            external: player.isExternalPlaybackActive, playing: player.rate > 0,
+            external: playbackOutputAvailable, playing: player.rate > 0,
             recoveringReceiver: failure != nil && keepReceiverOnFailure)
     }
 
@@ -776,7 +998,13 @@ final class PlaybackController: ObservableObject {
         if let selectedNativeAudioID {
             return selectedSource?.hlsAudioOptions.first(where: { $0.id == selectedNativeAudioID })?.language
         }
-        return selectedSource.flatMap { Self.candidate(presenting: $0, in: sourceCandidates) }?.audioLanguage
+        if let language = selectedSource.flatMap({ Self.candidate(presenting: $0, in: sourceCandidates) })?.audioLanguage {
+            return language
+        }
+        if let group = nativeAudioGroup, let item = mediaItem {
+            return item.currentMediaSelection.selectedMediaOption(in: group)?.locale?.identifier
+        }
+        return nil
     }
 
     private func candidateIndex(forOptionID optionID: String?) -> Int? {
@@ -825,6 +1053,15 @@ final class PlaybackController: ObservableObject {
             throw AppFailure(.invalidRequest, "This audio choice has expired. Open Audio again.")
         }
         switch choice.kind {
+        case .installed(let index):
+            guard let item = mediaItem, let group = nativeAudioGroup, group.options.indices.contains(index),
+                  NativeMediaOptions.selectable(in: group, for: item).contains(group.options[index]) else {
+                throw AppFailure(.unsupportedOperation, "This audio track is unavailable in the current video.")
+            }
+            player.appliesMediaSelectionCriteriaAutomatically = false
+            item.select(group.options[index], in: group)
+            selectedNativeAudioID = nil
+            refresh()
         case .native(let index):
             guard let item = mediaItem, let group = nativeAudioGroup,
                   selectedSource.hlsAudioOptions.indices.contains(index),
@@ -989,7 +1226,7 @@ final class PlaybackController: ObservableObject {
 
     private func sourceOptionID(_ index: Int) -> String { "\(sourceOptionsGeneration.uuidString)-\(index)" }
 
-    private enum AudioChoiceKind { case native(Int), candidate(Int) }
+    private enum AudioChoiceKind { case native(Int), installed(Int), candidate(Int) }
     private struct AudioChoice {
         let snapshot: AudioOptionSnapshot
         let kind: AudioChoiceKind
@@ -997,7 +1234,7 @@ final class PlaybackController: ObservableObject {
 
     private var audioChoices: [AudioChoice] {
         guard let selectedSource else { return [] }
-        if selectedSource.delivery == .hls && selectedSource.playbackPath == .direct {
+        if selectedSource.delivery == .hls && selectedSource.playbackPath == .direct && !selectedSource.hlsAudioOptions.isEmpty {
             return selectedSource.hlsAudioOptions.enumerated().map { index, option in
                 AudioChoice(snapshot: AudioOptionSnapshot(
                     id: "\(sourceOptionsGeneration.uuidString)-audio-native-\(index)",
@@ -1005,7 +1242,24 @@ final class PlaybackController: ObservableObject {
             }
         }
         guard let current = Self.candidate(presenting: selectedSource, in: sourceCandidates),
-              current.source.audio != nil else { return [] }
+              current.source.audio != nil else {
+            guard let group = nativeAudioGroup, let item = mediaItem else { return [] }
+            let selectable = NativeMediaOptions.selectable(in: group, for: item)
+            return group.options.enumerated().compactMap { index, option -> AudioChoice? in
+                guard selectable.contains(option) else { return nil }
+                let name = (nativeAudioTitles[index] ?? option.displayName).trimmingCharacters(in: .whitespacesAndNewlines)
+                var label = name.isEmpty || name.count > 80 || name.contains("://") ? "Audio \(index + 1)" : name
+                if preparedMedia != nil {
+                    let types = option.mediaSubTypes.map { $0.uint32Value }
+                    let codec = types.contains(kAudioFormatMPEG4AAC) ? "AAC"
+                        : types.contains(kAudioFormatEnhancedAC3) ? "Dolby Digital Plus"
+                        : types.contains(kAudioFormatAC3) ? "Dolby Digital" : nil
+                    if let codec, !label.localizedCaseInsensitiveContains(codec) { label += " (\(codec))" }
+                }
+                return AudioChoice(snapshot: AudioOptionSnapshot(
+                    id: "\(sourceOptionsGeneration.uuidString)-audio-installed-\(index)", label: label), kind: .installed(index))
+            }
+        }
         return sourceCandidates.enumerated().compactMap { index, candidate in
             guard candidate.sharesVideo(with: current), let label = candidate.audioDescription else { return nil }
             return AudioChoice(snapshot: AudioOptionSnapshot(
@@ -1079,7 +1333,7 @@ final class PlaybackController: ObservableObject {
     }
 
     private func startPlaylistLoad(_ url: URL, autoplay: Bool = false, waitForReceiver: Bool = false) {
-        let retryRoute = hasOpenedPicker || player.isExternalPlaybackActive
+        let retryRoute = hasOpenedPicker || playbackOutputAvailable
         resetItem(keepPlayerItem: true)
         probeWhenReady = retryRoute
         let id = generation
@@ -1149,11 +1403,11 @@ final class PlaybackController: ObservableObject {
             preferences.resumeDuration = snapshot.duration ?? loadPreferences?.resumeDuration
         }
         if changingSource || retry || fallback != nil { preferences.followsLive = liveFollowRequested }
-        let retryRoute = hasOpenedPicker || player.isExternalPlaybackActive
+        let retryRoute = hasOpenedPicker || playbackOutputAvailable
         let retainedCandidates = fallback == nil ? [] : sourceCandidates
-        let receiverReplacement = player.currentItem != nil && (player.isExternalPlaybackActive || playWhenReady)
+        let receiverReplacement = player.currentItem != nil && (playbackOutputAvailable || playWhenReady)
         let canInspectBeforePlayback = player.currentItem == nil || waitingScreen.ownsCurrentItem
-        let retainReceiver = keepReceiverOnFailure || player.isExternalPlaybackActive || waitingScreen.isActive
+        let retainReceiver = keepReceiverOnFailure || playbackOutputAvailable || waitingScreen.isActive
         let retainedInspection = changingSource || retry || fallback != nil ? inspectedSourceHeight : nil
         let retainedVideoSample = fallback != nil ? sampledVideo : nil
         let retainedSampleStatus = fallback != nil ? sampleInspectionStatus : nil
@@ -1167,6 +1421,8 @@ final class PlaybackController: ObservableObject {
         let retainedAuthentication = originalSourceURL == url && (changingSource || retry || fallback != nil)
             ? authenticatedMedia : nil
         if retainedAuthentication != nil { authenticatedMedia = nil }
+        let retainedShare = originalSourceURL == url && (changingSource || retry || fallback != nil) ? sharePlayback : nil
+        if retainedShare != nil { sharePlayback = nil }
         resetItem(keepPlayerItem: true, preserveQueue: preservingQueue)
         liveFollowRequested = preferences.followsLive
         replacingReceiverItem = receiverReplacement
@@ -1174,6 +1430,7 @@ final class PlaybackController: ObservableObject {
         loadingLiveChannel = retainedLiveChannel
         pendingHistoryURL = recordHistory ? url : retainedHistoryURL
         authenticatedMedia = retainedAuthentication
+        sharePlayback = retainedShare
         selectedIPTVChannelID = retainedChannel
         hasPlayed = previouslyPlayed
         inspectedSourceHeight = retainedInspection
@@ -1216,7 +1473,15 @@ final class PlaybackController: ObservableObject {
                 }
                 else {
                     guard let self else { return }
-                    let resolvedURL = try await self.authenticatedURL(for: url, generation: id)
+                    let resolvedURL: URL
+                    if url.scheme == "airthrow-share", let existing = self.sharePlayback {
+                        resolvedURL = existing.url
+                    } else if url.scheme == "airthrow-share" {
+                        let resource = try await self.networkLibrary.resolve(url, allowDownload: self.shareDownloads.contains(url))
+                        guard !Task.isCancelled, self.generation == id else { resource.stop(); return }
+                        self.sharePlayback = resource
+                        resolvedURL = resource.url
+                    } else { resolvedURL = try await self.authenticatedURL(for: url, generation: id) }
                     try Task.checkCancellation()
                     guard self.generation == id else { return }
                     let candidates = try await resolver(resolvedURL)
@@ -1299,6 +1564,8 @@ final class PlaybackController: ObservableObject {
                 self.resolving = false
                 var playbackURL = self.variantMediaRelay?.url ?? source.url
                 if source.needsPreparationPipeline {
+                    let trace = PreparationDiagnosticRecorder()
+                    self.preparationTrace = trace
                     guard let prepareSource = self.prepareSource else { throw PreparationFailure.unsupported }
                     self.preparing = true
                     self.timeoutTask?.cancel()
@@ -1315,7 +1582,9 @@ final class PlaybackController: ObservableObject {
                         self.preparationInputRelay = relay
                         preparationInput = source.withPreparationInput(local)
                     }
-                    let prepared = try await prepareSource(preparationInput)
+                    let prepared = try await PreparationTrace.$current.withValue(trace) {
+                        try await prepareSource(preparationInput)
+                    }
                     guard !Task.isCancelled, self.generation == id else {
                         prepared.stop(); await prepared.waitForProducer(); return
                     }
@@ -1335,6 +1604,7 @@ final class PlaybackController: ObservableObject {
                         guard let self, self.generation == id else { return }
                         // The prepared URL already reached this session. A later
                         // producer failure ends it rather than advancing a queue.
+                        self.preparationTrace?.failed(failure)
                         self.fail(failure.reason, advancingQueue: false)
                     }
                     prepared.onReadyRangesChanged = { [weak self, weak prepared] in
@@ -1364,6 +1634,17 @@ final class PlaybackController: ObservableObject {
                 let audio = try? await asset.loadTracks(withMediaType: .audio)
                 let audibleGroup = try? await asset.loadMediaSelectionGroup(for: .audible)
                 let legibleGroup = try? await asset.loadMediaSelectionGroup(for: .legible)
+                // HLS displayName may contain only the language, while its
+                // common title retains authored names such as AAC Stereo.
+                var audioTitles: [Int: String] = [:]
+                if self.preparedMedia != nil, let audibleGroup {
+                    for (index, option) in audibleGroup.options.enumerated() {
+                        if let title = option.commonMetadata.first(where: { $0.commonKey == .commonKeyTitle }),
+                           let name = try? await title.load(.stringValue) {
+                            audioTitles[index] = name
+                        }
+                    }
+                }
                 let metadataTitle = await self.metadataTitle(from: asset)
                 var detectedAudio: Bool?
                 if let audio {
@@ -1398,6 +1679,7 @@ final class PlaybackController: ObservableObject {
                 if source.title == nil, let metadataTitle { self.title = metadataTitle }
                 let item = self.makePlayerItem(asset)
                 self.nativeAudioGroup = audibleGroup?.options.isEmpty == false ? audibleGroup : nil
+                self.nativeAudioTitles = audioTitles
                 self.selectedNativeAudioID = nil
                 self.nativeSubtitleGroup = legibleGroup?.options.isEmpty == false ? legibleGroup : nil
                 if source.delivery == .hls, source.playbackPath == .direct,
@@ -1467,7 +1749,7 @@ final class PlaybackController: ObservableObject {
                         }
                         let hasNext = self.queue.map { $0.currentIndex + 1 < $0.entries.count } ?? false
                         if QueuePolicy.shouldAdvanceAfterEnd(hasPlayed: self.hasPlayed,
-                            externalPlaybackActive: self.player.isExternalPlaybackActive,
+                            externalPlaybackActive: self.playbackOutputAvailable,
                             isProbing: self.probing, hasNext: hasNext) {
                             self.loadQueueItem(at: (self.queue?.currentIndex ?? -1) + 1,
                                                direction: 1, autoplay: true)
@@ -1552,6 +1834,10 @@ final class PlaybackController: ObservableObject {
                               message: "This output would downscale the source. Choose 4K or Original.")
                     return
                 }
+                if let failure = error as? ShareError {
+                    self.fail(.loadFailed, message: failure.localizedDescription, advancingQueue: false)
+                    return
+                }
                 if let failure = error as? HTTPLoginFailure {
                     self.fail(.httpAuthenticationRequired, message: failure.message, advancingQueue: false)
                     return
@@ -1565,6 +1851,7 @@ final class PlaybackController: ObservableObject {
                 }
                 let reason = (error as? PreparationFailure)?.reason ?? (error as? ResolutionFailure)?.reason
                     ?? MediaDiagnostics.reason(for: error, fallback: .loadFailed)
+                self.preparationTrace?.failed(error)
                 self.assetErrorCode = (error as NSError).code
                 self.assetFailureErrors = MediaDiagnostics.numericErrors(for: error)
                 self.fail(reason)
@@ -1653,7 +1940,7 @@ final class PlaybackController: ObservableObject {
         guard pendingResumePosition == nil || probeRestoreFailed else {
             throw AppFailure(.unsupportedOperation, "Wait for the playback position to be restored.")
         }
-        guard player.isExternalPlaybackActive else {
+        guard playbackOutputAvailable else {
             throw AppFailure(.routeRequired, "Choose a video receiver using the AirPlay button, then press Play.")
         }
         if pendingSeek != nil {
@@ -1717,7 +2004,7 @@ final class PlaybackController: ObservableObject {
         }
         let autoplay = autoplayVideos || replacementAutoplay
         loadQueueItem(at: queue.currentIndex - 1, direction: -1, autoplay: autoplay,
-                      waitForReceiver: autoplayVideos && !player.isExternalPlaybackActive)
+                      waitForReceiver: autoplayVideos && !playbackOutputAvailable)
     }
 
     func next() throws {
@@ -1726,7 +2013,7 @@ final class PlaybackController: ObservableObject {
         }
         let autoplay = autoplayVideos || replacementAutoplay
         loadQueueItem(at: queue.currentIndex + 1, direction: 1, autoplay: autoplay,
-                      waitForReceiver: autoplayVideos && !player.isExternalPlaybackActive)
+                      waitForReceiver: autoplayVideos && !playbackOutputAvailable)
     }
 
     private func loadQueueItem(at requestedIndex: Int, direction: Int, autoplay: Bool,
@@ -1773,7 +2060,7 @@ final class PlaybackController: ObservableObject {
         guard !probing && !probeRestoring else {
             throw AppFailure(.unsupportedOperation, "Wait for the receiver connection to finish.")
         }
-        guard player.isExternalPlaybackActive else {
+        guard playbackOutputAvailable else {
             throw AppFailure(.routeRequired, "Choose a video receiver first.")
         }
         liveFollowRequested = followingLive
@@ -1896,12 +2183,13 @@ final class PlaybackController: ObservableObject {
     /// ready item can establish the route without reopening the picker. Opening
     /// the picker is not evidence that the user selected a receiver.
     func pickerWillOpen() {
+        guard !localDebugPlayback else { return }
         if showReceiverWaitingScreen && mediaItem == nil && !loadInProgress && failure == nil {
             waitingScreen.start()
         }
         hasOpenedPicker = true
         pickerIsOpen = true
-        probeWhenReady = !player.isExternalPlaybackActive
+        probeWhenReady = !playbackOutputAvailable
         // Reopening during a negotiation restarts the picker window so a
         // receiver chosen in this presentation is not cancelled by the previous
         // dismissal's shorter deadline.
@@ -1910,6 +2198,7 @@ final class PlaybackController: ObservableObject {
     }
 
     private func beginProbeIfReady() {
+        guard !localDebugPlayback else { return }
         guard probeWhenReady, mediaItem?.status == .readyToPlay, !loading, !probeRestoring,
               pendingResumePosition == nil else { return }
         if failure != nil {
@@ -1919,7 +2208,7 @@ final class PlaybackController: ObservableObject {
         guard !probing else { return }
         probeWhenReady = false
         // Opening the picker on an active route must not pause or rewind playback.
-        guard !player.isExternalPlaybackActive else { return }
+        guard !playbackOutputAvailable else { return }
         if !probeRestoreFailed {
             let finiteAutoplay = pendingAutoplaySeek && selectedSource?.isLive != true
                 && (preparedMedia?.sourceDuration != nil || finite(mediaItem?.duration.seconds ?? .nan) != nil)
@@ -1934,7 +2223,7 @@ final class PlaybackController: ObservableObject {
             Task { @MainActor in
                 guard finished, let self, self.generation == id,
                       self.probeID == negotiationID, self.probing else { return }
-                if self.player.isExternalPlaybackActive {
+                if self.playbackOutputAvailable {
                     self.finishProbeIfReady()
                 } else {
                     // Preroll only buffers; a muted playback request is needed
@@ -1947,7 +2236,7 @@ final class PlaybackController: ObservableObject {
     }
 
     private func finishProbeIfReady() {
-        guard probing, player.isExternalPlaybackActive else { return }
+        guard probing, playbackOutputAvailable else { return }
         cancelProbe(restorePosition: true)
         refresh()
     }
@@ -1955,7 +2244,7 @@ final class PlaybackController: ObservableObject {
     func pickerDidClose() {
         pickerIsOpen = false
         guard probing else { return }
-        if player.isExternalPlaybackActive {
+        if playbackOutputAvailable {
             finishProbeIfReady()
         } else {
             // The user returned without an active route. Stop the muted
@@ -2049,7 +2338,7 @@ final class PlaybackController: ObservableObject {
                         if abs(position.seconds) < 0.1 { self.pendingAutoplaySeek = false }
                         self.probeRestoreSeekID = nil
                         self.probeRestoreTask = nil
-                        if self.player.isExternalPlaybackActive {
+                        if self.playbackOutputAvailable {
                             self.notice = "Connected. Press Play when you’re ready."
                         }
                         self.refresh()
@@ -2094,12 +2383,13 @@ final class PlaybackController: ObservableObject {
 
     /// Deliveries kept alive only while AVPlayer still retains the replaced item.
     private var hasRetiredDelivery: Bool {
-        retiredPreparedMedia != nil || retiredAuthenticatedMedia != nil || retiredVariantMediaRelay != nil
+        retiredSharePlayback != nil || retiredPreparedMedia != nil || retiredAuthenticatedMedia != nil || retiredVariantMediaRelay != nil
     }
 
     private func releaseRetiredDelivery() {
         stopRetiredPreparedMedia()
         retiredAuthenticatedMedia?.stop(); retiredAuthenticatedMedia = nil
+        retiredSharePlayback?.stop(); retiredSharePlayback = nil
         retiredVariantMediaRelay?.stop(); retiredVariantMediaRelay = nil
     }
 
@@ -2128,7 +2418,7 @@ final class PlaybackController: ObservableObject {
                 do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
                 guard let self, self.generation == id, self.playWhenReady,
                       self.failure == nil else { return }
-                if self.player.isExternalPlaybackActive, self.player.timeControlStatus == .playing {
+                if self.playbackOutputAvailable, self.player.timeControlStatus == .playing {
                     if let since = playingSince, since.duration(to: clock.now) >= .seconds(1) {
                         self.playWhenReady = false
                         self.refresh()
@@ -2137,7 +2427,7 @@ final class PlaybackController: ObservableObject {
                     if playingSince == nil { playingSince = clock.now }
                 } else {
                     playingSince = nil
-                    if self.player.isExternalPlaybackActive, self.player.timeControlStatus == .paused,
+                    if self.playbackOutputAvailable, self.player.timeControlStatus == .paused,
                        clock.now >= retryAt {
                         self.player.isMuted = false
                         self.player.play()
@@ -2156,6 +2446,12 @@ final class PlaybackController: ObservableObject {
     }
 
     private func resetItem(keepPlayerItem: Bool = false, preserveQueue: Bool = false) {
+        if let resource = sharePlayback {
+            if keepPlayerItem, mediaItem != nil, player.currentItem === mediaItem {
+                retiredSharePlayback?.stop(); retiredSharePlayback = resource
+            } else { resource.stop() }
+            sharePlayback = nil
+        }
         metricsObserver?.cancel(); metricsObserver = nil
         liveFollowRequested = true
         mediaItem?.automaticallyPreservesTimeOffsetFromLive = false
@@ -2189,6 +2485,7 @@ final class PlaybackController: ObservableObject {
         preparationInputRelay?.stop(); preparationInputRelay = nil
         lastLivePipeline = nil
         lastFailureDiagnostics = nil
+        preparationTrace = nil
         loadingLiveChannel = false
         assetErrorCode = nil
         assetFailureErrors = nil
@@ -2230,6 +2527,7 @@ final class PlaybackController: ObservableObject {
         sourceChoice = nil
         selectedNativeAudioID = nil
         nativeAudioGroup = nil
+        nativeAudioTitles = [:]
         nativeSubtitleGroup = nil
         subtitlePreference = nil
         changingSource = false
@@ -2250,7 +2548,7 @@ final class PlaybackController: ObservableObject {
         probeRestoreFailed = false
         hasAudio = nil
         hasVideo = false
-        wasExternal = player.isExternalPlaybackActive
+        wasExternal = playbackOutputAvailable
         if !preserveQueue {
             queue = nil
             queueAttemptsRemaining = 0
@@ -2297,10 +2595,11 @@ final class PlaybackController: ObservableObject {
                           attemptsRemaining: queueAttemptsRemaining - 1)
             return
         }
-        let restoreWaitingScreen = showReceiverWaitingScreen && keepReceiverOnFailure
+        let restoreWaitingScreen = !localDebugPlayback && showReceiverWaitingScreen && keepReceiverOnFailure
         captureLivePipeline()
         var terminalDiagnostics = snapshot.diagnostics ?? PlaybackDiagnostics()
         terminalDiagnostics.livePipeline = lastLivePipeline
+        terminalDiagnostics.preparation = preparationTrace?.snapshot
         terminalDiagnostics.sampledVideo = sampledVideo
         terminalDiagnostics.sampleInspectionStatus = sampleInspectionStatus
         terminalDiagnostics.assetErrorCode = assetErrorCode
@@ -2314,6 +2613,7 @@ final class PlaybackController: ObservableObject {
         loading = false
         clearHTTPLogin()
         authenticatedMedia?.stop(); authenticatedMedia = nil
+        sharePlayback?.stop(); sharePlayback = nil
         variantMediaRelay?.stop(); variantMediaRelay = nil
         failureReason = reason
         failure = message ?? reason.message
@@ -2367,9 +2667,9 @@ final class PlaybackController: ObservableObject {
     }
 
     private func captureLivePipeline() {
-        guard preparedMedia != nil || preparationInputRelay != nil else { return }
+        guard preparedMedia != nil || preparationInputRelay != nil || sharePlayback?.diagnostics != nil else { return }
         var result = preparedMedia?.liveDiagnostics ?? LivePipelineDiagnostics()
-        if let relay = preparationInputRelay?.diagnostics {
+        if let relay = preparationInputRelay?.diagnostics ?? sharePlayback?.diagnostics {
             result.relayActiveStreams = relay.relayActiveStreams
             result.relayFinishedStreams = relay.relayFinishedStreams
             result.relayReceivedBytes = relay.relayReceivedBytes
@@ -2393,7 +2693,7 @@ final class PlaybackController: ObservableObject {
         if waitingScreen.isActive {
             var next = PlaybackSnapshot()
             next.receiverWaiting = true
-            next.externalPlaybackActive = player.isExternalPlaybackActive
+            next.externalPlaybackActive = playbackOutputAvailable
             next.state = next.externalPlaybackActive ? .idle : .connecting
             next.title = "Ready to play"
             if let failure {
@@ -2424,7 +2724,7 @@ final class PlaybackController: ObservableObject {
             // stop actual playback without cancelling each buffering attempt.
             if player.rate != 0 { player.pause() }
         }
-        let external = player.isExternalPlaybackActive
+        let external = playbackOutputAvailable
         if external {
             waitsForAutoplayReceiver = false
             autoplayRouteTask?.cancel(); autoplayRouteTask = nil
@@ -2442,7 +2742,7 @@ final class PlaybackController: ObservableObject {
             autoplayRouteTask = Task { [weak self] in
                 do { try await ContinuousClock().sleep(until: deadline) } catch { return }
                 guard let self, self.generation == id, self.playWhenReady,
-                      !self.player.isExternalPlaybackActive else { return }
+                      !self.playbackOutputAvailable else { return }
                 self.pause()
                 self.notice = "The receiver did not reconnect. Choose a receiver using AirPlay, then press Play."
                 self.refresh()
@@ -2590,7 +2890,8 @@ final class PlaybackController: ObservableObject {
         var next = PlaybackSnapshot()
         next.seekInProgress = pendingSeek != nil ? true : nil
         next.title = title
-        next.externalPlaybackActive = external
+        next.externalPlaybackActive = player.isExternalPlaybackActive
+        next.localPlaybackActive = localDebugPlayback ? true : nil
         next.error = playbackErrorDismissed ? nil : failure
         next.errorReason = failureReason
         next.loadingPhase = httpLoginRequest != nil ? "authentication" : resolving ? "resolving" : (preparing ? "preparing" : nil)
@@ -2633,6 +2934,11 @@ final class PlaybackController: ObservableObject {
                       $0.source.url == selectedSource.url && $0.source.audio?.url == selectedSource.audio?.url
                   }), sourceCandidates[index].source.audio != nil {
             next.selectedAudioID = "\(sourceOptionsGeneration.uuidString)-audio-candidate-\(index)"
+        } else if let group = nativeAudioGroup, let item = mediaItem,
+                  let selected = item.currentMediaSelection.selectedMediaOption(in: group),
+                  let index = group.options.firstIndex(of: selected) {
+            let id = "\(sourceOptionsGeneration.uuidString)-audio-installed-\(index)"
+            if choices.contains(where: { $0.snapshot.id == id }) { next.selectedAudioID = id }
         }
         if let sourceChoice, let index = sourceCandidates.firstIndex(where: { $0.id == sourceChoice }) {
             next.selectedSourceID = sourceOptionID(index)
@@ -2693,6 +2999,10 @@ final class PlaybackController: ObservableObject {
         if replacementPlayTask != nil, playWhenReady, external, failure == nil,
            player.timeControlStatus != .playing { next.state = .buffering }
         if pendingSeek != nil, seekPlayWhenReady, external, failure == nil { next.state = .playing }
+        if let preparation = preparationTrace?.snapshot {
+            if next.diagnostics == nil { next.diagnostics = PlaybackDiagnostics() }
+            next.diagnostics?.preparation = preparation
+        }
         if snapshot != next {
             let previous = snapshot
             snapshot = next
@@ -2708,6 +3018,9 @@ final class PlaybackController: ObservableObject {
         let reuse = diagnosticsCacheItem == ObjectIdentifier(item) && diagnosticsCacheStatus == item.status
             && diagnosticsCacheTime.map { now < $0.advanced(by: .seconds(5)) } == true
         var diagnostics = reuse ? (diagnosticsCache ?? PlaybackDiagnostics()) : PlaybackDiagnostics()
+        diagnostics.audioCodecTypes = nativeAudioGroup.flatMap { group in
+            item.currentMediaSelection.selectedMediaOption(in: group)?.mediaSubTypes.map { $0.uint32Value }
+        }
         // Keep the last completed format sample while the next asynchronous
         // read is in flight, but never carry it across player items.
         if !reuse, diagnosticsCacheItem == ObjectIdentifier(item) {
@@ -2850,6 +3163,9 @@ final class PlaybackController: ObservableObject {
     }
 
     func shutdown() {
+        debugWindowObservation = nil
+        (debugWindow?.contentView as? AVPlayerView)?.player = nil
+        debugWindow?.close(); debugWindow = nil
         cancelIPTVImport()
         stop()
         if let timeObserver { player.removeTimeObserver(timeObserver); self.timeObserver = nil }
@@ -2973,7 +3289,7 @@ final class PlaybackController: ObservableObject {
         guard integratesWithSystemPlayback else { return }
         let center = MPRemoteCommandCenter.shared()
         let hasItem = mediaItem != nil && failure == nil
-        center.playCommand.isEnabled = hasItem && !loading && snapshot.externalPlaybackActive && !probing && !probeRestoring
+        center.playCommand.isEnabled = hasItem && !loading && snapshot.playbackOutputActive && !probing && !probeRestoring
         center.pauseCommand.isEnabled = hasItem
         center.stopCommand.isEnabled = hasItem || loading || waitingScreen.isActive
         center.togglePlayPauseCommand.isEnabled = center.playCommand.isEnabled

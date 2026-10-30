@@ -432,7 +432,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             switch request.command {
             case .open:
                 guard let url = request.url else { throw AppFailure(.invalidRequest, "The open command requires a video URL or local file path.") }
-                let playOnReceiver = request.autoplay == true && controller.snapshot.externalPlaybackActive
+                let playOnReceiver = request.autoplay == true && controller.snapshot.playbackOutputActive
                 try controller.load(url, autoplay: request.autoplay == true)
                 if !controller.snapshot.externalPlaybackActive || controller.iptvImporting { showWindow() }
                 if controller.iptvImporting { return Response(message: "Importing channel playlist.", pending: true, status: controller.snapshot) }

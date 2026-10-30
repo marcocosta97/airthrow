@@ -85,10 +85,66 @@ struct ControllerChecks {
         let base = CommandLine.arguments[1]
         let controller = PlaybackController(historyStore: MediaHistoryStore(defaults: nil), integratesWithSystemPlayback: false)
         defer { controller.shutdown() }
+        let recentStore = MediaHistoryStore(defaults: nil)
+        recentStore.record(URL(string: "https://fixture.invalid/list.m3u")!, title: "Channels", kind: .iptv)
+        recentStore.record(URL(string: "https://fixture.invalid/catalog")!, title: "Catalog", kind: .xtream)
+        recentStore.record(URL(string: "https://fixture.invalid/video.mp4")!, title: "Video", kind: .video)
+        let recentController = PlaybackController(loadIPTVCatalog: { _ in
+            try IPTVPlaylist.parse(Data("#EXTM3U\n#EXTINF:-1,Demo\nhttps://fixture.invalid/video.mp4\n".utf8))
+        }, historyStore: recentStore, integratesWithSystemPlayback: false)
+        precondition(recentController.recentPlaybackHistory.count == 1)
+        recentController.clearHistory()
+        precondition(recentController.recentPlaybackHistory.isEmpty && recentStore.entries.count == 2)
+        precondition(recentController.iptvPlaylists.isEmpty && recentController.iptvPlaylistSources.count == 1)
+        precondition(recentController.iptvPlaylistSources[0].title == "Channels")
+        recentController.selectIPTVPlaylist(recentController.iptvPlaylistSources[0].id)
+        let reopenDeadline = Date().addingTimeInterval(3)
+        while recentController.iptvPlaylists.isEmpty, Date() < reopenDeadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        precondition(recentController.iptvCatalog?.channels.count == 1 && recentController.iptvPlaylistSources.count == 1)
+        let savedAccount = recentController.xtreamPlaylists[0].id
+        recentController.removeHistoryEntry(savedAccount)
+        precondition(recentController.xtreamPlaylists.isEmpty && recentStore.entries.count == 1)
+        print("PASS saved M3U sources remain visible without loaded catalogs; Xtream removal persists")
+        recentController.shutdown()
+        print("PASS clearing recent playback preserves saved IPTV and Xtream sources")
         let player = controller.player
 
         func check(_ condition: Bool, _ message: String) throws {
             if !condition { throw NSError(domain: "ControllerChecks", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
+        }
+        do {
+            let diagnostics = PlaybackController(resolveSource: { ResolvedSource(url: $0, needsPreparation: true) },
+                enableCompatibilityFallback: false, historyStore: MediaHistoryStore(defaults: nil), prepareSource: { _ in
+                    PreparationTrace.current?.mark(.chunkMux)
+                    do { _ = try await HelperProcess.run(executable: "/usr/bin/false", arguments: []) }
+                    catch { throw PreparationFailure.failed }
+                    throw PreparationFailure.failed
+                }, integratesWithSystemPlayback: false)
+            defer { diagnostics.shutdown() }
+            try diagnostics.load(base + "/video.mp4")
+            let deadline = Date().addingTimeInterval(5)
+            while diagnostics.snapshot.state != .failed, Date() < deadline { try await Task.sleep(for: .milliseconds(25)) }
+            let detail = diagnostics.snapshot.diagnostics?.preparation
+            try check(detail?.stage == .chunkMux && detail?.helperExitCode == 1 && detail?.failureReason == .preparationFailed,
+                      "Preparation failure lost its fixed phase or numeric helper exit code")
+            try check(HelperProcess.failureKind(Data("private-prefix: moov atom not found; private-suffix".utf8)) == .missingMovieHeader,
+                      "Helper error classification lost the fixed MP4 header signature")
+            try check(HelperProcess.failureKind(Data("private-unmatched-description".utf8)) == .other,
+                      "Unknown helper text escaped the fixed diagnostic categories")
+            let recorder = PreparationDiagnosticRecorder()
+            recorder.mark(.chunkValidation)
+            recorder.failed(NSError(domain: NSURLErrorDomain, code: -1005,
+                userInfo: [NSLocalizedDescriptionKey: "private-description-sentinel"]))
+            let frozen = recorder.snapshot.phaseSeconds
+            try await Task.sleep(for: .milliseconds(20))
+            let encoded = try JSONEncoder().encode(recorder.snapshot)
+            try check(recorder.snapshot.phaseSeconds == frozen && !String(decoding: encoded, as: UTF8.self).contains("private-description-sentinel"),
+                      "Preparation diagnostics changed failure time or exposed arbitrary error text")
+            diagnostics.stop()
+            try check(diagnostics.snapshot.diagnostics?.preparation == nil, "Stop retained a stale preparation failure trace")
+            print("PASS preparation diagnostics preserve phase and helper exit without descriptions; Stop clears the trace")
         }
         func waitFor(_ state: PlaybackState, seconds: Double = 10) async throws {
             let deadline = Date().addingTimeInterval(seconds)
@@ -603,6 +659,46 @@ struct ControllerChecks {
         try check(qualityController.snapshot.seekInProgress == nil && qualityController.snapshot.state == .idle,
                   "Stop retained seek work")
         print("PASS seek progress stays visible on AirPlay, resumes play and handles supersession/Pause/Stop")
-        print("25/25 controller checks passed (simulated handoff; no physical receiver)")
+        let editorStore = MediaHistoryStore(defaults: nil)
+        let editor = PlaybackController(loadIPTVCatalog: { url in
+            guard url.host != "broken.invalid" else { throw URLError(.cannotConnectToHost) }
+            return try IPTVPlaylist.parse(Data("#EXTM3U\n#EXTINF:-1,Demo\nhttps://fixture.invalid/video.mp4\n".utf8))
+        }, historyStore: editorStore, integratesWithSystemPlayback: false)
+        defer { editor.shutdown() }
+        let draft = PlaylistConnectionDraft(kind: .m3u, name: "Original", address: "https://fixture.invalid/list.m3u")
+        try await editor.savePlaylistConnection(draft, username: "", password: "", storage: .session)
+        let playlistID = editor.iptvPlaylists[0].id
+        let sourceID = editorStore.entries[0].id
+        var edited = editor.playlistConnectionDraft(kind: .m3u, id: playlistID)
+        edited.name = "Renamed"
+        try await editor.savePlaylistConnection(edited, username: "", password: "", storage: .keep)
+        try check(editor.iptvPlaylists[0].title == "Renamed" && editorStore.entries[0].title == "Renamed", "Editor renames the library and saved source together")
+        edited.address = "https://broken.invalid/list.m3u"
+        do {
+            try await editor.savePlaylistConnection(edited, username: "", password: "", storage: .session)
+            try check(false, "Failed connection replaced a working source")
+        } catch is URLError {}
+        try check(editorStore.entries.count == 1 && editorStore.entries[0].id == sourceID && editor.iptvPlaylists[0].source == URL(string: draft.address), "Failed edits preserve the working source")
+        edited.address = "https://fixture.invalid/replacement.m3u"
+        try await editor.savePlaylistConnection(edited, username: "", password: "", storage: .session)
+        try check(editorStore.entries.count == 1 && editorStore.entries[0].id == sourceID && editor.iptvPlaylists.count == 1 && editor.iptvPlaylists[0].id == playlistID, "Successful edits preserve sidebar and source identity")
+        print("PASS source editor renames, replaces and preserves a working source on failure")
+        let local = PlaybackController(historyStore: MediaHistoryStore(defaults: nil), integratesWithSystemPlayback: false)
+        defer { local.shutdown() }
+        local.setLocalDebugPlayback(true, showWindow: false)
+        try local.load(base + "/video.mp4")
+        let localDeadline = Date().addingTimeInterval(15)
+        while local.snapshot.state == .loading && Date() < localDeadline { try await Task.sleep(for: .milliseconds(50)) }
+        try local.play()
+        try await Task.sleep(for: .milliseconds(500))
+        try check(local.player.rate > 0 && local.snapshot.localPlaybackActive == true && !local.snapshot.externalPlaybackActive,
+                  "Local debug plays on the persistent player without reporting an AirPlay connection")
+        try check(PlaybackPolicy.canControl(local.snapshot), "Local debug enables transport controls")
+        local.pause()
+        try check(local.player.rate == 0, "Local debug responds to Pause")
+        local.setLocalDebugPlayback(false, showWindow: false)
+        try check(local.snapshot.localPlaybackActive != true && local.player.currentItem == nil,
+                  "Changing debug output unloads playback")
+        print("27/27 controller checks passed (simulated handoff and local AVPlayer; no physical receiver)")
     }
 }

@@ -63,7 +63,7 @@ struct ControllerWindowView: View {
     private var compact: Bool { width < 720 }
 
     @ToolbarContentBuilder private var windowToolbar: some ToolbarContent {
-        if !compact, let label = receiverConnection.toolbarLabel {
+        if !compact, let label = controller.localDebugPlayback ? "Local debug playback" : receiverConnection.toolbarLabel {
             if #available(macOS 26, *) {
                 ToolbarItem(placement: .principal) {
                     ReceiverToolbarTitle(label: label, connecting: receiverConnection.phase == .connecting)
@@ -158,12 +158,7 @@ struct ControllerWindowView: View {
                 }, cancel: { controller.cancelHTTPLogin(id: request.id) })
                 .id(request.id)
             case .xtream:
-                XtreamPlaylistView(signingIn: controller.xtreamSigningIn,
-                                   serverError: controller.xtreamSignInError,
-                                   submit: { url, name in
-                    try controller.connectXtream(url, reportInSheet: true, name: name)
-                }, cancel: { presentation.xtreamPlaylistVisible = false },
-                                   clearServerError: { controller.clearXtreamSignInError() })
+                PlaylistConnectionSheet(controller: controller, draft: controller.playlistConnectionDraft(kind: .xtream))
             }
         }
         .onChange(of: controller.httpLoginRequest?.id) { _, request in
@@ -295,7 +290,7 @@ struct ControllerView: View {
                     .help(status.title)
             }
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(playbackStateLabel)
+                Text(status.localPlaybackActive == true ? "Local debug · \(playbackStateLabel)" : playbackStateLabel)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize()
@@ -315,7 +310,7 @@ struct ControllerView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if !status.externalPlaybackActive &&
+            if !status.playbackOutputActive &&
                 (status.state == .awaitingReceiver || status.state == .connecting) {
                 Text("Choose a receiver with the AirPlay button to play on TV.")
                     .font(.caption)

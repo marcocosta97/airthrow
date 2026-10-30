@@ -223,8 +223,8 @@ struct SettingsView: View {
                 Toggle("Keep all prepared video", isOn: $retainAll)
                 Toggle("Remux on demand (experimental)", isOn: $remuxCache)
                     .disabled(retainAll)
-                    .help("Requires a seekable source with compatible video and audio. Other sources prepare sequentially. Changes apply to the next load.")
-                Text("Produces only the parts needed for playback, without re-encoding. Works with local files and compatible remote sources.")
+                    .help("Requires a seekable source with compatible video and a usable index. Changes apply to the next load.")
+                Text("Copies video in parts within the preparation space limit. Audio may be converted per part; indexed Matroska text subtitles remain selectable. Works with local files and compatible remote shares.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -238,6 +238,15 @@ struct SettingsView: View {
             }
             Section("Cookies") {
                 CookieSourceView(cookieStatus: cookieStatus)
+            }
+            Section("Debug") {
+                Toggle("Play locally with AVPlayer", isOn: Binding(
+                    get: { controller.localDebugPlayback }, set: { controller.setLocalDebugPlayback($0) }))
+                    .disabled(controller.player.isExternalPlaybackActive)
+                Text("Use the same player, loading, seeking and source switching in a local video window. Changing output stops the current video. Disconnect AirPlay first. This session-only mode does not emulate the receiver or network transport.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
             }
         }
         .formStyle(.grouped)

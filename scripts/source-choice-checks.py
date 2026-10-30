@@ -82,6 +82,10 @@ if args.system_playback:
          '-movflags', '+faststart', out / 'artwork.mp4'])
     for name in ['tracks.mp4', 'artwork.mp4']:
         FILES['/' + name] = (out / name).read_bytes()
+    run([ffmpeg, '-v', 'error', '-nostdin', '-i', out / 'tracks.mp4', '-map', '0', '-c', 'copy',
+         '-c:a:0', 'eac3', '-ac:a:0', '6', '-b:a:0', '640k', '-c:s', 'srt', out / 'tracks-surround.mkv'])
+    FILES['/tracks-surround.mkv'] = (out / 'tracks-surround.mkv').read_bytes()
+    CONTENT_TYPES['/tracks-surround.mkv'] = 'video/x-matroska'
     run([ffmpeg, '-v', 'error', '-nostdin', '-stream_loop', '5', '-i', out / 'audio.mp4',
          '-t', '60', '-c', 'copy', '-hls_time', '2', '-hls_list_size', '0',
          '-hls_playlist_type', 'event', out / 'live.m3u8'])
@@ -168,11 +172,11 @@ checks = 'SystemPlaybackChecks' if args.system_playback else 'ControllerChecks' 
 binary = build / checks
 server = None
 try:
-    run(['swiftc', '-swift-version', '6', '-parse-as-library',
+    run(['swiftc', '-I', str(ROOT / 'Sources/CSQLite'), '-swift-version', '6', '-parse-as-library',
          *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
          ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift',
          ROOT / 'Sources/AirThrowApp/InterfaceCopy.swift',
-         ROOT / 'Sources/AirThrowApp/PlaybackController.swift',
+         ROOT / 'Sources/AirThrowApp/PlaybackController.swift', ROOT / 'Sources/AirThrowApp/NetworkLibraryModel.swift',
          ROOT / 'Sources/AirThrowApp/XtreamLibrary.swift',
          ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
          ROOT / 'Tests' / checks / 'main.swift', '-o', binary], timeout=180)

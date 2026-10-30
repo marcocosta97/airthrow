@@ -12,6 +12,7 @@ struct IPTVPanel: View, Equatable {
     /// Copied at the parent so equality does not read the controller off the main actor.
     let catalogID: UUID?
     let selectedID: UUID?
+    let displayTitle: String
     @CatalogState private var search = ""
     @CatalogState private var query = ""
     @CatalogState private var category: String?
@@ -25,6 +26,7 @@ struct IPTVPanel: View, Equatable {
         self.controller = controller
         self.catalogID = catalogID
         self.selectedID = selectedID
+        self.displayTitle = controller.iptvPlaylists.first(where: { $0.id == controller.selectedIPTVPlaylistID })?.title ?? "Channels"
         let catalog = controller.iptvCatalog
         _categories = CatalogState(initialValue: catalog?.categories ?? [])
         _includesUncategorized = CatalogState(initialValue: catalog?.channels.contains { $0.category == nil } ?? false)
@@ -32,19 +34,19 @@ struct IPTVPanel: View, Equatable {
     }
 
     nonisolated static func == (lhs: IPTVPanel, rhs: IPTVPanel) -> Bool {
-        lhs.catalogID == rhs.catalogID && lhs.selectedID == rhs.selectedID
+        lhs.catalogID == rhs.catalogID && lhs.selectedID == rhs.selectedID && lhs.displayTitle == rhs.displayTitle
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let catalog = controller.iptvCatalog {
                 HStack(spacing: 8) {
-                    Text(catalog.title).font(.headline).lineLimit(1).help(catalog.title)
+                    Text(displayTitle).font(.headline).lineLimit(1).help(displayTitle)
                     Spacer(minLength: 8)
                     Button("Remove") { controller.removeSelectedIPTVPlaylist() }
                         .controlSize(.small)
                         .help("Remove this playlist from the library")
-                        .accessibilityLabel("Remove \(catalog.title)")
+                        .accessibilityLabel("Remove \(displayTitle)")
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)

@@ -481,6 +481,8 @@ public enum MediaFailureReason: String, Codable, Sendable {
 public struct PlaybackSnapshot: Codable, Sendable, Equatable {
     public var state: PlaybackState = .idle
     public var externalPlaybackActive = false
+    public var localPlaybackActive: Bool?
+    public var playbackOutputActive: Bool { externalPlaybackActive || localPlaybackActive == true }
     /// True for the optional receiver interstitial; it is not user media.
     public var receiverWaiting: Bool?
     public var position: Double?
@@ -800,7 +802,7 @@ public enum PlaybackPolicy {
     }
 
     public static func canControl(_ snapshot: PlaybackSnapshot) -> Bool {
-        snapshot.externalPlaybackActive && !isBusy(snapshot)
+        snapshot.playbackOutputActive && !isBusy(snapshot)
             && ![.idle, .failed].contains(snapshot.state)
     }
 
@@ -964,6 +966,7 @@ public enum MenuModel {
     }
 
     private static func detailText(_ snapshot: PlaybackSnapshot) -> String {
+        if snapshot.localPlaybackActive == true { return "Local debug playback" }
         guard snapshot.externalPlaybackActive else { return "AirPlay not connected" }
         if snapshot.receiverWaiting == true { return "AirPlay connected" }
         if snapshot.isLive {

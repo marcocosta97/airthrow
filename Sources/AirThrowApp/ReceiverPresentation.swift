@@ -29,6 +29,7 @@ struct ReceiverToolbarButton: View {
 
     var body: some View {
         ReceiverRoutePicker(controller: controller)
+            .disabled(controller.localDebugPlayback)
             .help(help)
             .accessibilityLabel("AirPlay receiver")
             .accessibilityValue(connection.phase.rawValue)

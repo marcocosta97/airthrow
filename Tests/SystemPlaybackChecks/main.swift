@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import AudioToolbox
 import MediaPlayer
 
 /// Exercise MediaPlayer's background request contract without mutating artwork.
@@ -14,12 +15,12 @@ private final class RemotePlayer: AVPlayer, @unchecked Sendable {
     nonisolated(unsafe) private var position = 0.0
     nonisolated(unsafe) private var playing = false
     nonisolated(unsafe) private var routed = true
-    var external: Bool {
+    nonisolated var external: Bool {
         get { lock.withLock { routed } }
         set { lock.withLock { routed = newValue } }
     }
     override var isExternalPlaybackActive: Bool { external }
-    override var rate: Float {
+    nonisolated override var rate: Float {
         get { lock.withLock { playing ? 1 : 0 } }
         set { lock.withLock { playing = newValue > 0 } }
     }
@@ -50,6 +51,7 @@ private final class MutedLivePlayer: AVPlayer, @unchecked Sendable {
 @main
 struct SystemPlaybackChecks {
     @MainActor static func main() async {
+        setbuf(stdout, nil)
         do { try await run() }
         catch { print("FAIL system playback checks: \(error)"); exit(1) }
     }
@@ -104,6 +106,13 @@ struct SystemPlaybackChecks {
         let item = player.currentItem!
         let audio = languages.selectableEntries(in: item).filter { $0.option.languageOptionType == .audible }
         try check(audio.count >= 2 && languages.groups(in: item).count == 2, "Native groups were not published")
+        let audioChoices = controller.snapshot.audioOptions ?? []
+        try check(audioChoices.count == audio.count, "The Audio menu hid tracks present on the installed player item")
+        let originalItem = player.currentItem
+        try controller.selectAudio(audioChoices[1].id)
+        try await wait { controller.refresh(); return controller.snapshot.selectedAudioID == audioChoices[1].id }
+        try check(player.currentItem === originalItem && item.currentMediaSelection.selectedMediaOption(in: audio[1].group) == audio[1].native,
+                  "Selecting installed audio reloaded the video or selected the wrong native option")
         try check(controller.selectRemoteLanguage(audio[1].option, enabled: true) == .success,
                   "Remote audio selection failed")
         try await wait { item.currentMediaSelection.selectedMediaOption(in: audio[1].group) == audio[1].native }
@@ -153,6 +162,33 @@ struct SystemPlaybackChecks {
                   && controller.selectRemoteLanguage(oldOption, enabled: true) == .commandFailed,
                   "Stop retained actionable language options")
         print("PASS native remote languages, selection feedback, Off, required groups, stale commands and Stop")
+        do {
+            let preparedPlayer = RemotePlayer()
+            let preparedController = PlaybackController(player: preparedPlayer, showReceiverWaitingScreen: false,
+                resolveSource: { ResolvedSource(url: $0, needsPreparation: true) },
+                historyStore: MediaHistoryStore(defaults: nil), xtreamCatalogDefaults: defaults,
+                prepareSource: { source in
+                    var environment = ProcessInfo.processInfo.environment
+                    environment["AIRTHROW_MEDIA_HOST"] = "127.0.0.1"
+                    let preferences = PreparationPreferences(maximumBytes: 8 * 1024 * 1024, remuxCache: true)
+                    return try await MediaPreparer(environment: environment, preferences: preferences).prepare(source)
+                }, integratesWithSystemPlayback: false)
+            defer { preparedController.shutdown() }
+            try preparedController.load(url("tracks-surround.mkv").absoluteString)
+            try await wait("prepared audio options") { preparedController.refresh(); return preparedController.snapshot.state == .ready }
+            let choices = preparedController.snapshot.audioOptions ?? []
+            guard let aac = choices.first(where: { $0.label.contains("AAC") }) else {
+                try check(false, "The prepared AAC alternative was hidden or lacked a recognizable label"); return
+            }
+            let installed = preparedPlayer.currentItem
+            try preparedController.selectAudio(aac.id)
+            try await wait("prepared AAC selection") {
+                preparedController.refresh()
+                return preparedController.snapshot.selectedAudioID == aac.id
+            }
+            try check(preparedPlayer.currentItem === installed, "Prepared audio selection reloaded the video")
+            print("PASS prepared Dolby/AAC alternatives are visible, labeled and selectable on the installed item")
+        }
 
         let artwork = NowPlayingArtworkLoader()
         defer { artwork.cancel() }
@@ -261,9 +297,9 @@ struct SystemPlaybackChecks {
             try await Task.sleep(for: .milliseconds(200))
             try check(metricUpdates == count, "Retired metric subscription kept publishing")
             print("PASS real muted HLS AVPlayer startup/seek metrics, URL-free encoding and cancellation")
-            print("5/5 system playback groups passed; physical AirPlay receiver untested")
+            print("6/6 system playback groups passed; physical AirPlay receiver untested")
         } else {
-            print("4/4 system playback groups passed; native metrics require macOS 15; physical AirPlay receiver untested")
+            print("5/5 system playback groups passed; native metrics require macOS 15; physical AirPlay receiver untested")
         }
     }
 }

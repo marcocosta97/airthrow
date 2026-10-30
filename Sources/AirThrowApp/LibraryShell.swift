@@ -6,7 +6,8 @@ import AirThrowCore
 #endif
 
 private enum LibrarySelection: Hashable {
-    case queue, history, tv
+    case queue, history, sources
+    case network(NetworkLibrarySelection)
     case xtream(UUID, XtreamSection)
     case iptv(UUID)
 }
@@ -15,20 +16,31 @@ private enum LibrarySelection: Hashable {
 struct LibraryShell: View {
     @ObservedObject var controller: PlaybackController
     @ObservedObject var presentation: ControllerPresentation
+    @ObservedObject private var networkLibrary: NetworkLibraryModel
+    @State private var networkSelection: NetworkLibrarySelection?
+    @State private var shareSheet = false
+    @State private var editingShare: NetworkShare?
+    init(controller: PlaybackController, presentation: ControllerPresentation) {
+        self.controller = controller; self.presentation = presentation
+        self.networkLibrary = controller.networkLibrary
+    }
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var width: CGFloat = 960
     @State private var sourceDraft = ""
     @State private var regularSidebarVisible = true
     @State private var renamingPlaylist: XtreamPlaylistSummary?
+    @State private var addingM3U = false
+    @State private var editingIPTV: IPTVPlaylistSummary?
     @State private var collapsedPlaylists: Set<UUID> = []
 
     private var sizeClass: LibrarySizeClass { LibrarySizeClass(width: width) }
     private var selection: LibrarySelection {
-        switch controller.inspectorPage {
+        if let networkSelection { return .network(networkSelection) }
+        return switch controller.inspectorPage {
         case .playlist: .queue
-        case .xtream: controller.xtreamLibrary.map { .xtream($0.id, controller.selectedXtreamSection) } ?? .tv
+        case .xtream: controller.xtreamLibrary.map { .xtream($0.id, controller.selectedXtreamSection) } ?? .sources
         case .channels:
-            if let id = controller.selectedIPTVPlaylistID { .iptv(id) } else { .tv }
+            if let id = controller.selectedIPTVPlaylistID { .iptv(id) } else { .sources }
         case .history: .history
         }
     }
@@ -67,6 +79,16 @@ struct LibraryShell: View {
                 presentation.playlistVisible = regularSidebarVisible
             }
         }
+        .task { await networkLibrary.open() }
+        .onChange(of: networkLibrary.activeShare) { _, id in
+            if let id { networkSelection = .share(id) }
+        }
+        .onChange(of: networkLibrary.configuration.shares.isEmpty) { _, empty in
+            if empty, networkSelection != nil { networkSelection = nil; controller.showPlaylists() }
+        }
+        .sheet(isPresented: $shareSheet) {
+            ShareConnectionSheet(model: networkLibrary, existing: editingShare)
+        }
         .onChange(of: controller.sourceInput, initial: true) { _, input in
             if let input { sourceDraft = input }
         }
@@ -80,11 +102,14 @@ struct LibraryShell: View {
         }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: presentation.sourceVisible)
         .background(Color(nsColor: SurfaceColor.window))
+        .sheet(item: $editingIPTV) { playlist in
+            PlaylistConnectionSheet(controller: controller, draft: controller.playlistConnectionDraft(kind: .m3u, id: playlist.id))
+        }
         .sheet(item: $renamingPlaylist) { playlist in
-            PlaylistNameSheet(name: playlist.title) { name in
-                controller.renameXtreamPlaylist(playlist.id, name: name)
-                renamingPlaylist = nil
-            } cancel: { renamingPlaylist = nil }
+            PlaylistConnectionSheet(controller: controller, draft: controller.playlistConnectionDraft(kind: .xtream, id: playlist.id))
+        }
+        .sheet(isPresented: $addingM3U) {
+            PlaylistConnectionSheet(controller: controller, draft: controller.playlistConnectionDraft(kind: .m3u))
         }
         .dropDestination(for: URL.self) { sources, _ in
             acceptDrop(sources)
@@ -183,11 +208,33 @@ struct LibraryShell: View {
             Section("Library") {
                 Label("Queue", systemImage: "list.bullet").tag(LibrarySelection.queue)
                 Label("History", systemImage: "clock").tag(LibrarySelection.history)
-                Label("Playlists", systemImage: "rectangle.stack").tag(LibrarySelection.tv)
+                Label("Sources", systemImage: "rectangle.stack").tag(LibrarySelection.sources)
             }
-            if !controller.iptvPlaylists.isEmpty || !controller.xtreamPlaylists.isEmpty {
+            Section("Shares") {
+                ForEach(networkLibrary.configuration.shares) { share in
+                    HStack {
+                        Label(share.name, systemImage: "externaldrive").lineLimit(1)
+                        Spacer(minLength: 4)
+                        if networkLibrary.connectedShares.contains(share.id) {
+                            Button { controller.unmountShare(share.id) } label: { Image(systemName: "eject") }
+                                .buttonStyle(.borderless).help("Unmount \(share.name)")
+                                .accessibilityLabel("Unmount \(share.name)")
+                                .disabled(networkLibrary.unmounting.contains(share.id))
+                        }
+                    }
+                    .tag(LibrarySelection.network(.share(share.id)))
+                    .contextMenu {
+                        Button("Update") { networkLibrary.reconnect(share.id) }
+                        Button("Unmount") { controller.unmountShare(share.id) }
+                            .disabled(!networkLibrary.connectedShares.contains(share.id))
+                        Button("Edit Share…") { editingShare = share; shareSheet = true }
+                        Button("Remove Share", role: .destructive) { Task { await networkLibrary.remove(share) } }
+                    }
+                }
+            }
+            if !controller.iptvPlaylistSources.isEmpty || !controller.xtreamPlaylists.isEmpty {
                 Section("Saved Playlists") {
-                    ForEach(controller.iptvPlaylists) { playlist in
+                    ForEach(controller.iptvPlaylistSources) { playlist in
                         Label(playlist.title, systemImage: "tv")
                             .lineLimit(1)
                             .tag(LibrarySelection.iptv(playlist.id))
@@ -217,7 +264,8 @@ struct LibraryShell: View {
             Label(section.sidebarTitle, systemImage: section.sidebarSymbol)
                 .tag(LibrarySelection.xtream(playlist.id, section))
                 .contextMenu {
-                    Button("Rename Playlist…") { renamingPlaylist = playlist }
+                    Button("Edit Playlist…") { renamingPlaylist = playlist }
+                    Button("Remove Account", role: .destructive) { controller.removeHistoryEntry(playlist.id) }
                 }
         }
     }
@@ -226,7 +274,8 @@ struct LibraryShell: View {
         Label(playlist.title, systemImage: "rectangle.stack")
             .lineLimit(1).help(playlist.title)
             .contextMenu {
-                Button("Rename Playlist…") { renamingPlaylist = playlist }
+                Button("Edit Playlist…") { renamingPlaylist = playlist }
+                    Button("Remove Account", role: .destructive) { controller.removeHistoryEntry(playlist.id) }
             }
     }
 
@@ -237,10 +286,17 @@ struct LibraryShell: View {
 
     private var selectionBinding: Binding<LibrarySelection> {
         Binding(get: { selection }, set: { next in
+            if case .network(let selection) = next {
+                networkSelection = selection
+                if case .share(let id) = selection { networkLibrary.show(id) }
+                return
+            }
+            networkSelection = nil
             switch next {
+            case .network: break
             case .queue: controller.inspectorPage = .playlist
             case .history: controller.inspectorPage = .history
-            case .tv: controller.showPlaylists()
+            case .sources: controller.showPlaylists()
             case .xtream(let id, let section):
                 controller.openXtreamPlaylist(id, section: section)
             case .iptv(let id): controller.selectIPTVPlaylist(id)
@@ -249,6 +305,11 @@ struct LibraryShell: View {
     }
 
     @ViewBuilder private var libraryContent: some View {
+        if let networkSelection {
+            NetworkLibraryView(model: networkLibrary, controller: controller, selection: networkSelection)
+        } else { nativeLibraryContent }
+    }
+    @ViewBuilder private var nativeLibraryContent: some View {
         switch controller.inspectorPage {
         case .playlist:
             if let queue = controller.snapshot.queue {
@@ -280,20 +341,23 @@ struct LibraryShell: View {
     }
     private var playlistOverview: some View {
         VStack(alignment: .leading, spacing: 0) {
-            LibraryHeader(title: "Playlists") {
-                Menu("Add Playlist", systemImage: "plus") {
+            LibraryHeader(title: "Sources") {
+                Menu("Add Source", systemImage: "plus") {
                     Button("M3U Playlist…", action: openSource)
+                    Button("M3U Playlist…") { addingM3U = true }
                     Button("Xtream Account…") { presentation.xtreamPlaylistVisible = true }
+                    Button("Network Share…") { editingShare = nil; shareSheet = true }
                 }
             }
-            if controller.xtreamPlaylists.isEmpty && controller.iptvPlaylists.isEmpty {
+            if controller.xtreamPlaylists.isEmpty && controller.iptvPlaylistSources.isEmpty && networkLibrary.configuration.shares.isEmpty {
                 ContentUnavailableView {
-                    Label("No playlists", systemImage: "rectangle.stack")
+                    Label("No sources", systemImage: "rectangle.stack")
                 } description: {
-                    Text("Add an M3U playlist or Xtream account. Your playlists appear here and in the sidebar.")
+                    Text("Add an M3U playlist, Xtream account or network share. Your sources appear here and in the sidebar.")
                 } actions: {
                     Button("Add Playlist…", action: openSource)
                     Button("Add Xtream Server…") { presentation.xtreamPlaylistVisible = true }
+                    Button("Add Share…") { editingShare = nil; shareSheet = true }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -306,13 +370,36 @@ struct LibraryShell: View {
                                 LibraryItemLabel(title: playlist.title,
                                     subtitle: "Xtream · Live TV, Films and TV Series", kind: .xtream)
                             }.buttonStyle(.plain)
-                            Button("Rename…") { renamingPlaylist = playlist }.buttonStyle(.bordered).controlSize(.small)
+                            Button("Edit…") { renamingPlaylist = playlist }.buttonStyle(.bordered).controlSize(.small)
+                            Button("Remove", role: .destructive) { controller.removeHistoryEntry(playlist.id) }
+                                .buttonStyle(.bordered).controlSize(.small)
                         }.libraryRowStyle()
                     }
-                    ForEach(controller.iptvPlaylists) { playlist in
+                    ForEach(networkLibrary.configuration.shares) { share in
+                        HStack(spacing: 8) {
+                        Button {
+                            networkSelection = .share(share.id); networkLibrary.show(share.id)
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "externaldrive").font(.body).foregroundStyle(.secondary)
+                                    .frame(width: 20, height: 20).accessibilityHidden(true)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(share.name).font(.body).foregroundStyle(.primary).lineLimit(2)
+                                    Text(share.kind.rawValue).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                }
+                                Spacer(minLength: 0)
+                            }.contentShape(Rectangle())
+                        }.buttonStyle(.plain)
+                        Button("Edit…") { editingShare = share; shareSheet = true }.buttonStyle(.bordered).controlSize(.small)
+                        }.libraryRowStyle()
+                    }
+                    ForEach(controller.iptvPlaylistSources) { playlist in
+                        HStack(spacing: 8) {
                         Button { controller.selectIPTVPlaylist(playlist.id) } label: {
                             LibraryItemLabel(title: playlist.title, subtitle: "Channel playlist", kind: .iptv)
-                        }.buttonStyle(.plain).libraryRowStyle()
+                        }.buttonStyle(.plain)
+                        Button("Edit…") { editingIPTV = playlist }.buttonStyle(.bordered).controlSize(.small)
+                        }.libraryRowStyle()
                     }
                 }
                 .libraryListStyle()
@@ -460,24 +547,4 @@ private enum LibrarySizeClass: Equatable {
 private struct LibraryWidthKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
-}
-
-private struct PlaylistNameSheet: View {
-    @State var name: String
-    let save: (String) -> Void
-    let cancel: () -> Void
-    @FocusState private var focused: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Rename Playlist").font(.headline)
-            TextField("Name", text: $name).textFieldStyle(.roundedBorder).focused($focused)
-            HStack {
-                Spacer()
-                Button("Cancel", action: cancel).keyboardShortcut(.cancelAction)
-                Button("Save") { save(name) }.keyboardShortcut(.defaultAction)
-                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-        }.padding(24).frame(width: 340).task { focused = true }
-    }
 }
