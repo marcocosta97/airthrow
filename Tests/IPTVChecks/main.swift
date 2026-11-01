@@ -558,7 +558,6 @@ struct IPTVChecks {
         try check(controller.iptvCatalog?.channels.count == 3 && controller.iptvImportError == nil
                   && controller.inspectorPage == .channels && player.currentItem === retainedItem,
                   "Xtream dialog output uses Source and opens Channels without replacing playback")
-        controller.removeHistoryEntry(controller.history.first(where: { $0.credentialReference != nil })!.id)
         try controller.load(queryCatalog.absoluteString)
         try await wait { !controller.iptvImporting }
         try check(controller.iptvCatalog?.channels.count == 3 && controller.iptvImportError == nil
@@ -604,13 +603,18 @@ struct IPTVChecks {
         let currentItem = player.currentItem
         controller.toggleHistoryPin(catalogHistory.id)
         controller.clearHistory()
-        try check(controller.history.count == 1 && controller.history[0].id == catalogHistory.id
-                  && controller.history[0].isPinned && controller.iptvCatalog != nil && player.currentItem === currentItem,
-                  "Controller Clear History retains published pins without touching current playback")
+        try check(controller.recentPlaybackHistory.isEmpty && controller.savedIPTVPlaylists.count == 2
+                  && controller.history.contains(where: { $0.id == catalogHistory.id && $0.isPinned })
+                  && controller.iptvCatalog != nil && player.currentItem === currentItem,
+                  "Clear History removes recent videos while preserving saved playlists and playback")
         controller.removeHistoryEntry(catalogHistory.id)
         controller.clearHistory()
-        try check(controller.history.isEmpty && controller.iptvCatalog != nil && player.currentItem === currentItem,
-                  "Removing history leaves the current catalog and playback intact")
+        try check(!controller.history.contains(where: { $0.id == catalogHistory.id })
+                  && controller.savedIPTVPlaylists.count == 1 && controller.iptvCatalog == nil
+                  && player.currentItem === currentItem,
+                  "Removing a saved playlist removes its catalog without replacing current playback")
+        let remainingPlaylist = controller.iptvPlaylists[0]
+        controller.selectIPTVPlaylist(remainingPlaylist.id)
         controller.stop()
         try check(controller.iptvCatalog != nil && controller.selectedIPTVChannelID == nil, "Stop clears playback but retains catalog")
         try controller.load(base.appendingPathComponent("video.mp4").absoluteString)
@@ -618,7 +622,7 @@ struct IPTVChecks {
         try check(controller.iptvCatalog != nil && controller.selectedIPTVChannelID == nil, "Ordinary media does not remove the catalog")
         try controller.importIPTV(base.appendingPathComponent("bad.m3u").absoluteString)
         try await wait { !controller.iptvImporting }
-        try check(controller.iptvImportError != nil && controller.iptvCatalog?.channels.first?.id == channel.id, "Failed replacement retains working catalog")
+        try check(controller.iptvImportError != nil && controller.iptvCatalog?.channels.first?.id == remainingPlaylist.catalog.channels.first?.id, "Failed replacement retains working catalog")
         try controller.importIPTV(base.appendingPathComponent("slow.m3u").absoluteString)
         try controller.importIPTV(local)
         try await wait { !controller.iptvImporting }
@@ -651,7 +655,7 @@ struct IPTVChecks {
         try await wait { !hls.iptvImporting && hls.history.first?.url == localHLS }
         try check(hls.iptvImportError == nil && hls.snapshot.state != .failed && hls.history.first?.url == localHLS,
                   "Local HLS file handed through Source falls back to video loading")
-        let unsupportedLocalHLS = PlaybackController(showReceiverWaitingScreen: false)
+        let unsupportedLocalHLS = PlaybackController(showReceiverWaitingScreen: false, historyStore: MediaHistoryStore(defaults: nil))
         try unsupportedLocalHLS.load(localHLS.path)
         try await wait { !unsupportedLocalHLS.iptvImporting && unsupportedLocalHLS.snapshot.state == .failed }
         try check(unsupportedLocalHLS.iptvImportError == nil && unsupportedLocalHLS.snapshot.error?.contains("Local HLS video playlists are not supported") == true,
