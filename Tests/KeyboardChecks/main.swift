@@ -100,10 +100,22 @@ import AppKit
         let installed = window.makeFirstResponder(table)
         let responderNow = window.firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
         check(installed && window.firstResponder === table, "Cannot install list responder (installed \(installed), responder \(responderNow))")
-        send(49); send(123)
-        check(keys.count == 4 && table.received == 2, "Playback keys intercepted a list")
+        send(49); send(123); send(124)
+        check(Array(keys.suffix(3)) == [.toggle, .backward, .forward] && keys.count == 7 && table.received == 0,
+              "A focused media list disabled playback shortcuts")
+        send(125); send(126)
+        check(keys.count == 7 && table.received == 2, "Playback keys intercepted vertical list navigation")
+        let row = NSTableCellView(frame: table.bounds)
+        let editor = TextSink(frame: row.bounds)
+        row.addSubview(editor); table.addSubview(row)
+        check(window.makeFirstResponder(editor), "Cannot install an editor inside the list")
+        send(49); send(123); send(124)
+        check(keys.count == 7 && editor.received == 3, "Playback keys intercepted editing inside a list")
+        check(!PlaybackKeyboardWindow.controlOwnsKey(table)
+              && !PlaybackKeyboardWindow.controlOwnsKey(row)
+              && PlaybackKeyboardWindow.controlOwnsKey(editor), "Menu and window shortcut eligibility disagree for list content")
         window.resignKey()
         check(!window.isVisible, "Keyboard checks opened a visible window")
-        print("PASS window-scoped Space/arrows, repeats, modifiers, disabled actions, text editing, buttons, segments, sliders and lists (headless)")
+        print("PASS window-scoped Space/arrows, repeats, modifiers, disabled actions, text editing, buttons, segments, sliders, media lists and inline editors (headless)")
     }
 }
