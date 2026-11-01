@@ -170,17 +170,21 @@ import AVFoundation
                 player.pause()
                 let target = codec == "avc-mixed" ? 32.0 : 18.0
                 try await media.prepareSeek(at: target)
-                // Match the controller's tolerance at fragment boundaries; still require the target clock below.
-                let tolerance = CMTime(seconds: 0.5, preferredTimescale: 600)
+                // Match the controller's seek contract, including one clock tick for rounding.
+                let toleranceSeconds = 0.5
+                let maximumSeekError = toleranceSeconds + 1.0 / 600
+                let tolerance = CMTime(seconds: toleranceSeconds, preferredTimescale: 600)
                 let sought = await player.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: tolerance, toleranceAfter: tolerance)
                 let seekDeadline = Date().addingTimeInterval(5)
-                while sought && abs(player.currentTime().seconds - target) >= 0.2,
+                while sought && abs(player.currentTime().seconds - target) > maximumSeekError,
                       item.status != .failed, Date() < seekDeadline {
                     try await Task.sleep(for: .milliseconds(50))
                 }
                 try check(abs(item.duration.seconds - media.sourceDuration!) < 0.2, "Native HLS duration matches the source")
                 print("Native seek sample: codec=\(codec) duration=\(item.duration.seconds) time=\(player.currentTime().seconds) seekable=\(item.seekableTimeRanges.map { $0.timeRangeValue.duration.seconds })")
-                try check(sought && abs(player.currentTime().seconds - target) < 0.2, "Native AVPlayer seeks through the bounded cache: completed=\(sought), time=\(player.currentTime().seconds), failure=\(String(describing: media.productionFailure)), status=\(item.status.rawValue)")
+                try check(sought && item.status == .readyToPlay && media.productionFailure == nil
+                          && abs(player.currentTime().seconds - target) <= maximumSeekError,
+                          "Native AVPlayer seeks through the bounded cache: target=\(target), tolerance=\(toleranceSeconds), completed=\(sought), time=\(player.currentTime().seconds), failure=\(String(describing: media.productionFailure)), status=\(item.status.rawValue)")
                 do {
                     _ = await player.seek(to: CMTime(seconds: codec == "avc-mixed" ? 22 : 4, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
                     player.play()
