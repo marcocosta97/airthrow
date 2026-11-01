@@ -168,12 +168,19 @@ import AVFoundation
                 while player.currentTime().seconds < 0.5 && Date() < playingDeadline { try await Task.sleep(for: .milliseconds(100)) }
                 try check(player.currentTime().seconds >= 0.5, "Native AVPlayer advances with a selected subtitle track")
                 player.pause()
-                try await media.prepareSeek(at: codec == "avc-mixed" ? 32 : 18)
-                let sought = await player.seek(to: CMTime(seconds: codec == "avc-mixed" ? 32 : 18, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
-                try await Task.sleep(for: .milliseconds(500))
+                let target = codec == "avc-mixed" ? 32.0 : 18.0
+                try await media.prepareSeek(at: target)
+                // Match the controller's tolerance at fragment boundaries; still require the target clock below.
+                let tolerance = CMTime(seconds: 0.5, preferredTimescale: 600)
+                let sought = await player.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: tolerance, toleranceAfter: tolerance)
+                let seekDeadline = Date().addingTimeInterval(5)
+                while sought && abs(player.currentTime().seconds - target) >= 0.2,
+                      item.status != .failed, Date() < seekDeadline {
+                    try await Task.sleep(for: .milliseconds(50))
+                }
                 try check(abs(item.duration.seconds - media.sourceDuration!) < 0.2, "Native HLS duration matches the source")
                 print("Native seek sample: codec=\(codec) duration=\(item.duration.seconds) time=\(player.currentTime().seconds) seekable=\(item.seekableTimeRanges.map { $0.timeRangeValue.duration.seconds })")
-                try check(sought && abs(player.currentTime().seconds - (codec == "avc-mixed" ? 32 : 18)) < 0.2, "Native AVPlayer seeks through the bounded cache: completed=\(sought), time=\(player.currentTime().seconds), failure=\(String(describing: media.productionFailure)), status=\(item.status.rawValue)")
+                try check(sought && abs(player.currentTime().seconds - target) < 0.2, "Native AVPlayer seeks through the bounded cache: completed=\(sought), time=\(player.currentTime().seconds), failure=\(String(describing: media.productionFailure)), status=\(item.status.rawValue)")
                 do {
                     _ = await player.seek(to: CMTime(seconds: codec == "avc-mixed" ? 22 : 4, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
                     player.play()

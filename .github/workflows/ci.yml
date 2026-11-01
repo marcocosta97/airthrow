@@ -108,6 +108,15 @@ jobs:
       - name: Build
         run: swift build --disable-sandbox
 
+      - name: Incremental WebDAV audio and subtitles
+        run: python3 scripts/incremental-share-checks.py
+
+      - name: Long remote index checks
+        run: python3 scripts/remote-index-checks.py
+
+      - name: Native media matrix
+        run: python3 scripts/native-media-checks.py
+
       - name: Source-choice controller checks
         run: python3 scripts/source-choice-checks.py
 
@@ -127,12 +136,3 @@ jobs:
 
       - name: Preparation and HTTP delivery checks
         run: python3 scripts/preparation-checks.py
-
-      - name: Incremental WebDAV audio and subtitles
-        run: python3 scripts/incremental-share-checks.py
-
-      - name: Long remote index checks
-        run: python3 scripts/remote-index-checks.py
-
-      - name: Native media matrix
-        run: python3 scripts/native-media-checks.py
