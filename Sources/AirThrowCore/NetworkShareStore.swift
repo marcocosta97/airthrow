@@ -3,7 +3,14 @@ import CSQLite
 
 public struct ShareLibraryConfiguration: Codable, Sendable {
     public var shares: [NetworkShare] = []
+    public var pendingCredentialRemovals: Set<UUID> = []
     public init() {}
+    private enum CodingKeys: String, CodingKey { case shares, pendingCredentialRemovals }
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        shares = try values.decode([NetworkShare].self, forKey: .shares)
+        pendingCredentialRemovals = try values.decodeIfPresent(Set<UUID>.self, forKey: .pendingCredentialRemovals) ?? []
+    }
 }
 // Keep the existing configuration row and location so saved connections survive
 // removal of the experimental catalog. Catalog rows are never loaded.

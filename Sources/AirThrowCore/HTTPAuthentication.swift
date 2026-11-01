@@ -49,14 +49,18 @@ final class HTTPMediaTransfer: NSObject, URLSessionDataDelegate {
     private var task: URLSessionDataTask?
     private let credentials: HTTPLoginCredentials?
     private let origin: URL
+    private let target: URL?
+    private var originKinds: Set<RelayAddress.Kind>?
+    private var validation: Task<Void, Never>?
     private(set) var challenge: HTTPLoginChallenge?
     private var suspended = false
     var response: ((HTTPURLResponse) -> Bool)?
     var data: ((Data) -> Void)?
     var completed: ((Error?) -> Void)?
 
-    init(request: URLRequest, credentials: HTTPLoginCredentials?, origin: URL? = nil) {
+    init(request: URLRequest, credentials: HTTPLoginCredentials?, origin: URL? = nil, originKinds: Set<RelayAddress.Kind>? = nil) {
         self.credentials = credentials
+        self.target = request.url; self.originKinds = originKinds
         self.origin = origin ?? request.url ?? URL(string: "https://invalid.invalid/")!
         super.init()
         let config = URLSessionConfiguration.ephemeral
@@ -72,10 +76,28 @@ final class HTTPMediaTransfer: NSObject, URLSessionDataDelegate {
         task = session.dataTask(with: request)
     }
 
-    func start() { task?.resume() }
+    func start() {
+        validation = Task { [weak self] in
+            guard let self, let target else { return }
+            do {
+                let origins: Set<RelayAddress.Kind>
+                if let originKinds { origins = originKinds }
+                else { origins = try await RelayAddress.resolvedKinds(origin); originKinds = origins }
+                let destinations = try await RelayAddress.resolvedKinds(target)
+                try Task.checkCancellation()
+                guard RelayAddress.permits(destinations, from: origins) else { throw HTTPLoginFailure.invalidPlaylist }
+                task?.resume()
+            } catch {
+                let callback = completed
+                cancel()
+                callback?(error)
+            }
+        }
+    }
     func pause() { if !suspended { suspended = true; task?.suspend() } }
     func resume() { if suspended { suspended = false; task?.resume() } }
     func cancel() {
+        validation?.cancel(); validation = nil
         response = nil; data = nil; completed = nil
         task?.cancel(); session?.invalidateAndCancel()
         task = nil; session = nil
@@ -109,7 +131,11 @@ final class HTTPMediaTransfer: NSObject, URLSessionDataDelegate {
                   ["http", "https"].contains(next.scheme?.lowercased() ?? ""),
                   next.user == nil, next.password == nil,
                   !(old.scheme == "https" && next.scheme != "https"),
-                  RelayAddress.allows(next, from: source) else { completionHandler(nil); return }
+                  RelayAddress.allows(next, from: source),
+                  let origins = self.originKinds,
+                  let destinations = try? await RelayAddress.resolvedKinds(next),
+                  RelayAddress.permits(destinations, from: origins), !Task.isCancelled,
+                  self.task != nil else { completionHandler(nil); return }
             var safe = request
             // A redirect can also enter a different realm on the same origin.
             safe.setValue(nil, forHTTPHeaderField: "Authorization")
@@ -191,5 +217,5 @@ public enum HTTPAuthentication {
 }
 
 extension HTTPMediaTransfer {
-    func sessionCancel() { task?.cancel(); session?.invalidateAndCancel() }
+    func sessionCancel() { validation?.cancel(); task?.cancel(); session?.invalidateAndCancel() }
 }

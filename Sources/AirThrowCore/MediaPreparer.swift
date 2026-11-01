@@ -406,6 +406,21 @@ private final class WorkspaceBytes: @unchecked Sendable {
     }
 }
 
+/// A downloaded source shares the preparation lease and crash recovery lifecycle.
+@MainActor public final class TemporaryMediaDownload {
+    public let url: URL
+    private var workspace: PreparationWorkspace?
+    public convenience init(filename: String) throws {
+        try self.init(filename: filename, root: PreparationWorkspace.root)
+    }
+    init(filename: String, root: URL) throws {
+        let workspace = try PreparationWorkspace(root: root)
+        self.workspace = workspace
+        url = workspace.directory.appendingPathComponent(URL(fileURLWithPath: filename).lastPathComponent)
+    }
+    public func stop() { workspace = nil }
+}
+
 /// An advisory lease prevents startup cleanup from deleting another active session's files.
 final class PreparationWorkspace: @unchecked Sendable {
     static let root = FileManager.default.temporaryDirectory.appendingPathComponent("athrow-prepared-v1", isDirectory: true)
@@ -417,9 +432,9 @@ final class PreparationWorkspace: @unchecked Sendable {
     private var publishedEndSequence: Int?
     private var publishedSeconds = 0.0
     private let bytes: WorkspaceBytes
-    init() throws {
-        Self.cleanAbandoned()
-        directory = Self.root.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    init(root: URL = PreparationWorkspace.root) throws {
+        Self.cleanAbandoned(root: root)
+        directory = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                attributes: [.posixPermissions: 0o700])
         bytes = WorkspaceBytes(root: directory)
@@ -495,7 +510,7 @@ final class PreparationWorkspace: @unchecked Sendable {
         if behind { throw PreparationFailure.failed }
     }
 
-    static func cleanAbandoned() {
+    static func cleanAbandoned(root: URL = PreparationWorkspace.root) {
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isSymbolicLinkKey, .contentModificationDateKey]) else { return }
         for entry in entries where UUID(uuidString: entry.lastPathComponent) != nil {

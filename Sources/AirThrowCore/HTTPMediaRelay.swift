@@ -5,7 +5,36 @@ import Darwin
 /// private addresses are accepted only when the original source is already in
 /// that same class, so a public stream cannot be pointed at the local network.
 enum RelayAddress {
-    enum Kind { case loopback, linkLocal, privateNetwork, publicHost }
+    enum Kind: Hashable { case loopback, linkLocal, privateNetwork, publicHost }
+
+    static func resolvedKinds(_ url: URL) async throws -> Set<Kind> {
+        guard let host = url.host else { throw HTTPLoginFailure.invalidPlaylist }
+        return try await Task.detached(priority: .userInitiated) {
+            var name = host
+            if name.hasPrefix("[") && name.hasSuffix("]") { name = String(name.dropFirst().dropLast()) }
+            var hints = addrinfo(); hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_STREAM
+            var addresses: UnsafeMutablePointer<addrinfo>?
+            guard getaddrinfo(name, nil, &hints, &addresses) == 0, let first = addresses else { throw HTTPLoginFailure.unavailable }
+            defer { freeaddrinfo(first) }
+            var result: Set<Kind> = []
+            var current: UnsafeMutablePointer<addrinfo>? = first
+            while let address = current {
+                defer { current = address.pointee.ai_next }
+                var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                guard getnameinfo(address.pointee.ai_addr, address.pointee.ai_addrlen, &buffer, socklen_t(buffer.count), nil, 0, NI_NUMERICHOST) == 0 else { throw HTTPLoginFailure.unavailable }
+                let numeric = String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+                result.insert(kind(numeric))
+            }
+            guard !result.isEmpty else { throw HTTPLoginFailure.unavailable }
+            return result
+        }.value
+    }
+
+    static func permits(_ destinations: Set<Kind>, from origins: Set<Kind>) -> Bool {
+        // Mixed public/private answers must not broaden a public source's access.
+        let allowed: Set<Kind> = origins.count == 1 ? origins.union([.publicHost]) : [.publicHost]
+        return !destinations.isEmpty && destinations.isSubset(of: allowed)
+    }
 
     static func allows(_ target: URL, from source: URL) -> Bool {
         guard let targetHost = target.host, let sourceHost = source.host else { return false }
@@ -20,7 +49,7 @@ enum RelayAddress {
         if name.hasPrefix("[") && name.hasSuffix("]") { name = String(name.dropFirst().dropLast()) }
         if name == "localhost" { return .loopback }
         var v4 = in_addr()
-        if inet_pton(AF_INET, name, &v4) == 1 {
+        if inet_aton(name, &v4) == 1 {
             let raw = UInt32(bigEndian: v4.s_addr)
             let a = UInt8((raw >> 24) & 0xff)
             let b = UInt8((raw >> 16) & 0xff)
@@ -30,7 +59,8 @@ enum RelayAddress {
             return .publicHost
         }
         var v6 = in6_addr()
-        if inet_pton(AF_INET6, name, &v6) == 1 {
+        let address = name.split(separator: "%", maxSplits: 1).first.map(String.init) ?? name
+        if inet_pton(AF_INET6, address, &v6) == 1 {
             let bytes = withUnsafeBytes(of: v6) { Array($0.prefix(16)) }
             if bytes.count == 16 {
                 if bytes.allSatisfy({ $0 == 0 }) || (bytes.dropLast().allSatisfy { $0 == 0 } && bytes[15] == 1) { return .loopback }
@@ -128,6 +158,7 @@ public final class HTTPMediaRelay {
     private var variant: HLSVariantSelection?
     private var sourceHeaders: [String: String] = [:]
     private var readAheadBytes = 256 * 1024
+    private var originKinds: Set<RelayAddress.Kind> = []
     private var preparationCache: PreparationInputCache?
     private var server: MediaHTTPServer?
     private var routes = RelayRoutes()
@@ -151,6 +182,8 @@ public final class HTTPMediaRelay {
                              sourceHeaders: [String: String] = [:], readAheadBytes: Int = 256 * 1024) async throws -> HTTPMediaRelay {
         let source = try MediaInput.url(source.absoluteString)
         let relay = HTTPMediaRelay(source: source, credentials: credentials)
+        relay.originKinds = try await RelayAddress.resolvedKinds(source)
+        try Task.checkCancellation()
         guard sourceHeaders.count <= 8, sourceHeaders.allSatisfy({ key, value in
             ["user-agent", "accept", "accept-language", "sec-fetch-mode"].contains(key.lowercased())
                 && value.utf8.count <= 4096 && !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
@@ -195,6 +228,7 @@ public final class HTTPMediaRelay {
         let id = UUID()
         let stream = HTTPRelayStream(url: upstream, method: method, headers: headers,
             credentials: credentials, origin: source, sourceHeaders: sourceHeaders, readAheadBytes: readAheadBytes,
+            originKinds: originKinds,
             preparationCache: upstream == source ? preparationCache : nil, rewrite: { [weak self] data, base in
                 guard let self else { throw CancellationError() }
                 return try self.rewrite(data, base: base, routePath: path)
@@ -307,7 +341,8 @@ final class HTTPRelayStream {
     private var chunked = false
 
     init(url: URL, method: String, headers: [String: String], credentials: HTTPLoginCredentials?,
-         origin: URL? = nil, sourceHeaders: [String: String] = [:], readAheadBytes: Int = 256 * 1024, preparationCache: PreparationInputCache? = nil, rewrite: @escaping (Data, URL) throws -> Data,
+         origin: URL? = nil, sourceHeaders: [String: String] = [:], readAheadBytes: Int = 256 * 1024,
+         originKinds: Set<RelayAddress.Kind>? = nil, preparationCache: PreparationInputCache? = nil, rewrite: @escaping (Data, URL) throws -> Data,
          send: @escaping (Data, @escaping @MainActor @Sendable () -> Void) -> Void, finish: @escaping () -> Void) {
         self.method = method; self.rewrite = rewrite; self.send = send; self.finish = finish
         self.readAheadBytes = min(8 * 1024 * 1024, max(256 * 1024, readAheadBytes))
@@ -321,7 +356,7 @@ final class HTTPRelayStream {
         if !knownPlaylist, method == "GET" {
             for name in ["range", "if-range"] { if let value = headers[name] { request.setValue(value, forHTTPHeaderField: name) } }
         }
-        transfer = HTTPMediaTransfer(request: request, credentials: credentials, origin: origin ?? url)
+        transfer = HTTPMediaTransfer(request: request, credentials: credentials, origin: origin ?? url, originKinds: originKinds)
         transfer.response = { [weak self] response in self?.received(response) ?? false }
         transfer.data = { [weak self] data in self?.received(data) }
         transfer.completed = { [weak self] error in self?.completed(error) }

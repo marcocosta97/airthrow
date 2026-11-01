@@ -10,19 +10,22 @@ public struct NetworkShare: Codable, Identifiable, Sendable, Equatable {
     public var kind: ShareKind
     public var endpoint: URL
     public var connectAutomatically: Bool
+    public var credentialID: UUID
     public init(id: UUID = UUID(), name: String, kind: ShareKind, endpoint: URL, connectAutomatically: Bool = false) throws {
         guard endpoint.user == nil, endpoint.password == nil, endpoint.query == nil, endpoint.fragment == nil,
               endpoint.host != nil, (kind == .smb ? endpoint.scheme == "smb" : ["http", "https"].contains(endpoint.scheme)),
               !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ShareError.invalidAddress }
         self.id = id; self.name = name; self.kind = kind; self.connectAutomatically = connectAutomatically
+        credentialID = id
         self.endpoint = kind == .webDAV && !endpoint.path.hasSuffix("/") ? endpoint.appendingPathComponent("", isDirectory: true) : endpoint
     }
-    private enum CodingKeys: String, CodingKey { case id, name, kind, endpoint, connectAutomatically }
+    private enum CodingKeys: String, CodingKey { case id, name, kind, endpoint, connectAutomatically, credentialID }
     public init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(id: values.decode(UUID.self, forKey: .id), name: values.decode(String.self, forKey: .name),
                       kind: values.decode(ShareKind.self, forKey: .kind), endpoint: values.decode(URL.self, forKey: .endpoint),
                       connectAutomatically: values.decodeIfPresent(Bool.self, forKey: .connectAutomatically) ?? false)
+        credentialID = try values.decodeIfPresent(UUID.self, forKey: .credentialID) ?? id
     }
     public func reference(_ path: String) throws -> URL {
         let path = try SharePath.validate(path)

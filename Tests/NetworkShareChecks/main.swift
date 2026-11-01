@@ -26,6 +26,23 @@ private actor AccessProbe: ShareProvider {
     func counts() -> [Int] { [connections, listings, disconnected] }
 }
 
+@MainActor private final class FixtureCredentials: ShareCredentialStorage {
+    var values: [UUID: [String]] = [:]
+    var reads = 0
+    var failSave = false
+    var failRemoval = false
+    func load(_ id: UUID) -> [String]? { reads += 1; return values[id] }
+    func save(_ id: UUID, username: String, password: String) throws {
+        if failSave { throw ShareError.accessDenied }
+        values[id] = [username, password]
+    }
+    func remove(_ id: UUID) throws {
+        if failRemoval { throw ShareError.accessDenied }
+        values[id] = nil
+    }
+}
+@MainActor private final class FixtureWrites { var fail = false; var count = 0; var failOnWrite: Int? }
+
 @main struct NetworkShareChecks {
     static func check(_ condition: @autoclosure () throws -> Bool, _ label: String) throws {
         guard try condition() else { throw NSError(domain: "NetworkShareChecks", code: 1, userInfo: [NSLocalizedDescriptionKey: label]) }
@@ -37,9 +54,49 @@ private actor AccessProbe: ShareProvider {
     }
     @MainActor static func main() async throws {
         setbuf(stdout, nil)
+        if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--abandon-download" {
+            let root = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
+            let download = try TemporaryMediaDownload(filename: "fixture.mp4", root: root)
+            try Data([42]).write(to: download.url)
+            try Data(download.url.path.utf8).write(to: URL(fileURLWithPath: CommandLine.arguments[3]))
+            _exit(0)
+        }
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("airthrow-share-checks-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporary) }
+        let downloadRoot = temporary.appendingPathComponent("downloads", isDirectory: true)
+        let activeDownload = try TemporaryMediaDownload(filename: "fixture.mp4", root: downloadRoot)
+        try Data([42]).write(to: activeDownload.url)
+        PreparationWorkspace.cleanAbandoned(root: downloadRoot)
+        try check(FileManager.default.fileExists(atPath: activeDownload.url.path), "cleanup preserves a live download lease")
+        let marker = temporary.appendingPathComponent("abandoned-path")
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        child.arguments = ["--abandon-download", downloadRoot.path, marker.path]
+        try child.run(); child.waitUntilExit()
+        try check(child.terminationStatus == 0, "download fixture exits without cleanup")
+        let abandonedPath = try String(contentsOf: marker, encoding: .utf8)
+        try check(FileManager.default.fileExists(atPath: abandonedPath), "interrupted download remains before recovery")
+        PreparationWorkspace.cleanAbandoned(root: downloadRoot)
+        try check(!FileManager.default.fileExists(atPath: abandonedPath) && FileManager.default.fileExists(atPath: activeDownload.url.path), "recovery removes only abandoned downloads")
+        activeDownload.stop()
+        try check(!FileManager.default.fileExists(atPath: activeDownload.url.path), "Stop releases the downloaded source")
+        let publicSource = URL(string: "http://public.example/media.m3u8")!
+        for host in ["127.1", "2130706433", "0x7f000001", "0177.0.0.1", "[::ffff:127.0.0.1]", "[fe80::1%25en0]"] {
+            let target = URL(string: "http://" + host + "/fixture")!
+            try check(!RelayAddress.allows(target, from: publicSource), "relay rejects nonpublic numeric address forms")
+        }
+        let localKinds = try await RelayAddress.resolvedKinds(URL(string: "http://localhost/fixture")!)
+        try check(!RelayAddress.permits(localKinds, from: [.publicHost]), "resolved loopback hostname is blocked for public sources")
+        try check(!RelayAddress.permits([.publicHost, .privateNetwork], from: [.publicHost])
+                  && !RelayAddress.permits([.loopback], from: [.publicHost, .loopback])
+                  && RelayAddress.permits([.privateNetwork], from: [.privateNetwork]), "mixed DNS answers cannot broaden network access")
+        let blocked = HTTPMediaTransfer(request: URLRequest(url: URL(string: "http://localhost:1/fixture")!), credentials: nil, origin: publicSource, originKinds: [.publicHost])
+        let blockedError: Error? = await withCheckedContinuation { continuation in
+            blocked.completed = { continuation.resume(returning: $0) }
+            blocked.start()
+        }
+        try check(blockedError is HTTPLoginFailure, "transfer rejects a local DNS destination before issuing HTTP")
         let share = try NetworkShare(name: "Fixture", kind: .webDAV, endpoint: URL(string: "http://127.0.0.1:9876/dav/")!)
         try check(try share.reference("TV/Épisode #1.mkv").path == "/TV/Épisode #1.mkv", "stable Unicode references")
         for path in ["../escape", "a/../b", "/outside", "a\\b"] {
@@ -66,8 +123,12 @@ private actor AccessProbe: ShareProvider {
         do { _ = try await mounted.playbackURL("escape/outside"); throw NSError(domain: "escaped root", code: 1) } catch ShareError.invalidAddress { print("PASS symlink containment") }
         var legacy = try JSONSerialization.jsonObject(with: JSONEncoder().encode(share)) as! [String: Any]
         legacy.removeValue(forKey: "connectAutomatically")
+        legacy.removeValue(forKey: "credentialID")
         let migrated = try JSONDecoder().decode(NetworkShare.self, from: JSONSerialization.data(withJSONObject: legacy))
         try check(!migrated.connectAutomatically, "existing shares migrate to explicit connection")
+        try check(migrated.credentialID == migrated.id, "legacy shares retain their saved credential identifier")
+        let legacyConfiguration = try JSONDecoder().decode(ShareLibraryConfiguration.self, from: JSONSerialization.data(withJSONObject: ["shares": [legacy]]))
+        try check(legacyConfiguration.pendingCredentialRemovals.isEmpty && legacyConfiguration.shares[0].credentialID == share.id, "legacy configurations decode without a cleanup queue")
         let modelDirectory = temporary.appendingPathComponent("connections")
         let modelStore = try NetworkShareStore(url: modelDirectory.appendingPathComponent("catalog.sqlite"))
         var configuration = ShareLibraryConfiguration(); configuration.shares = [share]
@@ -137,6 +198,59 @@ private actor AccessProbe: ShareProvider {
         automatic.show(share.id)
         let afterEdit = await probe.counts()
         try check(!automatic.canAccess(share.id) && beforeEdit == afterEdit, "editing connection policy requires no server access")
+        let credentialFixture = FixtureCredentials()
+        credentialFixture.values[share.credentialID] = ["old", "fixture"]
+        let writes = FixtureWrites()
+        let failureModel = NetworkLibraryModel(directory: modelDirectory, credentialStore: credentialFixture, configurationWriter: { value in
+            writes.count += 1
+            if writes.fail || writes.failOnWrite == writes.count { throw ShareError.storage }
+            try await modelStore.save(value)
+        }, providerFactory: { _ in probe })
+        await failureModel.open()
+        let original = failureModel.configuration.shares[0]
+        var edited = original; edited.name = "Edited fixture"
+        writes.fail = true
+        do {
+            try await failureModel.update(edited, username: "new", password: "fixture", remember: true, replaceCredentials: true)
+            throw NSError(domain: "accepted failed save", code: 1)
+        } catch ShareError.storage {}
+        try check(failureModel.configuration.shares == [original] && credentialFixture.values == [share.credentialID: ["old", "fixture"]], "failed edit preserves saved credentials and removes staging")
+        await failureModel.remove(original)
+        try check(failureModel.configuration.shares == [original] && credentialFixture.values[share.credentialID] != nil, "failed removal retains configuration and credentials")
+        writes.fail = false; writes.failOnWrite = writes.count + 2
+        do {
+            try await failureModel.update(edited, username: "new", password: "fixture", remember: true, replaceCredentials: true)
+            throw NSError(domain: "accepted failed staged save", code: 1)
+        } catch ShareError.storage {}
+        try check(failureModel.configuration.shares == [original] && credentialFixture.values == [share.credentialID: ["old", "fixture"]], "failure after credential staging preserves the old account")
+        writes.failOnWrite = nil; credentialFixture.failSave = true
+        do {
+            try await failureModel.update(edited, username: "new", password: "fixture", remember: true, replaceCredentials: true)
+            throw NSError(domain: "accepted failed credential save", code: 1)
+        } catch ShareError.accessDenied {}
+        try check(failureModel.configuration.shares == [original], "Keychain write failure leaves configuration unchanged")
+        credentialFixture.failSave = false; credentialFixture.failRemoval = true
+        try await failureModel.update(edited, username: "new", password: "fixture", remember: true, replaceCredentials: true)
+        let replacement = failureModel.configuration.shares[0]
+        try check(replacement.credentialID != original.credentialID && credentialFixture.values[replacement.credentialID] == ["new", "fixture"] && failureModel.configuration.pendingCredentialRemovals.contains(original.credentialID), "successful edit switches references and queues failed credential cleanup")
+        credentialFixture.failRemoval = false
+        let recovered = NetworkLibraryModel(directory: modelDirectory, credentialStore: credentialFixture)
+        await recovered.open()
+        try check(recovered.configuration.pendingCredentialRemovals.isEmpty && credentialFixture.values[original.credentialID] == nil && credentialFixture.values[replacement.credentialID] != nil && credentialFixture.reads == 0, "reopening retries cleanup without reading any credentials")
+        try await recovered.update(replacement, username: "session", password: "fixture", remember: false, replaceCredentials: true)
+        try check(credentialFixture.values.isEmpty, "session-only edit removes old persisted credentials")
+        await recovered.remove(recovered.configuration.shares[0])
+        try check(recovered.configuration.shares.isEmpty && credentialFixture.values.isEmpty, "successful removal commits configuration before credential cleanup")
+        let orderDirectory = temporary.appendingPathComponent("ordered-shares")
+        let orderStore = try NetworkShareStore(url: orderDirectory.appendingPathComponent("catalog.sqlite"))
+        let secondShare = try NetworkShare(name: "Second fixture", kind: .webDAV, endpoint: share.endpoint)
+        var ordered = ShareLibraryConfiguration(); ordered.shares = [share, secondShare]
+        try await orderStore.save(ordered)
+        let orderModel = NetworkLibraryModel(directory: orderDirectory, credentialStore: credentialFixture)
+        await orderModel.open()
+        var renamedFirst = share; renamedFirst.name = "Renamed first"
+        try await orderModel.update(renamedFirst, username: "", password: "", remember: false)
+        try check(orderModel.configuration.shares.map(\.id) == [share.id, secondShare.id] && credentialFixture.reads == 0, "renaming preserves source order and never retrieves credentials")
         if CommandLine.arguments.count > 1, let endpoint = URL(string: CommandLine.arguments[1]) {
             let dav = WebDAVShareProvider(root: endpoint, username: "fixture", password: "fixture")
             let entries = try await dav.list("")
