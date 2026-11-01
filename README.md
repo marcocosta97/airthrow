@@ -23,6 +23,7 @@ your screen.
 
 - **Links and files** — direct video URLs, website streams (e.g. Youtube, Twitch), local videos and playlists.
 - **IPTV and Xtream** *(experimental)* — channel playlists, plus Xtream live TV, films and series.
+- **Network shares** *(experimental)* — browse videos on WebDAV and macOS-mounted SMB shares.
 - **Playback options** — video and audio sources, supported subtitles, and optional
   clean up and upscaling to 1080p or 4K.
 - **One session** — control playback from the app, menu bar or `athrow` CLI.
@@ -92,6 +93,13 @@ Disk Access; Chrome-family browsers may ask for Keychain access.
 
 Choose a local video with the folder button, drop it on the source area, or pass
 its path to `athrow open`.
+
+## Network shares (experimental)
+
+In **Sources**, choose **Add Source → Network Share…** to add WebDAV or SMB.
+Select a saved share, click **Connect Share**, then open a video from its folders.
+For SMB sign-in, connect in Finder first. Shares connect only when requested,
+unless you enable automatic connection for that share.
 
 ## IPTV and Xtream
 
