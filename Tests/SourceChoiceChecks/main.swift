@@ -1,3 +1,6 @@
+#if SWIFT_PACKAGE
+@testable import AirThrowCore
+#endif
 import Foundation
 import AVFoundation
 
@@ -376,6 +379,10 @@ struct SourceChoiceChecks {
     }
 
     static func nativeSourceHeight(base: URL) async throws {
+        let emptyLogs = await MediaDiagnostics.playerLogs(for: AVPlayerItem(asset: AVMutableComposition()))
+        try check(emptyLogs.errorStatusCodes?.isEmpty != false && emptyLogs.observedBitrate == nil
+                  && emptyLogs.indicatedBitrate == nil && emptyLogs.stalls == nil,
+                  "An unloaded item fabricated playback log metrics")
         let url = base.appendingPathComponent("fullhd.mp4")
         let controller = PlaybackController(resolveCandidates: { source in
             [MediaCandidate(source: ResolvedSource(url: source), id: "native-unknown")]
@@ -411,6 +418,10 @@ struct SourceChoiceChecks {
         controller.refresh()
         try check(controller.sourceHeight() == nil, "Stop retained source inspection")
         try check(controller.snapshot.diagnostics?.videoWidth == nil, "Stopped item republished format diagnostics")
+        try check(controller.snapshot.diagnostics?.observedBitrate == nil
+                  && controller.snapshot.diagnostics?.indicatedBitrate == nil
+                  && controller.snapshot.diagnostics?.errorStatusCodes == nil,
+                  "Stopped item republished asynchronous playback logs")
         await controller.shutdownAndWait()
         print("PASS native source resolution disables redundant upscale and clears on Stop")
     }

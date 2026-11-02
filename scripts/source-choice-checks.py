@@ -9,6 +9,7 @@ live offset policy and numeric playback metrics.
 This suite shares system media services with the native/preparation/controller
 suites, so run it sequentially with those.
 """
+from check_build import build_check, PLAYER_SOURCES
 import argparse
 import http.server
 import json
@@ -36,6 +37,14 @@ args = parser.parse_args()
 # Dedicated compiler output path so the binary survives fixture-directory cleanup.
 build = ROOT / 'build' / 'source-choice'
 build.mkdir(parents=True, exist_ok=True)
+checks = 'SystemPlaybackChecks' if args.system_playback else 'ControllerChecks' if args.controller else 'SourceChoiceChecks'
+binary = build / checks
+build_check(checks, binary, PLAYER_SOURCES)
+print(f'Built {binary}')
+if args.compile_only:
+    print('Compilation only requested; AVPlayer checks were not run.')
+    sys.exit(0)
+
 out = pathlib.Path(tempfile.mkdtemp(prefix='source-choice-', dir=ROOT / 'build'))
 
 
@@ -94,11 +103,12 @@ if args.system_playback:
     for path in [live, *out.glob('live*.ts')]:
         FILES['/' + path.name] = path.read_bytes()
         CONTENT_TYPES['/' + path.name] = 'application/vnd.apple.mpegurl' if path.suffix == '.m3u8' else 'video/mp2t'
-run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-n', '-f', 'lavfi',
-     '-i', 'testsrc2=size=1920x1080:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
-     '-t', '1', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
-     '-c:a', 'aac', '-ac', '2', '-movflags', '+faststart', out / 'fullhd.mp4'])
-FILES['/fullhd.mp4'] = (out / 'fullhd.mp4').read_bytes()
+if not args.controller and not args.system_playback:
+    run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-n', '-f', 'lavfi',
+         '-i', 'testsrc2=size=1920x1080:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
+         '-t', '1', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+         '-c:a', 'aac', '-ac', '2', '-movflags', '+faststart', out / 'fullhd.mp4'])
+    FILES['/fullhd.mp4'] = (out / 'fullhd.mp4').read_bytes()
 if args.yt_dlp:
     print(f'Generic extractor: yt-dlp {run([args.yt_dlp, "--version"]).stdout.strip()}', flush=True)
     run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-n', '-i', out / 'audio.mp4',
@@ -168,22 +178,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 pass
 
 
-checks = 'SystemPlaybackChecks' if args.system_playback else 'ControllerChecks' if args.controller else 'SourceChoiceChecks'
-binary = build / checks
 server = None
 try:
-    run(['swiftc', '-I', str(ROOT / 'Sources/CSQLite'), '-swift-version', '6', '-parse-as-library',
-         *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
-         ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift',
-         ROOT / 'Sources/AirThrowApp/InterfaceCopy.swift',
-         ROOT / 'Sources/AirThrowApp/PlaybackController.swift', ROOT / 'Sources/AirThrowApp/NetworkLibraryModel.swift',
-         ROOT / 'Sources/AirThrowApp/XtreamLibrary.swift',
-         ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
-         ROOT / 'Tests' / checks / 'main.swift', '-o', binary], timeout=180)
-    print(f'Built {binary}')
-    if args.compile_only:
-        print('Compilation only requested; AVPlayer checks were not run.')
-        sys.exit(0)
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f'http://127.0.0.1:{server.server_port}'

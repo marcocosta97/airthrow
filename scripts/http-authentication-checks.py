@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Local Basic/Digest, receiver delivery and controller checks using synthetic media."""
+from check_build import build_check, PLAYER_SOURCES
 from pathlib import Path
 import argparse
 import base64
@@ -133,13 +134,7 @@ try:
         threading.Event().wait()
     else:
         binary = BUILD / 'HTTPAuthenticationChecks'
-        run(['swiftc', '-I', str(ROOT / 'Sources/CSQLite'), '-swift-version', '6', '-parse-as-library', '-module-cache-path', BUILD / 'ModuleCache',
-             *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
-             ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/InterfaceCopy.swift',
-             ROOT / 'Sources/AirThrowApp/PlaybackController.swift', ROOT / 'Sources/AirThrowApp/NetworkLibraryModel.swift',
-             ROOT / 'Sources/AirThrowApp/XtreamLibrary.swift',
-             ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift', ROOT / 'Tests/HTTPAuthenticationChecks/main.swift',
-             '-o', binary], timeout=180)
+        build_check('HTTPAuthenticationChecks', binary, PLAYER_SOURCES)
         run([binary, base], timeout=240)
         assert observed['cross_origin_auth'] == 0, 'Credentials sent to another origin'
         assert observed['signed_queries'] > 0 and observed['digest'] > 0

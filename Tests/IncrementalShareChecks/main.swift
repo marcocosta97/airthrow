@@ -1,3 +1,6 @@
+#if SWIFT_PACKAGE
+@testable import AirThrowCore
+#endif
 import Foundation
 import AVFoundation
 
@@ -161,7 +164,7 @@ import AVFoundation
                 let deadline = Date().addingTimeInterval(20)
                 while item.status == .unknown && Date() < deadline { try await Task.sleep(for: .milliseconds(50)) }
                 try check(item.status == .readyToPlay,
-                          "Native AVPlayer prepares the Dolby/subtitle HLS master: status=\(item.status.rawValue), error=\((item.error as NSError?)?.code ?? 0), logCodes=\(item.errorLog()?.events.map(\.errorStatusCode) ?? [])")
+                          "Native AVPlayer prepares the Dolby/subtitle HLS master: status=\(item.status.rawValue), error=\((item.error as NSError?)?.code ?? 0)")
                 if let subtitles { item.select(subtitles.options[0], in: subtitles) }
                 player.play()
                 let playingDeadline = Date().addingTimeInterval(15)

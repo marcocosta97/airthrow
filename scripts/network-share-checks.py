@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Synthetic WebDAV, connection and navigation checks; never accesses saved share configuration."""
+from check_build import build_check
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import base64
@@ -66,11 +67,7 @@ if __name__ == '__main__':
     build = ROOT / 'build/network-share-checks'
     build.mkdir(parents=True, exist_ok=True)
     binary = build / 'NetworkShareChecks'
-    subprocess.run(['swiftc', '-swift-version', '6', '-parse-as-library', '-I', str(ROOT / 'Sources/CSQLite'),
-                    '-module-cache-path', str(build / 'ModuleCache'),
-                    *map(str, sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift'))),
-                    str(ROOT / 'Sources/AirThrowApp/NetworkLibraryModel.swift'),
-                    str(ROOT / 'Tests/NetworkShareChecks/main.swift'), '-o', str(binary)], cwd=ROOT, check=True, timeout=240)
+    build_check('NetworkShareChecks', str(binary), ("NetworkLibraryModel.swift",))
     server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

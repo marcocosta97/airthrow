@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Bounded M3U import and channel lifecycle checks using synthetic local media."""
+from check_build import build_check, PLAYER_SOURCES
 from pathlib import Path
 import argparse
 import http.server
@@ -107,12 +108,7 @@ try:
         threading.Event().wait()
     else:
         binary = BUILD/'IPTVChecks'
-        run(['swiftc', '-I', str(ROOT / 'Sources/CSQLite'), '-swift-version', '6', '-parse-as-library', '-module-cache-path', BUILD/'ModuleCache',
-             *sorted((ROOT/'Sources/AirThrowCore').glob('*.swift')),
-             ROOT/'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT/'Sources/AirThrowApp/InterfaceCopy.swift',
-             ROOT/'Sources/AirThrowApp/PlaybackController.swift', ROOT/'Sources/AirThrowApp/NetworkLibraryModel.swift',
-             ROOT / 'Sources/AirThrowApp/XtreamLibrary.swift',
-             ROOT/'Sources/AirThrowApp/ReceiverWaitingScreen.swift', ROOT/'Tests/IPTVChecks/main.swift', '-o', binary], timeout=180)
+        build_check('IPTVChecks', binary, PLAYER_SOURCES)
         # Foundation enforces the packaged app's transport policy, unlike a
         # standalone command-line binary. Keep these checks under that policy.
         app = BUILD/'IPTVChecks.app'

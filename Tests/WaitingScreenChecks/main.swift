@@ -1,3 +1,6 @@
+#if SWIFT_PACKAGE
+@testable import AirThrowCore
+#endif
 import AVFoundation
 import Foundation
 
@@ -41,7 +44,8 @@ struct WaitingScreenChecks {
         try check(!FileManager.default.fileExists(atPath: directory.path), "Stream files leaked after Stop")
         print("PASS live playlist cycles indefinitely with bounded files and cleans up")
 
-        let disabled = PlaybackController(showReceiverWaitingScreen: false, waitingScreenURL: { file })
+        let disabled = PlaybackController(showReceiverWaitingScreen: false, waitingScreenURL: { file },
+                                          historyStore: MediaHistoryStore(defaults: nil))
         disabled.pickerWillOpen()
         try check(disabled.player.currentItem == nil, "Disabled option installed media")
         disabled.shutdown()

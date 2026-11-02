@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Xtream API and controller checks against a deterministic local provider."""
+from check_build import build_check, PLAYER_SOURCES
 from pathlib import Path
 import argparse
 import base64
@@ -149,10 +150,7 @@ try:
         threading.Event().wait()
     binary = BUILD / 'XtreamChecks'
     env = dict(os.environ, CLANG_MODULE_CACHE_PATH=str(BUILD / 'ModuleCache'))
-    subprocess.run(['swiftc', '-I', str(ROOT / 'Sources/CSQLite'), '-swift-version', '6', '-parse-as-library', '-module-cache-path', str(BUILD / 'ModuleCache'),
-        *map(str, sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift'))),
-        *[str(ROOT / ('Sources/AirThrowApp/' + name)) for name in ['MediaDiagnostics.swift', 'InterfaceCopy.swift', 'PlaybackController.swift', 'NetworkLibraryModel.swift', 'ReceiverWaitingScreen.swift', 'XtreamLibrary.swift']],
-        str(ROOT / 'Tests/XtreamChecks/main.swift'), '-o', str(binary)], cwd=ROOT, env=env, check=True, timeout=180)
+    build_check('XtreamChecks', str(binary), PLAYER_SOURCES)
     app = BUILD / 'XtreamChecks.app'
     target = app / 'Contents/MacOS/XtreamChecks'
     target.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(binary, target)

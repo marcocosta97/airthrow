@@ -1,3 +1,6 @@
+#if SWIFT_PACKAGE
+@testable import AirThrowCore
+#endif
 import Foundation
 import Darwin
 import CommonCrypto

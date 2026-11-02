@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Long synthetic remote MKV indexes with latency; no saved sources or accounts."""
+from check_build import build_check
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -96,10 +97,7 @@ class Handler(BaseHTTPRequestHandler):
 server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 try:
-    sources = sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift'))
-    run(['swiftc', '-swift-version', '6', '-parse-as-library', '-I', ROOT / 'Sources/CSQLite',
-         '-module-cache-path', OUT / 'ModuleCache', *sources, ROOT / 'Tests/RemoteIndexChecks/main.swift',
-         '-o', OUT / 'Checks'], timeout=240)
+    build_check('RemoteIndexChecks', OUT / 'Checks')
     result = run([OUT / 'Checks', f'http://127.0.0.1:{server.server_port}/'], timeout=300)
     print(result.stdout, flush=True)
 except subprocess.CalledProcessError as error:

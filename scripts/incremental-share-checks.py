@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Authenticated loopback WebDAV MKV fixtures. No saved sources or Keychain."""
+from check_build import build_check
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import base64
@@ -235,9 +236,7 @@ class Handler(BaseHTTPRequestHandler):
 server = ThreadingHTTPServer(('127.0.0.1',0), Handler)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 try:
-    sources = sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift'))
-    result = run(['swiftc', '-swift-version', '6', '-parse-as-library', '-I', ROOT / 'Sources/CSQLite', '-module-cache-path', OUT / 'ModuleCache',
-                 *sources, ROOT / 'Tests/IncrementalShareChecks/main.swift', '-o', OUT / 'Checks'], timeout=240)
+    build_check('IncrementalShareChecks', OUT / 'Checks')
     result = run([OUT / 'Checks', f'http://127.0.0.1:{server.server_port}/', OUT, *[flag for flag in ['--hevc-only', '--avc-only', '--surround-only'] if flag in sys.argv]], timeout=300)
     print(result.stdout, flush=True)
     cases = ['hevc-eac3', 'hevc-legacy', 'hevc4k-eac3'] if '--surround-only' in sys.argv else ['avc-mixed'] if '--avc-only' in sys.argv else ['hevc-cra','hevc-cra10','hevc-legacy'] if '--hevc-only' in sys.argv else ['large','aac','mp3','flac','ac3','eac3','dts','truehd','ass','legacy','hevc-cra','hevc-cra10','avc-mixed','hevc-eac3','hevc-legacy']

@@ -33,6 +33,9 @@ jobs:
       - name: Core checks
         run: .build/debug/CoreChecks
 
+      - name: Check runner contracts
+        run: python3 -m unittest discover -s Tests/CheckRunners
+
       - name: Playback log privacy and storage checks
         run: .build/debug/PlaybackLogChecks
 
@@ -55,37 +58,21 @@ jobs:
 
       - name: Resolver checks
         run: |
-          swiftc -I Sources/CSQLite -swift-version 6 -parse-as-library \
-            Sources/AirThrowCore/*.swift \
-            Tests/ResolverChecks/main.swift \
-            -o .build/ResolverChecks
-          .build/ResolverChecks
+          python3 scripts/check_build.py ResolverChecks
+          build/checks/ResolverChecks
 
       - name: Website session checks
         run: |
-          swiftc -I Sources/CSQLite -swift-version 6 -parse-as-library \
-            Sources/AirThrowCore/*.swift \
-            Tests/WebsiteSessionChecks/main.swift \
-            -o .build/WebsiteSessionChecks
-          .build/WebsiteSessionChecks
+          python3 scripts/check_build.py WebsiteSessionChecks
+          build/checks/WebsiteSessionChecks
 
       - name: History credential storage checks (headless)
         run: python3 scripts/history-credential-checks.py
 
       - name: Settings checks
         run: |
-          swiftc -I Sources/CSQLite -swift-version 6 -parse-as-library \
-            Sources/AirThrowCore/*.swift \
-            Sources/AirThrowApp/MediaDiagnostics.swift \
-            Sources/AirThrowApp/InterfaceCopy.swift \
-            Sources/AirThrowApp/PlaybackController.swift \
-            Sources/AirThrowApp/NetworkLibraryModel.swift \
-            Sources/AirThrowApp/ReceiverWaitingScreen.swift \
-            Sources/AirThrowApp/XtreamLibrary.swift \
-            Sources/AirThrowApp/SettingsView.swift \
-            Tests/SettingsChecks/main.swift \
-            -o .build/SettingsChecks
-          .build/SettingsChecks
+          python3 scripts/check_build.py SettingsChecks
+          build/checks/SettingsChecks
 
       - name: Receiver waiting-screen checks
         run: python3 scripts/waiting-screen-checks.py
@@ -96,9 +83,13 @@ jobs:
           codesign --verify --strict build/AirThrow.app
           ./build/athrow --help
 
-  media:
-    name: Media correctness checks
+  media-suites:
+    name: Media checks (${{ matrix.group }})
     runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [remux, controller, catalogs, preparation]
     steps:
       - uses: actions/checkout@v4
 
@@ -109,30 +100,49 @@ jobs:
         run: swift build --disable-sandbox
 
       - name: Incremental WebDAV audio and subtitles
+        if: matrix.group == 'remux'
         run: python3 scripts/incremental-share-checks.py
 
       - name: Long remote index checks
+        if: matrix.group == 'remux'
         run: python3 scripts/remote-index-checks.py
 
       - name: Native media matrix
+        if: matrix.group == 'remux'
         run: python3 scripts/native-media-checks.py
 
       - name: Source-choice controller checks
+        if: matrix.group == 'controller'
         run: python3 scripts/source-choice-checks.py
 
       - name: Playback lifecycle checks
+        if: matrix.group == 'controller'
         run: python3 scripts/source-choice-checks.py --controller
       - name: System playback controls and artwork
+        if: matrix.group == 'controller'
         run: python3 scripts/source-choice-checks.py --system-playback
 
       - name: IPTV catalog and channel checks
+        if: matrix.group == 'catalogs'
         run: python3 scripts/iptv-checks.py
 
       - name: Xtream API client checks
+        if: matrix.group == 'catalogs'
         run: python3 scripts/xtream-checks.py
 
       - name: HTTP server authentication checks
+        if: matrix.group == 'catalogs'
         run: python3 scripts/http-authentication-checks.py
 
       - name: Preparation and HTTP delivery checks
+        if: matrix.group == 'preparation'
         run: python3 scripts/preparation-checks.py
+
+  media:
+    name: Media correctness checks
+    needs: media-suites
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every media group
+        run: test "${{ needs.media-suites.result }}" = success

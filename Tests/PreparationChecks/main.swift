@@ -1,3 +1,6 @@
+#if SWIFT_PACKAGE
+@testable import AirThrowCore
+#endif
 import Foundation
 import AVFoundation
 
@@ -680,7 +683,8 @@ struct PreparationChecks {
                   "Quit left a cancelled job's temporary media behind")
 
         let controlledPreparer = MediaPreparer(environment: environment, preferences: PreparationPreferences(retainAll: true))
-        let controller = PlaybackController(prepareSource: { try await controlledPreparer.prepare($0) })
+        let controller = PlaybackController(historyStore: MediaHistoryStore(defaults: nil),
+                                            prepareSource: { try await controlledPreparer.prepare($0) })
         defer { controller.shutdown() }
         func settled() async throws {
             let deadline = Date().addingTimeInterval(15)

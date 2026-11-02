@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Generate original fixtures and inspect native loading; never claim receiver playback."""
+from check_build import build_check, PLAYER_SOURCES
 import argparse
 import http.server
 import json
@@ -20,6 +21,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--ffmpeg', help='Optional FFmpeg executable for additional test fixtures only')
 parser.add_argument('--serve', action='store_true', help='Keep serving fixtures after checks for manual testing')
+parser.add_argument('--diagnostic', action='store_true', help='Also probe containers without a stable native-playback expectation')
 parser.add_argument('--bind', default='127.0.0.1', help='Server interface; use an explicit LAN IP for receiver tests')
 args = parser.parse_args()
 (ROOT / 'build').mkdir(exist_ok=True)
@@ -38,6 +40,8 @@ def native(script, *arguments):
 cases = []
 
 def case(name, path, container, video, audio, expected=None, has_audio=None, skipped=None):
+    if path is not None and expected is None and not args.diagnostic:
+        raise ValueError(f'{name}: a correctness check requires an expected state')
     cases.append(dict(name=name, path=path, container=container, videoCodec=video,
                       audioCodec=audio, expectedState=expected, expectedAudio=has_audio, skipped=skipped))
 
@@ -47,10 +51,10 @@ native('add-test-audio.swift', out / 'video.mp4', out / 'audio.mp4')
 native('add-test-audio.swift', out / 'video.mp4', out / 'audio.mov')
 case('MP4 video only', 'video.mp4', 'MP4', 'H.264', 'none', 'awaiting_receiver', False)
 case('MP4 with audio', 'audio.mp4', 'MP4', 'H.264', 'AAC', 'awaiting_receiver', True)
-case('MOV with audio', 'audio.mov', 'MOV', 'H.264', 'AAC', has_audio=True)
+case('MOV with audio', 'audio.mov', 'MOV', 'H.264', 'AAC', 'awaiting_receiver', True)
 try:
     native('make-test-video.swift', out / 'hevc.mp4', 'hevc')
-    case('HEVC video only', 'hevc.mp4', 'MP4', 'HEVC', 'none', has_audio=False)
+    case('HEVC video only', 'hevc.mp4', 'MP4', 'HEVC', 'none', 'awaiting_receiver', False)
 except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
     case('HEVC video only', None, 'MP4', 'HEVC', 'none', skipped='Native HEVC fixture generation failed on this host')
 with wave.open(str(out / 'audio.wav'), 'wb') as wav:
@@ -69,10 +73,13 @@ extra = [
      ['-an', '-c:v', 'copy', '-hls_time', '1', '-hls_playlist_type', 'vod']),
     ('HLS audio only', 'audio-only.m3u8', 'HLS / MPEG-TS', 'none', 'AAC',
      ['-vn', '-c:a', 'copy', '-hls_time', '1', '-hls_playlist_type', 'vod']),
-    ('MKV with audio', 'video.mkv', 'MKV', 'H.264', 'AAC', ['-c', 'copy']),
-    ('WebM with audio', 'video.webm', 'WebM', 'VP9', 'Opus', ['-c:v', 'libvpx-vp9', '-c:a', 'libopus']),
-    ('Alternative audio codec', 'flac.mkv', 'MKV', 'H.264', 'FLAC', ['-c:v', 'copy', '-c:a', 'flac']),
 ]
+if args.diagnostic:
+    extra += [
+        ('MKV with audio', 'video.mkv', 'MKV', 'H.264', 'AAC', ['-c', 'copy']),
+        ('WebM with audio', 'video.webm', 'WebM', 'VP9', 'Opus', ['-c:v', 'libvpx-vp9', '-c:a', 'libopus']),
+        ('Alternative audio codec', 'flac.mkv', 'MKV', 'H.264', 'FLAC', ['-c:v', 'copy', '-c:a', 'flac']),
+    ]
 for name, path, container, video, audio, options in extra:
     reason = None
     if not ffmpeg:
@@ -209,15 +216,8 @@ threading.Thread(target=server.serve_forever, daemon=True).start()
 base = f'http://{args.bind}:{server.server_port}'
 try:
     binary = out / 'MediaChecks'
-    run(['swiftc', '-I', str(ROOT / 'Sources/CSQLite'), '-swift-version', '6', '-parse-as-library',
-         *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
-         ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift',
-         ROOT / 'Sources/AirThrowApp/InterfaceCopy.swift',
-         ROOT / 'Sources/AirThrowApp/PlaybackController.swift', ROOT / 'Sources/AirThrowApp/NetworkLibraryModel.swift',
-         ROOT / 'Sources/AirThrowApp/XtreamLibrary.swift',
-         ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
-         ROOT / 'Tests/MediaChecks/main.swift', '-o', binary])
-    result = run([binary, base, out / 'fixtures.json'], timeout=360)
+    build_check('MediaChecks', binary, PLAYER_SOURCES)
+    result = run([binary, base, out / 'fixtures.json', *(['--diagnostic'] if args.diagnostic else [])], timeout=360)
     report = dict(macOS=platform.mac_ver()[0], machine=platform.machine(),
                   macModel=run(['sysctl', '-n', 'hw.model']).stdout.strip(),
                   ffmpegVersion=run([ffmpeg, '-version']).stdout.splitlines()[0] if ffmpeg else None,

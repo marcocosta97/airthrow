@@ -1,3 +1,6 @@
+#if SWIFT_PACKAGE
+@testable import AirThrowCore
+#endif
 import Foundation
 import AVFoundation
 
@@ -27,12 +30,19 @@ struct MediaResult: Encodable {
 @main
 struct MediaChecks {
     @MainActor static func main() async throws {
-        guard CommandLine.arguments.count == 3 else {
+        guard (3...4).contains(CommandLine.arguments.count) else {
             throw NSError(domain: "MediaChecks", code: 1, userInfo: [NSLocalizedDescriptionKey: "Expected server URL and fixture manifest"])
         }
         func check(_ condition: Bool, _ message: String) throws {
             if !condition { throw NSError(domain: "MediaChecks", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
         }
+        #if compiler(>=6.4)
+        let endedNotification = AVPlayerItem.didPlayToEndTimeNotification
+        let failedNotification = AVPlayerItem.failedToPlayToEndTimeNotification
+        #else
+        let endedNotification = Notification.Name.AVPlayerItemDidPlayToEndTime
+        let failedNotification = Notification.Name.AVPlayerItemFailedToPlayToEndTime
+        #endif
         let secret = "https://example.com/private?signature=do-not-log"
         func av(_ code: AVError.Code, underlying: NSError? = nil) -> NSError {
             var info: [String: Any] = [NSLocalizedDescriptionKey: secret]
@@ -40,7 +50,7 @@ struct MediaChecks {
             return NSError(domain: AVFoundationErrorDomain, code: code.rawValue, userInfo: info)
         }
         let network = NSError(domain: NSURLErrorDomain, code: URLError.timedOut.rawValue,
-                              userInfo: [NSURLErrorFailingURLStringErrorKey: secret])
+                              userInfo: [NSURLErrorFailingURLErrorKey: URL(string: secret)!])
         let examples: [(NSError?, MediaFailureReason)] = [
             (av(.unknown, underlying: network), .network),
             (av(.fileFailedToParse, underlying: network), .network),
@@ -125,7 +135,7 @@ struct MediaChecks {
         }
         if cases.contains(where: { $0.name == "MP4 selectable subtitles" && $0.path != nil }) {
             let url = URL(string: base + "/direct-subtitles.mp4")!
-            let subtitleController = PlaybackController(prepareSource: nil)
+            let subtitleController = PlaybackController(historyStore: MediaHistoryStore(defaults: nil), prepareSource: nil)
             try subtitleController.load(url.absoluteString)
             let deadline = Date().addingTimeInterval(25)
             while Date() < deadline && subtitleController.snapshot.state != .awaitingReceiver {
@@ -201,7 +211,7 @@ struct MediaChecks {
                       "Source reload did not retain the selected subtitle language")
             await controller.shutdownAndWait()
         }
-        let controller = PlaybackController(prepareSource: nil)
+        let controller = PlaybackController(historyStore: MediaHistoryStore(defaults: nil), prepareSource: nil)
         defer { controller.shutdown() }
         func settled(states: [PlaybackState] = [.awaitingReceiver, .failed], audio: Bool? = nil) async throws -> PlaybackSnapshot {
             let deadline = Date().addingTimeInterval(35)
@@ -224,6 +234,8 @@ struct MediaChecks {
                 results.append(MediaResult(source: source, loadState: "skipped", hasAudio: nil, errorReason: nil))
                 continue
             }
+            try check(source.expectedState != nil || CommandLine.arguments.contains("--diagnostic"),
+                      "\(source.name): correctness checks require an expected outcome")
             try controller.load(base + "/" + path + "?signature=do-not-log")
             let status = try await settled(audio: source.expectedAudio)
             if let expected = source.expectedState {
@@ -267,7 +279,7 @@ struct MediaChecks {
         try controller.load(base + "/video.mp4")
         try check(try await settled().state == .awaitingReceiver, "Could not load notification fixture")
         let oldItem = controller.player.currentItem!
-        NotificationCenter.default.post(name: .AVPlayerItemFailedToPlayToEndTime, object: oldItem,
+        NotificationCenter.default.post(name: failedNotification, object: oldItem,
             userInfo: [AVPlayerItemFailedToPlayToEndTimeErrorKey: av(.unknown, underlying: network)])
         try await Task.sleep(for: .milliseconds(100))
         controller.refresh()
@@ -278,7 +290,7 @@ struct MediaChecks {
         try controller.load(base + "/video.mp4")
         try check(controller.snapshot.errorReason == nil, "Replacement retained old diagnostic")
         try check(try await settled().state == .awaitingReceiver, "Failed load did not recover")
-        NotificationCenter.default.post(name: .AVPlayerItemFailedToPlayToEndTime, object: oldItem,
+        NotificationCenter.default.post(name: failedNotification, object: oldItem,
             userInfo: [AVPlayerItemFailedToPlayToEndTimeErrorKey: av(.decodeFailed)])
         try await Task.sleep(for: .milliseconds(100))
         try check(controller.snapshot.errorReason == nil, "Stale item changed new session diagnostics")
@@ -403,7 +415,7 @@ struct MediaChecks {
         try await waitForResolved(releaseAfterEnd)
         try check(releaseAfterEnd.snapshot.title == "Resolved fixture title", "Resolved media title was not published")
         let finishedItem = releaseAfterEnd.player.currentItem!
-        NotificationCenter.default.post(name: .AVPlayerItemDidPlayToEndTime, object: finishedItem)
+        NotificationCenter.default.post(name: endedNotification, object: finishedItem)
         try await Task.sleep(for: .milliseconds(100))
         try check(releaseAfterEnd.snapshot.state == .idle && releaseAfterEnd.player.currentItem == nil,
                   "Release-after-playback retained the finished item")

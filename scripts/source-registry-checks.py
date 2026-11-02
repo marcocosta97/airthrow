@@ -7,20 +7,15 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
-BUILD = ROOT / 'build/source-registry-checks'
-BUILD.mkdir(parents=True, exist_ok=True)
-binary = BUILD / 'SourceRegistryChecks'
-subprocess.run(['swiftc', '-I', str(ROOT / 'Sources/CSQLite'), '-swift-version', '6', '-parse-as-library',
-                '-module-cache-path', str(BUILD / 'ModuleCache'),
-                *map(str, sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift'))),
-                str(ROOT / 'Tests/SourceRegistryChecks/main.swift'), '-o', str(binary)],
-               cwd=ROOT, check=True, timeout=180)
+binary = ROOT / '.build/debug/SourceRegistryChecks'
+subprocess.run(['swift', 'build', '--configuration', 'debug', '--product', 'SourceRegistryChecks',
+                '--disable-sandbox'], cwd=ROOT, check=True, timeout=240)
 
 with tempfile.TemporaryDirectory(prefix='athrow-registry-') as temporary:
     root = Path(temporary)
     standalone = root / 'RegistryCheck'
     shutil.copy2(binary, standalone)
-    subprocess.run([str(standalone)], cwd='/', check=True, timeout=60)
+    subprocess.run([str(standalone), '--routing-only'], cwd='/', check=True, timeout=60)
 
     contents = root / 'Registry.app/Contents'
     (contents / 'MacOS').mkdir(parents=True)

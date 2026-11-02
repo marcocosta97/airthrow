@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Synthetic stream-copy and delivery checks; does not launch/control the desktop app."""
+from check_build import build_check, PLAYER_SOURCES
 import http.server
 import json
 import os
@@ -25,6 +26,12 @@ FFPROBE = shutil.which('ffprobe') or '/opt/homebrew/bin/ffprobe'
 (OUT / 'tmp').mkdir(exist_ok=True)
 TEST_ENV = dict(os.environ, TMPDIR=str(OUT / 'tmp') + '/')
 
+PROGRESSIVE_ONLY = '--progressive-only' in sys.argv
+PROGRESSIVE_FIXTURES = {
+    'combined.mp4', 'combined.mkv', 'video.mp4', 'audio.m4a', 'vp9-opus.mkv',
+    'hevc-sdr.mkv', 'highfps.mkv', 'long.mp4', 'long-vp9.mkv', 'long-flac.mkv',
+}
+
 
 def run(arguments, live=False, **options):
     try:
@@ -41,6 +48,8 @@ def run(arguments, live=False, **options):
 
 
 def ffmpeg(*arguments):
+    if PROGRESSIVE_ONLY and Path(arguments[-1]).name not in PROGRESSIVE_FIXTURES:
+        return
     run([FFMPEG, '-hide_banner', '-loglevel', 'error', '-nostdin', '-n', *arguments], timeout=30)
 
 
@@ -130,13 +139,13 @@ if not reuse:
     cache_encoder.write_text('#!/usr/bin/python3\nimport os, pathlib, sys\na = sys.argv[1:]\nif a[-1].endswith("part.m3u8"):\n with pathlib.Path(' + repr(str(OUT / 'cache-jobs.txt')) + ').open("a") as log: log.write(a[-1] + "\\n")\nos.execv(' + repr(FFMPEG) + ', [' + repr(FFMPEG) + '] + a)\n')
     cache_encoder.chmod(0o700)
 # Keep this fixture available when reusing an older fixture directory too.
-if not (OUT / 'odd-width.mkv').exists():
+if not PROGRESSIVE_ONLY and not (OUT / 'odd-width.mkv').exists():
     ffmpeg('-f', 'lavfi', '-i', 'testsrc2=size=854x480:rate=24',
            '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
            '-vf', 'crop=853:480:exact=1', '-t', '1', '-c:v', 'libvpx-vp9',
            '-deadline', 'realtime', '-cpu-used', '8', '-b:v', '0', '-crf', '35',
            '-c:a', 'libopus', OUT / 'odd-width.mkv')
-if not (OUT / 'hevc-main10-sdr.mkv').exists():
+if not PROGRESSIVE_ONLY and not (OUT / 'hevc-main10-sdr.mkv').exists():
     ffmpeg('-i', OUT / 'combined.mkv', '-c:v', 'libx265', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p10le',
            '-x265-params', 'log-level=error:pools=1:colorprim=1:transfer=1:colormatrix=1',
            '-c:a', 'copy', OUT / 'hevc-main10-sdr.mkv')
@@ -144,20 +153,20 @@ if not (OUT / 'hevc-main10-sdr.mkv').exists():
 # HDR10/HDR10+ and a Dolby Vision profile 8.1/8.2/8.4 base layer look the same
 # here. This is copied unmodified at Original quality; it is still refused for
 # any re-encode (tone mapping stays out of scope).
-if not (OUT / 'hevc-main10-hdr10.mkv').exists():
+if not PROGRESSIVE_ONLY and not (OUT / 'hevc-main10-hdr10.mkv').exists():
     ffmpeg('-i', OUT / 'combined.mkv', '-c:v', 'libx265', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p10le',
            '-x265-params', 'log-level=error:pools=1:colorprim=9:transfer=16:colormatrix=9:hdr10=1:'
            'master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400',
            '-c:a', 'copy', OUT / 'hevc-main10-hdr10.mkv')
 # A Main 10 base layer with the HLG transfer and BT.2020 primaries.
-if not (OUT / 'hevc-main10-hlg.mkv').exists():
+if not PROGRESSIVE_ONLY and not (OUT / 'hevc-main10-hlg.mkv').exists():
     ffmpeg('-i', OUT / 'combined.mkv', '-c:v', 'libx265', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p10le',
            '-x265-params', 'log-level=error:pools=1:colorprim=9:transfer=18:colormatrix=9',
            '-c:a', 'copy', OUT / 'hevc-main10-hlg.mkv')
 # A non-backward-compatible Dolby Vision layer (profile 5 style): Main 10 with
 # BT.2020 primaries but no standard PQ/HLG transfer tag. This stays
 # unsupported; reconstructing it needs the RPU, which this app does not apply.
-if not (OUT / 'hevc-main10-dv5.mkv').exists():
+if not PROGRESSIVE_ONLY and not (OUT / 'hevc-main10-dv5.mkv').exists():
     ffmpeg('-i', OUT / 'combined.mkv', '-c:v', 'libx265', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p10le',
            '-x265-params', 'log-level=error:pools=1:colorprim=9:transfer=2:colormatrix=9',
            '-c:a', 'copy', OUT / 'hevc-main10-dv5.mkv')
@@ -247,7 +256,7 @@ def inject_dvcc(path, track_index, profile, level, rpu, el, bl, compat):
 # signaling (the DOVI configuration record) that drives that decision; the
 # actual NAL-stripping step is separately verified to be a safe no-op on a
 # single-layer stream like this one (ref. AirThrow's own test coverage).
-if not (OUT / 'hevc-main10-dv7-single.mp4').exists():
+if not PROGRESSIVE_ONLY and not (OUT / 'hevc-main10-dv7-single.mp4').exists():
     ffmpeg('-i', OUT / 'hevc-main10-hdr10.mkv', '-c', 'copy', '-tag:v', 'hvc1',
            OUT / 'hevc-main10-dv7-single.mp4')
     inject_dvcc(OUT / 'hevc-main10-dv7-single.mp4', 0, profile=7, level=6, rpu=1, el=1, bl=1, compat=1)
@@ -256,7 +265,7 @@ if not (OUT / 'hevc-main10-dv7-single.mp4').exists():
 # resolution here so a mistaken selection is caught) alongside the real base
 # layer (track 1, the same HDR10 fixture as above). Only the base layer may
 # ever be selected.
-if not (OUT / 'hevc-main10-dv7-dual.mp4').exists():
+if not PROGRESSIVE_ONLY and not (OUT / 'hevc-main10-dv7-dual.mp4').exists():
     ffmpeg('-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=24', '-t', '2',
            '-c:v', 'libx265', '-preset', 'ultrafast', '-tag:v', 'hvc1', OUT / 'dv7-fake-el.mp4')
     ffmpeg('-i', OUT / 'dv7-fake-el.mp4', '-i', OUT / 'hevc-main10-hdr10.mkv',
@@ -266,22 +275,22 @@ if not (OUT / 'hevc-main10-dv7-dual.mp4').exists():
     inject_dvcc(OUT / 'hevc-main10-dv7-dual.mp4', 1, profile=7, level=6, rpu=0, el=0, bl=1, compat=1)
 # AC-3 and E-AC-3 are copied; an AAC stereo rendition is added beside them.
 # TrueHD is not an AirPlay codec and is decoded to AAC stereo.
-if not (OUT / 'h264-ac3.mkv').exists():
+if not PROGRESSIVE_ONLY and not (OUT / 'h264-ac3.mkv').exists():
     ffmpeg('-i', OUT / 'combined.mkv', '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy',
            '-c:a', 'ac3', '-ac', '6', '-b:a', '192k', '-ar', '48000', OUT / 'h264-ac3.mkv')
-if not (OUT / 'h264-eac3.mkv').exists():
+if not PROGRESSIVE_ONLY and not (OUT / 'h264-eac3.mkv').exists():
     ffmpeg('-i', OUT / 'combined.mkv', '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy',
            '-c:a', 'eac3', '-ac', '6', '-b:a', '384k', '-ar', '48000', OUT / 'h264-eac3.mkv')
-if not (OUT / 'h264-ac3-aac.mkv').exists():
+if not PROGRESSIVE_ONLY and not (OUT / 'h264-ac3-aac.mkv').exists():
     ffmpeg('-i', OUT / 'combined.mkv', '-i', OUT / 'h264-ac3.mkv',
            '-map', '0:v:0', '-map', '1:a:0', '-map', '0:a:0', '-c', 'copy', OUT / 'h264-ac3-aac.mkv')
-if not (OUT / 'h264-truehd.mkv').exists():
+if not PROGRESSIVE_ONLY and not (OUT / 'h264-truehd.mkv').exists():
     ffmpeg('-i', OUT / 'combined.mkv', '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy',
            '-c:a', 'truehd', '-strict', 'experimental', '-ac', '2', OUT / 'h264-truehd.mkv')
-if not (OUT / 'h264-dts.mkv').exists():
+if not PROGRESSIVE_ONLY and not (OUT / 'h264-dts.mkv').exists():
     ffmpeg('-i', OUT / 'combined.mkv', '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy',
            '-c:a', 'dca', '-strict', 'experimental', '-ac', '2', '-ar', '48000', OUT / 'h264-dts.mkv')
-if not (OUT / 'hevc-ac3.mkv').exists():
+if not PROGRESSIVE_ONLY and not (OUT / 'hevc-ac3.mkv').exists():
     ffmpeg('-i', OUT / 'hevc-sdr.mkv', '-i', OUT / 'h264-ac3.mkv',
            '-map', '0:v:0', '-map', '1:a:0', '-c', 'copy', OUT / 'hevc-ac3.mkv')
 FILES = {f'/{name}': (OUT / name).read_bytes() for name in ['hevc-main10-sdr.mkv', 'hevc-main10-hdr10.mkv',
@@ -292,9 +301,10 @@ FILES = {f'/{name}': (OUT / name).read_bytes() for name in ['hevc-main10-sdr.mkv
                                                             'odd-width.mkv', 'combined.mp4', 'combined.mkv', 'subtitles.mkv', 'video.mp4', 'audio.m4a',
                                                             'flac.mkv', 'multitrack.mkv', 'long.mp4', 'vp9-opus.mkv',
                                                             'hdr.mkv', 'uhd.mkv', 'hevc-sdr.mkv', 'highfps.mkv', 'tenbit.mkv',
-                                                            'long-vp9.mkv', 'long-flac.mkv']}
+                                                            'long-vp9.mkv', 'long-flac.mkv'] if not PROGRESSIVE_ONLY or name in PROGRESSIVE_FIXTURES}
 FILES['/no-range-vp9.mkv'] = (OUT / 'long-vp9.mkv').read_bytes()
-FILES['/native-stream'] = (OUT / 'source-hls.m3u8').read_bytes()
+if not PROGRESSIVE_ONLY:
+    FILES['/native-stream'] = (OUT / 'source-hls.m3u8').read_bytes()
 FILES.update({f'/{path.name}': path.read_bytes() for path in OUT.glob('source-hls*.ts')})
 
 # Keep a large remote input sparse: its trailing movie index must be fetched
@@ -409,12 +419,7 @@ threading.Thread(target=server.serve_forever, daemon=True).start()
 try:
     if '--live-hevc-only' in sys.argv or ("--progressive-only" not in sys.argv and "--cache-only" not in sys.argv and "--network-continuity-only" not in sys.argv):
         binary = OUT / 'PreparationChecks'
-        run(['swiftc', '-I', str(ROOT / 'Sources/CSQLite'), '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
-             ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/InterfaceCopy.swift',
-             ROOT / 'Sources/AirThrowApp/PlaybackController.swift', ROOT / 'Sources/AirThrowApp/NetworkLibraryModel.swift',
-             ROOT / 'Sources/AirThrowApp/XtreamLibrary.swift',
-             ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
-             ROOT / 'Tests/PreparationChecks/main.swift', '-o', binary], timeout=90)
+        build_check('PreparationChecks', binary, PLAYER_SOURCES)
         focused = [flag for flag in ('--live-hevc-only', '--surround-only') if flag in sys.argv]
         run([binary, f'http://127.0.0.1:{server.server_port}', OUT, *focused], live=True, timeout=180)
         if '--live-hevc-only' in sys.argv:
@@ -486,25 +491,16 @@ try:
         assert tenbit and tenbit[0]['pix_fmt'] == 'yuv420p10le', '10-bit fixture is not 10-bit'
         print('PASS converted output is SDR H.264 yuv420p <=1080p/60 and AAC LC <=48 kHz mono/stereo')
         print('PASS 4K remux, four enhancement presets, 100->60 fps cap, software fallback and 10-bit refusal')
-    cached = OUT / 'CacheChecks'
-    run(['swiftc', '-I', str(ROOT / 'Sources/CSQLite'), '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
-         ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/InterfaceCopy.swift',
-         ROOT / 'Sources/AirThrowApp/PlaybackController.swift', ROOT / 'Sources/AirThrowApp/NetworkLibraryModel.swift',
-         ROOT / 'Sources/AirThrowApp/XtreamLibrary.swift',
-         ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
-         ROOT / 'Tests/CacheChecks/main.swift', '-o', cached], timeout=90)
-    run([cached, f'http://127.0.0.1:{server.server_port}', OUT,
-         *(['--network-continuity-only'] if '--network-continuity-only' in sys.argv else [])], live=True, timeout=240)
-    if '--cache-only' in sys.argv or '--network-continuity-only' in sys.argv:
-        print(f'Cache fixtures and results: {OUT}')
-        raise SystemExit(0)
+    if '--progressive-only' not in sys.argv:
+        cached = OUT / 'CacheChecks'
+        build_check('CacheChecks', cached, PLAYER_SOURCES)
+        run([cached, f'http://127.0.0.1:{server.server_port}', OUT,
+             *(['--network-continuity-only'] if '--network-continuity-only' in sys.argv else [])], live=True, timeout=240)
+        if '--cache-only' in sys.argv or '--network-continuity-only' in sys.argv:
+            print(f'Cache fixtures and results: {OUT}')
+            raise SystemExit(0)
     progressive = OUT / 'ProgressiveChecks'
-    run(['swiftc', '-I', str(ROOT / 'Sources/CSQLite'), '-swift-version', '6', '-parse-as-library', *sorted((ROOT / 'Sources/AirThrowCore').glob('*.swift')),
-         ROOT / 'Sources/AirThrowApp/MediaDiagnostics.swift', ROOT / 'Sources/AirThrowApp/InterfaceCopy.swift',
-         ROOT / 'Sources/AirThrowApp/PlaybackController.swift', ROOT / 'Sources/AirThrowApp/NetworkLibraryModel.swift',
-         ROOT / 'Sources/AirThrowApp/XtreamLibrary.swift',
-         ROOT / 'Sources/AirThrowApp/ReceiverWaitingScreen.swift',
-         ROOT / 'Tests/ProgressiveChecks/main.swift', '-o', progressive], timeout=90)
+    build_check('ProgressiveChecks', progressive, PLAYER_SOURCES)
     (OUT / 'encoder-attempts.txt').unlink(missing_ok=True)
     run([progressive, f'http://127.0.0.1:{server.server_port}', OUT], live=True, timeout=240)
     def video_frames(path):

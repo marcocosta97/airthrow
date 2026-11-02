@@ -1,3 +1,6 @@
+#if SWIFT_PACKAGE
+@testable import AirThrowCore
+#endif
 import Foundation
 import AVFoundation
 
@@ -82,6 +85,11 @@ private final class HandoffPlayer: AVPlayer, @unchecked Sendable {
 @main
 struct ControllerChecks {
     @MainActor static func main() async throws {
+        #if compiler(>=6.4)
+        let endedNotification = AVPlayerItem.didPlayToEndTimeNotification
+        #else
+        let endedNotification = Notification.Name.AVPlayerItemDidPlayToEndTime
+        #endif
         let base = CommandLine.arguments[1]
         let controller = PlaybackController(historyStore: MediaHistoryStore(defaults: nil), integratesWithSystemPlayback: false)
         defer { controller.shutdown() }
@@ -487,7 +495,7 @@ struct ControllerChecks {
         try check(handoffPlayer.rate == 0 && handoffPlayer.isMuted,
                   "Handoff resumed or unmuted playback while rewinding")
         handoffController.pause()
-        NotificationCenter.default.post(name: .AVPlayerItemDidPlayToEndTime,
+        NotificationCenter.default.post(name: endedNotification,
                                         object: handoffPlayer.currentItem)
         try await Task.sleep(for: .milliseconds(50))
         do { try handoffController.play(); try check(false, "Play raced the handoff rewind") }

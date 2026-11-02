@@ -1,3 +1,6 @@
+#if SWIFT_PACKAGE
+@testable import AirThrowCore
+#endif
 import Foundation
 
 private struct Failure: Error { let message: String }
@@ -20,7 +23,84 @@ private struct Failure: Error { let message: String }
     func remove(reference: String) throws { try memory.remove(reference: reference) }
 }
 @main struct HistoryCredentialChecks {
+    @MainActor static func historyChecks() throws {
+        var count = 0
+        func check(_ value: Bool, _ message: String) throws {
+            guard value else { throw Failure(message: message) }
+            count += 1; print("PASS", message)
+        }
+        let suite = "it.mcosta.airthrow.history-store-checks.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let historyCredentials = MemoryMediaHistoryCredentials()
+        let store = MediaHistoryStore(defaults: defaults, credentials: historyCredentials)
+        let signed = URL(string: "https://fixture.example/")!.appendingPathComponent("video.mp4").appending(queryItems: [URLQueryItem(name: "token", value: "a+b&c")])
+        store.record(signed, title: "Signed video", kind: .video)
+        let savedID = store.entries[0].id
+        store.record(signed, title: "Updated video", kind: .video)
+        try check(store.entries.count == 1 && store.entries[0].id == savedID && store.entries[0].title == "Updated video", "History deduplicates sources while retaining stable identity")
+        try check(MediaHistoryStore(defaults: defaults, credentials: historyCredentials).entries.first?.url == signed, "History survives relaunch and preserves the original signed URL")
+        store.record(URL(string: "http://user:password@example.test/video")!, title: "Unsafe", kind: .video)
+        try check(store.entries.count == 1, "History refuses embedded credentials")
+        store.remove(savedID)
+        try check(MediaHistoryStore(defaults: defaults, credentials: historyCredentials).entries.isEmpty, "Removing one history entry persists")
+        store.record(signed, title: "Video", kind: .video)
+        store.clear()
+        try check(MediaHistoryStore(defaults: defaults, credentials: historyCredentials).entries.isEmpty, "Clear History persists across relaunch")
+        let missingFile = FileManager.default.temporaryDirectory.appendingPathComponent("remembered-\(UUID()).mp4")
+        try Data([0]).write(to: missingFile)
+        store.record(missingFile, title: "Local video", kind: .video)
+        try FileManager.default.removeItem(at: missingFile)
+        try check(MediaHistoryStore(defaults: defaults, credentials: historyCredentials).entries.first?.url == missingFile,
+                  "Missing local files remain visible and removable in persisted history")
+        store.clear()
+        for index in 0...MediaHistoryStore.maximumEntries {
+            store.record(URL(string: "https://fixture.example/")!.appendingPathComponent("video-\(index).mp4"), title: "Video \(index)", kind: .video)
+        }
+        try check(MediaHistoryStore(defaults: defaults, credentials: historyCredentials).entries.count == MediaHistoryStore.maximumEntries
+                  && store.entries.first?.title == "Video 100", "History keeps a bounded recent list across relaunch")
+        store.clear()
+        store.record(signed, title: "Pinned video", kind: .video)
+        let pinnedID = store.entries[0].id
+        store.togglePin(pinnedID)
+        let newerURL = URL(string: "https://fixture.example/")!.appendingPathComponent("newer.mp4")
+        store.record(newerURL, title: "Newer video", kind: .video)
+        try check(store.entries.first?.id == pinnedID && store.entries.last?.url == newerURL,
+                  "Pinned history stays above newer unpinned sources")
+        try check(MediaHistoryStore(defaults: defaults, credentials: historyCredentials).entries.first?.isPinned == true,
+                  "Pin status and ordering survive relaunch")
+        store.record(signed, title: "Reopened pinned video", kind: .video)
+        try check(store.entries.first?.id == pinnedID && store.entries.first?.isPinned == true,
+                  "Reopening a pinned source preserves its pin and identity")
+        store.clear()
+        try check(MediaHistoryStore(defaults: defaults, credentials: historyCredentials).entries.map(\.id) == [pinnedID],
+                  "Clear History removes recent entries and persists pinned sources")
+        store.record(newerURL, title: "Newer video", kind: .video)
+        store.togglePin(pinnedID)
+        try check(store.entries.first?.url == newerURL && !store.entries.last!.isPinned,
+                  "Unpin restores normal recency ordering")
+        store.togglePin(pinnedID)
+        for index in 0...MediaHistoryStore.maximumEntries {
+            store.record(URL(string: "https://fixture.example/")!.appendingPathComponent("recent-\(index).mp4"), title: "Recent \(index)", kind: .video)
+        }
+        try check(MediaHistoryStore(defaults: defaults, credentials: historyCredentials).entries.count == MediaHistoryStore.maximumEntries
+                  && store.entries.first?.id == pinnedID,
+                  "History capacity never evicts a pinned source for new recent entries")
+        store.remove(pinnedID)
+        try check(!MediaHistoryStore(defaults: defaults, credentials: historyCredentials).entries.contains(where: { $0.id == pinnedID }),
+                  "Explicit removal can delete a pinned entry")
+        // Simulate the persisted schema before pin support.
+        let encoded = try JSONEncoder().encode(store.entries)
+        var legacy = try JSONSerialization.jsonObject(with: encoded) as! [[String: Any]]
+        for index in legacy.indices { legacy[index].removeValue(forKey: "isPinned") }
+        defaults.set(try JSONSerialization.data(withJSONObject: legacy), forKey: "mediaHistory.v1")
+        let migrated = MediaHistoryStore(defaults: defaults, credentials: historyCredentials).entries
+        try check(migrated.count == store.entries.count && migrated.allSatisfy { !$0.isPinned },
+                  "Existing saved history loads without losing entries when pin fields are absent")
+        print("History store checks: \(count) passed.")
+    }
     @MainActor static func main() throws {
+        try historyChecks()
         var count = 0
         func check(_ value: Bool, _ message: String) throws {
             guard value else { throw Failure(message: message) }

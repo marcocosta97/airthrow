@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """History privacy/lifecycle checks; optional real Keychain test never presents UI."""
+from check_build import build_check
 from pathlib import Path
 import argparse
 import os
@@ -13,7 +14,5 @@ build = root / 'build' / 'history-credential-checks'
 build.mkdir(parents=True, exist_ok=True)
 binary = build / 'HistoryCredentialChecks'
 env = dict(os.environ, CLANG_MODULE_CACHE_PATH=str(build / 'ModuleCache'), SWIFT_MODULECACHE_PATH=str(build / 'ModuleCache'))
-subprocess.run(['swiftc', '-I', str(root / 'Sources/CSQLite'), '-swift-version', '6', '-parse-as-library', '-module-cache-path', str(build / 'ModuleCache'),
-                *map(str, sorted((root / 'Sources/AirThrowCore').glob('*.swift'))),
-                str(root / 'Tests/MediaHistoryCredentialChecks/main.swift'), '-o', str(binary)], cwd=root, env=env, check=True, timeout=180)
+build_check('MediaHistoryCredentialChecks', str(binary))
 subprocess.run([str(binary), *(['--keychain'] if args.keychain else [])], cwd=root, env=env, check=True, timeout=30)

@@ -1,3 +1,6 @@
+#if SWIFT_PACKAGE
+@testable import AirThrowCore
+#endif
 import Foundation
 import AVFoundation
 
@@ -52,6 +55,13 @@ struct IPTVChecks {
         catch { print("FAIL \(error)"); exit(1) }
     }
     @MainActor static func run() async throws {
+        #if compiler(>=6.4)
+        let failedNotification = AVPlayerItem.failedToPlayToEndTimeNotification
+        let stalledNotification = AVPlayerItem.playbackStalledNotification
+        #else
+        let failedNotification = Notification.Name.AVPlayerItemFailedToPlayToEndTime
+        let stalledNotification = Notification.Name.AVPlayerItemPlaybackStalled
+        #endif
         let base = URL(string: CommandLine.arguments[1])!
         let local = CommandLine.arguments[2]
         var checks = 0
@@ -65,7 +75,7 @@ struct IPTVChecks {
             catch let error as IPTVCatalogFailure { try check(String(describing: error) == String(describing: reason), message) }
         }
         let sensitiveTimeout = NSError(domain: NSURLErrorDomain, code: URLError.timedOut.rawValue,
-            userInfo: [NSURLErrorFailingURLStringErrorKey: "http://example.test/get.php?password=private-value"])
+            userInfo: [NSURLErrorFailingURLErrorKey: URL(string: "http://example.test/get.php?password=private-value")!])
         try check(IPTVCatalogFailure.message(for: sensitiveTimeout) == IPTVCatalogFailure.timedOut.message
                   && !IPTVCatalogFailure.message(for: sensitiveTimeout).contains("private-value"),
                   "Playlist timeout is actionable without exposing source credentials")
@@ -158,74 +168,6 @@ struct IPTVChecks {
         let relative = try await IPTVCatalogLoader.load(relativeFile)
         try check(relative.channels.count == 1 && relative.channels[0].url.isFileURL && relative.channels[0].url.lastPathComponent == "channel.mp4",
                   "A local catalog resolves entries beside the file")
-        let suite = "it.mcosta.airthrow.history-checks.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let historyCredentials = MemoryMediaHistoryCredentials()
-        let store = MediaHistoryStore(defaults: defaults, credentials: historyCredentials)
-        let signed = base.appendingPathComponent("video.mp4").appending(queryItems: [URLQueryItem(name: "token", value: "a+b&c")])
-        store.record(signed, title: "Signed video", kind: .video)
-        let savedID = store.entries[0].id
-        store.record(signed, title: "Updated video", kind: .video)
-        try check(store.entries.count == 1 && store.entries[0].id == savedID && store.entries[0].title == "Updated video", "History deduplicates sources while retaining stable identity")
-        try check(MediaHistoryStore(defaults: defaults, credentials: historyCredentials).entries.first?.url == signed, "History survives relaunch and preserves the original signed URL")
-        store.record(URL(string: "http://user:password@example.test/video")!, title: "Unsafe", kind: .video)
-        try check(store.entries.count == 1, "History refuses embedded credentials")
-        store.remove(savedID)
-        try check(MediaHistoryStore(defaults: defaults, credentials: historyCredentials).entries.isEmpty, "Removing one history entry persists")
-        store.record(signed, title: "Video", kind: .video)
-        store.clear()
-        try check(MediaHistoryStore(defaults: defaults, credentials: historyCredentials).entries.isEmpty, "Clear History persists across relaunch")
-        let missingFile = URL(fileURLWithPath: local).deletingLastPathComponent().appendingPathComponent("remembered.mp4")
-        try Data([0]).write(to: missingFile)
-        store.record(missingFile, title: "Local video", kind: .video)
-        try FileManager.default.removeItem(at: missingFile)
-        try check(MediaHistoryStore(defaults: defaults, credentials: historyCredentials).entries.first?.url == missingFile,
-                  "Missing local files remain visible and removable in persisted history")
-        store.clear()
-        for index in 0...MediaHistoryStore.maximumEntries {
-            store.record(base.appendingPathComponent("video-\(index).mp4"), title: "Video \(index)", kind: .video)
-        }
-        try check(MediaHistoryStore(defaults: defaults, credentials: historyCredentials).entries.count == MediaHistoryStore.maximumEntries
-                  && store.entries.first?.title == "Video 100", "History keeps a bounded recent list across relaunch")
-        store.clear()
-        store.record(signed, title: "Pinned video", kind: .video)
-        let pinnedID = store.entries[0].id
-        store.togglePin(pinnedID)
-        let newerURL = base.appendingPathComponent("newer.mp4")
-        store.record(newerURL, title: "Newer video", kind: .video)
-        try check(store.entries.first?.id == pinnedID && store.entries.last?.url == newerURL,
-                  "Pinned history stays above newer unpinned sources")
-        try check(MediaHistoryStore(defaults: defaults, credentials: historyCredentials).entries.first?.isPinned == true,
-                  "Pin status and ordering survive relaunch")
-        store.record(signed, title: "Reopened pinned video", kind: .video)
-        try check(store.entries.first?.id == pinnedID && store.entries.first?.isPinned == true,
-                  "Reopening a pinned source preserves its pin and identity")
-        store.clear()
-        try check(MediaHistoryStore(defaults: defaults, credentials: historyCredentials).entries.map(\.id) == [pinnedID],
-                  "Clear History removes recent entries and persists pinned sources")
-        store.record(newerURL, title: "Newer video", kind: .video)
-        store.togglePin(pinnedID)
-        try check(store.entries.first?.url == newerURL && !store.entries.last!.isPinned,
-                  "Unpin restores normal recency ordering")
-        store.togglePin(pinnedID)
-        for index in 0...MediaHistoryStore.maximumEntries {
-            store.record(base.appendingPathComponent("recent-\(index).mp4"), title: "Recent \(index)", kind: .video)
-        }
-        try check(MediaHistoryStore(defaults: defaults, credentials: historyCredentials).entries.count == MediaHistoryStore.maximumEntries
-                  && store.entries.first?.id == pinnedID,
-                  "History capacity never evicts a pinned source for new recent entries")
-        store.remove(pinnedID)
-        try check(!MediaHistoryStore(defaults: defaults, credentials: historyCredentials).entries.contains(where: { $0.id == pinnedID }),
-                  "Explicit removal can delete a pinned entry")
-        // Simulate the persisted schema before pin support.
-        let encoded = try JSONEncoder().encode(store.entries)
-        var legacy = try JSONSerialization.jsonObject(with: encoded) as! [[String: Any]]
-        for index in legacy.indices { legacy[index].removeValue(forKey: "isPinned") }
-        defaults.set(try JSONSerialization.data(withJSONObject: legacy), forKey: "mediaHistory.v1")
-        let migrated = MediaHistoryStore(defaults: defaults, credentials: historyCredentials).entries
-        try check(migrated.count == store.entries.count && migrated.allSatisfy { !$0.isPinned },
-                  "Existing saved history loads without losing entries when pin fields are absent")
         let liveURL = base.appendingPathComponent("live.m3u8")
         let evidence = await HLSVideoEvidence.hasVideo(at: liveURL)
         try check(evidence, "Video evidence from a live media playlist without codec metadata")
@@ -292,7 +234,7 @@ struct IPTVChecks {
         let bufferingItem = liveDirectPlayer.currentItem
         liveDirectPlayer.rate = 0
         liveDirectPlayer.setBuffering(true)
-        NotificationCenter.default.post(name: .AVPlayerItemPlaybackStalled, object: bufferingItem)
+        NotificationCenter.default.post(name: stalledNotification, object: bufferingItem)
         hevcReceiver.refresh()
         try await Task.sleep(for: .milliseconds(1200))
         hevcReceiver.refresh()
@@ -304,7 +246,7 @@ struct IPTVChecks {
         hevcReceiver.refresh()
         try check(hevcReceiver.snapshot.state == .playing && hevcReceiver.snapshot.playbackPath == .direct,
                   "Buffered live Direct resumes on the same item without Stop")
-        NotificationCenter.default.post(name: .AVPlayerItemFailedToPlayToEndTime, object: bufferingItem,
+        NotificationCenter.default.post(name: failedNotification, object: bufferingItem,
             userInfo: [AVPlayerItemFailedToPlayToEndTimeErrorKey:
                 NSError(domain: AVFoundationErrorDomain, code: AVError.Code.externalPlaybackNotSupportedForAsset.rawValue)])
         try await wait(seconds: 12) { hevcReceiver.snapshot.state == .failed }
@@ -402,7 +344,7 @@ struct IPTVChecks {
         try await wait(seconds: 8) { unknownLive.snapshot.state == .playing }
         try check(unknownLive.snapshot.playbackPath == .direct,
                   "An unavailable compatibility sample does not block playable live Direct")
-        NotificationCenter.default.post(name: .AVPlayerItemFailedToPlayToEndTime, object: unknownLive.player.currentItem,
+        NotificationCenter.default.post(name: failedNotification, object: unknownLive.player.currentItem,
             userInfo: [AVPlayerItemFailedToPlayToEndTimeErrorKey: NSError(domain: NSURLErrorDomain,
                 code: URLError.networkConnectionLost.rawValue)])
         try await wait(seconds: 8) { unknownLive.snapshot.state == .failed }
@@ -452,7 +394,7 @@ struct IPTVChecks {
         // backward skipping semantics when it encounters an unavailable item.
         try queueController.load(queueURL.absoluteString, autoplay: true)
         try await wait(seconds: 8) { queueController.snapshot.state == .playing }
-        NotificationCenter.default.post(name: .AVPlayerItemFailedToPlayToEndTime, object: queuePlayer.currentItem,
+        NotificationCenter.default.post(name: failedNotification, object: queuePlayer.currentItem,
             userInfo: [AVPlayerItemFailedToPlayToEndTimeErrorKey: NSError(domain: NSURLErrorDomain,
                 code: URLError.networkConnectionLost.rawValue)])
         try await wait(seconds: 12) { queueController.snapshot.state == .playing && queueController.snapshot.queue?.currentIndex == 1 }
@@ -518,14 +460,9 @@ struct IPTVChecks {
                       "Server rejection retains its HTTP status in a URL-free recovery message")
         }
         let coldURL = base.appendingPathComponent("cold.m3u")
-        let legacyConfig = URLSessionConfiguration.ephemeral
-        legacyConfig.timeoutIntervalForRequest = 10; legacyConfig.timeoutIntervalForResource = 20
-        let legacySession = URLSession(configuration: legacyConfig)
-        do { _ = try await legacySession.data(from: coldURL); throw Failure(message: "Legacy timeout did not reproduce") }
-        catch let error as URLError { try check(error.code == .timedOut, "Cold server reproduces former ten-second import timeout") }
-        legacySession.invalidateAndCancel()
+        let coldStart = ContinuousClock.now
         let coldCatalog = try await IPTVCatalogLoader.load(coldURL)
-        try check(coldCatalog.channels.count == 3, "Cold server imports after more than ten seconds under packaged app transport policy")
+        try check(coldStart.duration(to: .now) >= .seconds(10) && coldCatalog.channels.count == 3, "Cold server imports after more than ten seconds under packaged app transport policy")
         for url in [queryCatalog, basicQueryCatalog, xtreamURL] {
             let downloaded = try await IPTVCatalogLoader.load(url)
             try check(downloaded.channels.count == 3 && downloaded.categories == ["News", "Sports"]

@@ -1,6 +1,6 @@
 import Foundation
 #if SWIFT_PACKAGE
-import AirThrowCore
+@testable import AirThrowCore
 #endif
 
 private actor AccessProbe: ShareProvider {
