@@ -203,9 +203,8 @@ enum SuperResolutionEncoder {
         let readerOutput = AVAssetReaderTrackOutput(track: track, outputSettings: [
             kCVPixelBufferPixelFormatTypeKey as String: format,
             kCVPixelBufferIOSurfacePropertiesKey as String: [:]])
-        readerOutput.alwaysCopiesSampleData = false
         guard reader.canAdd(readerOutput) else { throw PreparationFailure.failed }
-        reader.add(readerOutput)
+        let provider = reader.outputProvider(for: readerOutput)
         let writer = try AVAssetWriter(outputURL: output, fileType: .mp4)
         var completed = false
         defer {
@@ -227,14 +226,14 @@ enum SuperResolutionEncoder {
         // Preserve fractional broadcast rates (23.976/29.97/59.94) rather
         // than rounding presentation times to AVAssetWriter's default scale.
         writerInput.mediaTimeScale = 120000
-        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: writerInput, sourcePixelBufferAttributes: nil)
         guard writer.canAdd(writerInput) else { throw PreparationFailure.failed }
-        writer.add(writerInput)
+        let receiver = writer.inputPixelBufferReceiver(for: writerInput, pixelBufferAttributes: nil)
         var transfer: VTPixelTransferSession?
         guard VTPixelTransferSessionCreate(allocator: nil, pixelTransferSessionOut: &transfer) == noErr,
               let transfer else { throw PreparationFailure.failed }
         defer { VTPixelTransferSessionInvalidate(transfer) }
-        guard reader.startReading(), writer.startWriting() else { throw PreparationFailure.failed }
+        try reader.start()
+        try writer.start()
         let deadline = Date().addingTimeInterval(seconds)
         var firstPTS: CMTime?
         var lastPTS = CMTime.zero
@@ -250,18 +249,19 @@ enum SuperResolutionEncoder {
             while pending.count <= processor.lookAhead && !readEnded {
                 try Task.checkCancellation()
                 guard Date() < deadline else { throw PreparationFailure.stalled }
-                guard let sample = autoreleasepool(invoking: { readerOutput.copyNextSampleBuffer() }) else {
-                    readEnded = true; break
-                }
-                guard let decoded = CMSampleBufferGetImageBuffer(sample) else { throw PreparationFailure.failed }
-                let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+                let ready = try await provider.next()
+                guard let ready else { readEnded = true; break }
+                guard let image = CMReadySampleBuffer<CVReadOnlyPixelBuffer>(ready) else { throw PreparationFailure.failed }
+                let pts = ready.presentationTimeStamp
                 guard pts.isNumeric, lastReadPTS == nil || CMTimeCompare(pts, lastReadPTS!) > 0 else { throw PreparationFailure.failed }
                 lastReadPTS = pts
                 let source = try await allocate(sourcePool, threshold: processor.sourceThreshold)
-                guard VTPixelTransferSessionTransferImage(transfer, from: decoded, to: source) == noErr else { throw PreparationFailure.failed }
-                CVBufferPropagateAttachments(decoded, source)
+                try image.content.withUnsafeBuffer { decoded in
+                    guard VTPixelTransferSessionTransferImage(transfer, from: decoded, to: source) == noErr else { throw PreparationFailure.failed }
+                    CVBufferPropagateAttachments(decoded, source)
+                }
                 guard CVPixelBufferFillExtendedPixels(source) == kCVReturnSuccess else { throw PreparationFailure.failed }
-                pending.append((source, pts, CMSampleBufferGetDuration(sample)))
+                pending.append((source, pts, ready.duration))
             }
             guard let item = pending.first else { break }
             let source = item.source, pts = item.pts
@@ -275,12 +275,14 @@ enum SuperResolutionEncoder {
             }
             try await processor.process(source: source, destination: destination, pts: pts, next: future)
             let backpressureDeadline = Date().addingTimeInterval(10)
-            while !writerInput.isReadyForMoreMediaData {
+            // Processing has finished; the writer only reads this buffer from here on.
+            nonisolated(unsafe) let finished = destination
+            let encoded = CVReadOnlyPixelBuffer(unsafeBuffer: finished)
+            while try !receiver.appendImmediately(encoded, with: pts) {
                 try Task.checkCancellation()
                 guard writer.status == .writing, Date() < backpressureDeadline, Date() < deadline else { throw PreparationFailure.stalled }
                 try await Task.sleep(for: .milliseconds(2))
             }
-            guard adaptor.append(destination, withPresentationTime: pts) else { throw PreparationFailure.failed }
             lastPTS = pts
             let sampleDuration = item.duration
             mediaEnd = pts + (sampleDuration.isNumeric && sampleDuration.seconds > 0 ? sampleDuration
@@ -290,7 +292,7 @@ enum SuperResolutionEncoder {
         guard reader.status == .completed, let firstPTS,
               abs((mediaEnd - firstPTS).seconds - duration) < 0.15 else { throw PreparationFailure.failed }
         writer.endSession(atSourceTime: mediaEnd)
-        writerInput.markAsFinished()
+        receiver.finish()
         await writer.finishWriting()
         try Task.checkCancellation()
         try monitor()

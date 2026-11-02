@@ -32,10 +32,11 @@ import Foundation
             let head = try await get(url, method: "HEAD")
             try check(head.0.isEmpty && head.1.expectedContentLength == 4 * 1024 * 1024, "Cached HEAD length")
             try await withThrowingTaskGroup(of: Void.self) { group in
+                // Reads above the metadata-probe limit exercise shared media blocks.
                 for start in [0, 0, 100, 2_000_000, 3_000_000, 700_000, 1_000_000, 0] {
                     group.addTask {
-                        let (data, response) = try await get(url, range: "bytes=\(start)-\(start + 65535)")
-                        try check(response.statusCode == 206 && data == Data((start..<start + 65536).map { UInt8($0 % 251) }), "Range corruption or concurrent reader cancellation")
+                        let (data, response) = try await get(url, range: "bytes=\(start)-\(start + 131071)")
+                        try check(response.statusCode == 206 && data == Data((start..<start + 131072).map { UInt8($0 % 251) }), "Range corruption or concurrent reader cancellation")
                     }
                 }
                 try await group.waitForAll()

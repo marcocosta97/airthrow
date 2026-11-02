@@ -244,7 +244,7 @@ func pixelFormat(_ attributes: [String: Any]) throws -> OSType {
 }
 
 // Read first-frame flat-patch samples before encoding to separate processing from mux/codec errors.
-func patchSamples(_ buffer: CVPixelBuffer) -> [[String: Any]] {
+nonisolated func patchSamples(_ buffer: CVPixelBuffer) -> [[String: any Sendable]] {
     guard CVPixelBufferGetPlaneCount(buffer) == 2,
           [kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange]
             .contains(CVPixelBufferGetPixelFormatType(buffer)) else { return [] }
@@ -271,9 +271,9 @@ func patchSamples(_ buffer: CVPixelBuffer) -> [[String: Any]] {
     }
 }
 
-func colorMetadata(_ buffer: CVPixelBuffer) -> [String: Any] {
+nonisolated func colorMetadata(_ buffer: CVPixelBuffer) -> [String: any Sendable] {
     let attachments = CVBufferCopyAttachments(buffer, .shouldPropagate) as? [String: Any] ?? [:]
-    var result: [String: Any] = ["pixelFormat": CVPixelBufferGetPixelFormatType(buffer)]
+    var result: [String: any Sendable] = ["pixelFormat": CVPixelBufferGetPixelFormatType(buffer)]
     for key in [kCVImageBufferColorPrimariesKey, kCVImageBufferTransferFunctionKey, kCVImageBufferYCbCrMatrixKey] {
         result[key as String] = attachments[key as String] as? String ?? "absent"
     }
@@ -370,9 +370,8 @@ func benchmark(_ options: Options) async throws {
         kCVPixelBufferPixelFormatTypeKey as String: try pixelFormat(scaler.sourceAttributes),
         kCVPixelBufferIOSurfacePropertiesKey as String: [:]
     ])
-    readOutput.alwaysCopiesSampleData = false
     guard reader.canAdd(readOutput) else { throw BenchError("Reader cannot decode this video") }
-    reader.add(readOutput)
+    let provider = reader.outputProvider(for: readOutput)
     let output = options.output!
     let writer = try AVAssetWriter(outputURL: output, fileType: .mp4)
     var completed = false
@@ -392,11 +391,10 @@ func benchmark(_ options: Options) async throws {
             AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
             AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2]
     ])
-    let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: writerInput,
-        sourcePixelBufferAttributes: nil)
     guard writer.canAdd(writerInput) else { throw BenchError("Writer does not support this output") }
-    writer.add(writerInput)
-    guard reader.startReading(), writer.startWriting() else { throw BenchError("Cannot start decode/encode") }
+    let receiver = writer.inputPixelBufferReceiver(for: writerInput, pixelBufferAttributes: nil)
+    try reader.start()
+    try writer.start()
     let startUsage = usage(), wallStart = Date()
     var frameTimes: [Double] = []
     var firstPTS: CMTime?
@@ -406,21 +404,24 @@ func benchmark(_ options: Options) async throws {
     var warmMediaStart: CMTime?
     var diagnostics: [String: Any] = [:]
     // Retain only the processor's bounded look-ahead window and past references.
-    var pending: [(decoded: CVPixelBuffer, source: CVPixelBuffer, pts: CMTime, duration: CMTime)] = []
+    var pending: [(decoded: CVReadOnlyPixelBuffer, source: CVPixelBuffer, pts: CMTime, duration: CMTime)] = []
     var readFrames = 0
     var readEnded = false
     while frameTimes.count < options.frames {
         try Task.checkCancellation()
         while pending.count <= scaler.lookAhead && readFrames < options.frames && !readEnded {
-            guard let sample = autoreleasepool(invoking: { readOutput.copyNextSampleBuffer() }) else { readEnded = true; break }
-            guard let decoded = CMSampleBufferGetImageBuffer(sample) else { throw BenchError("Decoder returned no image") }
+            guard let sample = try await provider.next() else { readEnded = true; break }
+            guard let image = CMReadySampleBuffer<CVReadOnlyPixelBuffer>(sample) else { throw BenchError("Decoder returned no image") }
+            let decoded = image.content
             let source = try await allocate(sourcePool, threshold: scaler.sourceThreshold)
-            guard VTPixelTransferSessionTransferImage(transferSession, from: decoded, to: source) == noErr else {
-                throw BenchError("Source pixel transfer failed")
+            try decoded.withUnsafeBuffer { buffer in
+                guard VTPixelTransferSessionTransferImage(transferSession, from: buffer, to: source) == noErr else {
+                    throw BenchError("Source pixel transfer failed")
+                }
+                CVBufferPropagateAttachments(buffer, source)
             }
-            CVBufferPropagateAttachments(decoded, source)
             guard CVPixelBufferFillExtendedPixels(source) == kCVReturnSuccess else { throw BenchError("Cannot fill source padding") }
-            pending.append((decoded, source, CMSampleBufferGetPresentationTimeStamp(sample), CMSampleBufferGetDuration(sample)))
+            pending.append((decoded, source, sample.presentationTimeStamp, sample.duration))
             readFrames += 1
         }
         guard let item = pending.first else { break }
@@ -440,19 +441,22 @@ func benchmark(_ options: Options) async throws {
         try await scaler.process(source: source, destination: destination, pts: pts, next: future)
         frameTimes.append(Date().timeIntervalSince(frameStart))
         if options.diagnostics && frameTimes.count == 1 {
-            diagnostics = ["decoded": patchSamples(decoded), "processorInput": patchSamples(source),
+            diagnostics = ["decoded": decoded.withUnsafeBuffer { patchSamples($0) }, "processorInput": patchSamples(source),
                 "processorOutputBeforeEncoding": patchSamples(destination),
-                "decodedColor": colorMetadata(decoded), "processorInputColor": colorMetadata(source),
+                "decodedColor": decoded.withUnsafeBuffer { colorMetadata($0) }, "processorInputColor": colorMetadata(source),
                 "processorOutputColor": colorMetadata(destination)]
         }
         // Match Apple's sample: restore source color attachments after processing as well.
         CVBufferPropagateAttachments(source, destination)
         let deadline = Date().addingTimeInterval(10)
-        while !writerInput.isReadyForMoreMediaData {
+        // The processor and diagnostics have finished all mutable access.
+        nonisolated(unsafe) let finished = destination
+        let encoded = CVReadOnlyPixelBuffer(unsafeBuffer: finished)
+        while try !receiver.appendImmediately(encoded, with: pts) {
+            try Task.checkCancellation()
             guard writer.status == .writing, Date() < deadline else { throw BenchError("Encoder stalled or failed") }
             try await Task.sleep(for: .milliseconds(2))
         }
-        guard adaptor.append(destination, withPresentationTime: pts) else { throw BenchError("Encoding failed") }
         if frameTimes.count == 1 { firstFrameSeconds = Date().timeIntervalSince(wallStart) }
         lastPTS = pts
         let sampleDuration = item.duration
@@ -461,7 +465,7 @@ func benchmark(_ options: Options) async throws {
     }
     guard reader.status != .failed, let firstPTS, frameTimes.count >= 12 else { throw BenchError("Not enough decoded frames or decoding failed") }
     writer.endSession(atSourceTime: mediaEnd)
-    writerInput.markAsFinished()
+    receiver.finish()
     await writer.finishWriting()
     guard writer.status == .completed else { throw BenchError("Output finalization failed") }
     completed = true

@@ -239,6 +239,7 @@ final class PlaybackController: ObservableObject {
     private var lastLivePipeline: LivePipelineDiagnostics?
     private var lastFailureDiagnostics: PlaybackDiagnostics?
     private var preparationTrace: PreparationDiagnosticRecorder?
+    private var failureLogTask: Task<Void, Never>?
     private var diagnosticsCache: PlaybackDiagnostics?
     private var diagnosticsCacheItem: ObjectIdentifier?
     private var diagnosticsCacheStatus: AVPlayerItem.Status?
@@ -1770,7 +1771,14 @@ final class PlaybackController: ObservableObject {
                     self.refreshOnChange(of: item, \.presentationSize, generation: id),
                     self.refreshOnChange(of: item, \.seekableTimeRanges, generation: id)
                 ]
-                self.notifications.append(NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
+                #if compiler(>=6.4)
+                let endedNotification = AVPlayerItem.didPlayToEndTimeNotification
+                let failedNotification = AVPlayerItem.failedToPlayToEndTimeNotification
+                #else
+                let endedNotification = Notification.Name.AVPlayerItemDidPlayToEndTime
+                let failedNotification = Notification.Name.AVPlayerItemFailedToPlayToEndTime
+                #endif
+                self.notifications.append(NotificationCenter.default.addObserver(forName: endedNotification, object: item, queue: .main) { [weak self] _ in
                     Task { @MainActor in
                         guard let self, self.generation == id else { return }
                         if self.probing {
@@ -1815,7 +1823,7 @@ final class PlaybackController: ObservableObject {
                         }
                     }
                 })
-                self.notifications.append(NotificationCenter.default.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main) { [weak self] notification in
+                self.notifications.append(NotificationCenter.default.addObserver(forName: failedNotification, object: item, queue: .main) { [weak self] notification in
                     let errorCode = (notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? NSError)?.code
                     let errors = MediaDiagnostics.numericErrors(for: notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? NSError)
                     let reason = MediaDiagnostics.reason(
@@ -2503,6 +2511,7 @@ final class PlaybackController: ObservableObject {
         nowPlayingArtwork.cancel()
         nowPlayingLanguages = NowPlayingLanguages()
         diagnosticsFormatTask?.cancel(); diagnosticsFormatTask = nil
+        failureLogTask?.cancel(); failureLogTask = nil
         diagnosticsCache = nil; diagnosticsCacheItem = nil
         diagnosticsCacheStatus = nil; diagnosticsCacheTime = nil
         pendingHistoryURL = nil
@@ -2650,8 +2659,18 @@ final class PlaybackController: ObservableObject {
         terminalDiagnostics.assetErrorCode = assetErrorCode
         terminalDiagnostics.itemErrorCode = (mediaItem?.error as NSError?)?.code ?? errorCode
         terminalDiagnostics.failureErrors = errors ?? assetFailureErrors ?? MediaDiagnostics.numericErrors(for: mediaItem?.error)
-        terminalDiagnostics.errorStatusCodes = mediaItem?.errorLog()?.events.suffix(8).map(\.errorStatusCode)
         lastFailureDiagnostics = terminalDiagnostics
+        failureLogTask?.cancel()
+        if let item = mediaItem {
+            let id = generation
+            failureLogTask = Task { [weak self] in
+                let logs = await MediaDiagnostics.playerLogs(for: item)
+                guard !Task.isCancelled, let self, self.generation == id, self.failure != nil else { return }
+                self.failureLogTask = nil
+                self.lastFailureDiagnostics?.errorStatusCodes = logs.errorStatusCodes
+                self.refresh()
+            }
+        }
         resolving = false
         preparing = false
         cancelProbe(restorePosition: false)
@@ -3073,6 +3092,10 @@ final class PlaybackController: ObservableObject {
             diagnostics.videoCodecTypes = diagnosticsCache?.videoCodecTypes
             diagnostics.videoWidth = diagnosticsCache?.videoWidth
             diagnostics.videoHeight = diagnosticsCache?.videoHeight
+            diagnostics.errorStatusCodes = diagnosticsCache?.errorStatusCodes
+            diagnostics.observedBitrate = diagnosticsCache?.observedBitrate
+            diagnostics.indicatedBitrate = diagnosticsCache?.indicatedBitrate
+            diagnostics.stalls = diagnosticsCache?.stalls
         }
         diagnostics.itemStatus = switch item.status {
         case .unknown: "unknown"
@@ -3107,14 +3130,6 @@ final class PlaybackController: ObservableObject {
         diagnostics.nativeMetrics = metricsObserver?.values
         diagnostics.itemErrorCode = (item.error as NSError?)?.code
         if !reuse {
-            if let errors = item.errorLog()?.events, !errors.isEmpty {
-                diagnostics.errorStatusCodes = errors.suffix(8).map(\.errorStatusCode)
-            }
-            if let event = item.accessLog()?.events.last {
-                diagnostics.observedBitrate = finite(event.observedBitrate)
-                diagnostics.indicatedBitrate = finite(event.indicatedBitrate)
-                diagnostics.stalls = event.numberOfStalls
-            }
             diagnosticsCache = diagnostics
             diagnosticsCacheItem = ObjectIdentifier(item)
             diagnosticsCacheStatus = item.status
@@ -3134,10 +3149,16 @@ final class PlaybackController: ObservableObject {
                 guard !Task.isCancelled else { return }
                 if let loaded = try? await track.load(.formatDescriptions) { formats += loaded }
             }
-            guard !Task.isCancelled, let self, let item,
+            guard let item else { return }
+            let logs = await MediaDiagnostics.playerLogs(for: item)
+            guard !Task.isCancelled, let self,
                   self.generation == id, self.mediaItem === item else { return }
             self.diagnosticsFormatTask = nil
             guard self.diagnosticsCacheItem == ObjectIdentifier(item) else { return }
+            self.diagnosticsCache?.errorStatusCodes = logs.errorStatusCodes
+            self.diagnosticsCache?.observedBitrate = logs.observedBitrate
+            self.diagnosticsCache?.indicatedBitrate = logs.indicatedBitrate
+            self.diagnosticsCache?.stalls = logs.stalls
             self.diagnosticsCache?.videoCodecTypes = formats.isEmpty ? nil : Array(Set(formats.map(CMFormatDescriptionGetMediaSubType))).sorted()
             self.diagnosticsCache?.videoWidth = formats.map { Int(CMVideoFormatDescriptionGetDimensions($0).width) }.max()
             self.diagnosticsCache?.videoHeight = formats.map { Int(CMVideoFormatDescriptionGetDimensions($0).height) }.max()

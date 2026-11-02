@@ -101,10 +101,11 @@ final class NativeInputPrefetch: @unchecked Sendable {
 
 /// A decoder session is required to use hardware. Compressed samples come from
 /// AVAssetReader; pixel data is never mapped into CPU memory by this pipeline.
+@available(macOS 26, *)
 private final class HardwareVideoFrames: @unchecked Sendable {
-    struct Frame { let buffer: CVPixelBuffer; let pts: CMTime; let duration: CMTime }
+    struct Frame: @unchecked Sendable { let buffer: CVPixelBuffer; let pts: CMTime; let duration: CMTime }
     private let reader: AVAssetReader
-    private let output: AVAssetReaderTrackOutput
+    private let provider: AVAssetReaderOutput.Provider<CMReadySampleBuffer<CMSampleBuffer.DynamicContent>>
     private var decoder: VTDecompressionSession?
     private let lock = NSLock()
     private var queue: [Frame] = []
@@ -117,11 +118,10 @@ private final class HardwareVideoFrames: @unchecked Sendable {
         self.length = length; self.minimumPTS = minimumPTS; self.reorder = min(16, max(2, reorder + 2))
         reader = try AVAssetReader(asset: asset)
         reader.timeRange = CMTimeRange(start: .zero, duration: CMTime(seconds: length, preferredTimescale: 120000))
-        output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
-        output.alwaysCopiesSampleData = false
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
         guard reader.canAdd(output) else { throw PreparationFailure.unsupported }
-        reader.add(output)
-        guard reader.startReading() else { throw PreparationFailure.failed }
+        provider = reader.outputProvider(for: output)
+        try reader.start()
     }
     deinit { reader.cancelReading(); if let decoder { VTDecompressionSessionInvalidate(decoder) } }
     private func receive(status: OSStatus, buffer: CVImageBuffer?, pts: CMTime, duration: CMTime) {
@@ -133,10 +133,13 @@ private final class HardwareVideoFrames: @unchecked Sendable {
             queue.sort { CMTimeCompare($0.pts, $1.pts) < 0 }
         }
     }
-    func next() throws -> Frame? {
+    func next() async throws -> Frame? {
         while !ended && lock.withLock({ queue.count <= reorder }) {
             try Task.checkCancellation()
-            guard let sample = output.copyNextSampleBuffer() else {
+            let ready = try await withTaskCancellationHandler {
+                try await provider.next()
+            } onCancel: { self.reader.cancelReading() }
+            guard let ready else {
                 guard reader.status == .completed else { throw PreparationFailure.failed }
                 ended = true
                 if let decoder {
@@ -146,29 +149,31 @@ private final class HardwareVideoFrames: @unchecked Sendable {
                 }
                 break
             }
-            // AVAssetReader emits empty edit-list boundary markers without a
-            // format description. They are timing markers, not decoder packets.
-            guard CMSampleBufferGetNumSamples(sample) > 0 else { continue }
-            guard let format = CMSampleBufferGetFormatDescription(sample) else { throw PreparationFailure.failed }
-            if decoder == nil {
-                let specification = [kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder: true] as CFDictionary
-                let attributes = [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-                    kCVPixelBufferIOSurfacePropertiesKey: [:], kCVPixelBufferMetalCompatibilityKey: true] as CFDictionary
-                guard VTDecompressionSessionCreate(allocator: nil, formatDescription: format,
-                    decoderSpecification: specification, imageBufferAttributes: attributes, outputCallback: nil,
-                    decompressionSessionOut: &decoder) == noErr, let decoder else {
-                    throw AppFailure(.unsupportedOperation, "Hardware decoding is unavailable for GPU cleanup. Choose FFmpeg cleanup.")
+            try ready.withUnsafeSampleBuffer { sample in
+                // AVAssetReader emits empty edit-list boundary markers without a
+                // format description. They are timing markers, not decoder packets.
+                guard CMSampleBufferGetNumSamples(sample) > 0 else { return }
+                guard let format = CMSampleBufferGetFormatDescription(sample) else { throw PreparationFailure.failed }
+                if decoder == nil {
+                    let specification = [kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder: true] as CFDictionary
+                    let attributes = [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                        kCVPixelBufferIOSurfacePropertiesKey: [:], kCVPixelBufferMetalCompatibilityKey: true] as CFDictionary
+                    guard VTDecompressionSessionCreate(allocator: nil, formatDescription: format,
+                        decoderSpecification: specification, imageBufferAttributes: attributes, outputCallback: nil,
+                        decompressionSessionOut: &decoder) == noErr, let decoder else {
+                        throw AppFailure(.unsupportedOperation, "Hardware decoding is unavailable for GPU cleanup. Choose FFmpeg cleanup.")
+                    }
+                    var hardware: Unmanaged<CFTypeRef>?
+                    guard VTSessionCopyProperty(decoder, key: kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder,
+                        allocator: nil, valueOut: &hardware) == noErr,
+                        (hardware?.takeRetainedValue() as? NSNumber)?.boolValue == true else { throw PreparationFailure.unsupported }
                 }
-                var hardware: Unmanaged<CFTypeRef>?
-                guard VTSessionCopyProperty(decoder, key: kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder,
-                    allocator: nil, valueOut: &hardware) == noErr,
-                    (hardware?.takeRetainedValue() as? NSNumber)?.boolValue == true else { throw PreparationFailure.unsupported }
+                guard let decoder, VTDecompressionSessionCanAcceptFormatDescription(decoder, formatDescription: format) else { throw PreparationFailure.unsupported }
+                let result = VTDecompressionSessionDecodeFrame(decoder, sampleBuffer: sample, flags: [], infoFlagsOut: nil) {
+                    [weak self] status, _, buffer, pts, duration in self?.receive(status: status, buffer: buffer, pts: pts, duration: duration)
+                }
+                guard result == noErr, !lock.withLock({ callbackFailed }) else { throw PreparationFailure.failed }
             }
-            guard let decoder, VTDecompressionSessionCanAcceptFormatDescription(decoder, formatDescription: format) else { throw PreparationFailure.unsupported }
-            let result = VTDecompressionSessionDecodeFrame(decoder, sampleBuffer: sample, flags: [], infoFlagsOut: nil) {
-                [weak self] status, _, buffer, pts, duration in self?.receive(status: status, buffer: buffer, pts: pts, duration: duration)
-            }
-            guard result == noErr, !lock.withLock({ callbackFailed }) else { throw PreparationFailure.failed }
         }
         return try lock.withLock {
             guard !callbackFailed else { throw PreparationFailure.failed }
@@ -229,12 +234,11 @@ enum NativeGPUVideoEncoder {
                 AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2]]
         let writerInput = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
         writerInput.mediaTimeScale = 120000
-        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: writerInput, sourcePixelBufferAttributes: nil)
         guard writer.canAdd(writerInput) else { throw PreparationFailure.failed }
-        writer.add(writerInput)
+        let receiver = writer.inputPixelBufferReceiver(for: writerInput, pixelBufferAttributes: nil)
         var complete = false
         defer { if !complete { writer.cancelWriting(); try? FileManager.default.removeItem(at: output) } }
-        guard writer.startWriting() else { throw PreparationFailure.failed }
+        try writer.start()
         writer.startSession(atSourceTime: .zero)
         let color = CGColorSpace(name: CGColorSpace.itur_709)!
         var pending: [(CVPixelBuffer, CMTime, CMTime)] = []
@@ -248,7 +252,7 @@ enum NativeGPUVideoEncoder {
             guard ContinuousClock.now < deadline else { throw PreparationFailure.stalled }
             if lastMonitor.duration(to: .now) >= .milliseconds(100) { try monitor(); lastMonitor = .now }
             while pending.count <= processor.lookAhead && !ended {
-                guard let frame = try frames.next() else { ended = true; break }
+                guard let frame = try await frames.next() else { ended = true; break }
                 let input: CVPixelBuffer
                 if CVPixelBufferGetWidth(frame.buffer) == layout.inputWidth,
                    CVPixelBufferGetHeight(frame.buffer) == layout.inputHeight,
@@ -276,13 +280,15 @@ enum NativeGPUVideoEncoder {
             }
             try await processor.process(source: item.0, destination: destination, pts: item.1, next: future)
             let until = ContinuousClock.now + .seconds(10)
-            while !writerInput.isReadyForMoreMediaData {
+            // Processing has finished; the writer only reads this buffer from here on.
+            nonisolated(unsafe) let finished = destination
+            let encoded = CVReadOnlyPixelBuffer(unsafeBuffer: finished)
+            while try !receiver.appendImmediately(encoded, with: item.1) {
                 try Task.checkCancellation()
                 if lastMonitor.duration(to: .now) >= .milliseconds(100) { try monitor(); lastMonitor = .now }
                 guard writer.status == .writing, ContinuousClock.now < until else { throw PreparationFailure.stalled }
                 try await Task.sleep(for: .milliseconds(2))
             }
-            guard adaptor.append(destination, withPresentationTime: item.1) else { throw PreparationFailure.failed }
             lastPTS = item.1
             end = item.1 + (item.2.isNumeric && item.2.seconds > 0 ? item.2 : CMTime(seconds: 1 / rate, preferredTimescale: 120000))
             stats.frames += 1; pending.removeFirst()
@@ -292,7 +298,7 @@ enum NativeGPUVideoEncoder {
         // Keep the six-second job boundary exact at fractional frame rates.
         // The following clip retains its sub-frame presentation offset.
         writer.endSession(atSourceTime: CMTime(seconds: length, preferredTimescale: 120000))
-        writerInput.markAsFinished(); await writer.finishWriting()
+        receiver.finish(); await writer.finishWriting()
         guard writer.status == .completed else { throw PreparationFailure.failed }
         try Task.checkCancellation(); try monitor(); complete = true
         stats.metalPasses += processor.metalPasses; stats.metalSeconds += processor.metalSeconds

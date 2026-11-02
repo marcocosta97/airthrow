@@ -58,8 +58,13 @@ final class ReceiverWaitingScreen {
                 self.observation = item.observe(\.status, options: [.new]) { [weak self] _, _ in
                     Task { @MainActor in self?.itemReady(generation: id) }
                 }
+                #if compiler(>=6.4)
+                let endedNotification = AVPlayerItem.didPlayToEndTimeNotification
+                #else
+                let endedNotification = Notification.Name.AVPlayerItemDidPlayToEndTime
+                #endif
                 self.endObserver = NotificationCenter.default.addObserver(
-                    forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
+                    forName: endedNotification, object: item, queue: .main) { [weak self] _ in
                         Task { @MainActor in
                             guard let self, self.generation == id else { return }
                             self.stop()

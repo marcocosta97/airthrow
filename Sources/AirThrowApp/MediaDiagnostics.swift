@@ -6,6 +6,38 @@ import AirThrowCore
 
 /// Expose only fixed messages/codes. NSError descriptions and userInfo can contain signed URLs.
 enum MediaDiagnostics {
+    struct PlayerLogs {
+        var errorStatusCodes: [Int]?
+        var observedBitrate: Double?
+        var indicatedBitrate: Double?
+        var stalls: Int?
+    }
+
+    @MainActor static func playerLogs(for item: AVPlayerItem) async -> PlayerLogs {
+        #if compiler(>=6.4)
+        if #available(macOS 27, *) {
+            let errors = await item.errorLog
+            let access = await item.accessLog
+            return summarizeLogs(errors: errors, access: access)
+        } else { return legacyPlayerLogs(for: item) }
+        #else
+        return legacyPlayerLogs(for: item)
+        #endif
+    }
+
+    @available(macOS, introduced: 14, deprecated: 27)
+    @MainActor private static func legacyPlayerLogs(for item: AVPlayerItem) -> PlayerLogs {
+        summarizeLogs(errors: item.errorLog(), access: item.accessLog())
+    }
+
+    private static func summarizeLogs(errors: AVPlayerItemErrorLog?, access: AVPlayerItemAccessLog?) -> PlayerLogs {
+        func finite(_ value: Double?) -> Double? { value.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil } }
+        let event = access?.events.last
+        return PlayerLogs(errorStatusCodes: errors?.events.suffix(8).map(\.errorStatusCode),
+                          observedBitrate: finite(event?.observedBitrate), indicatedBitrate: finite(event?.indicatedBitrate),
+                          stalls: event?.numberOfStalls)
+    }
+
     static func hlsVariants(_ variants: [AVAssetVariant]) -> [HLSVariantSummary] {
         func positive(_ value: Double?) -> Double? {
             value.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
