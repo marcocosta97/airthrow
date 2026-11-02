@@ -43,6 +43,11 @@ def main():
     if not (folder / 'cleanup-fractional.mp4').exists():
         run(['ffmpeg', '-v', 'error', '-i', folder / 'cleanup.mp4', '-r', '30000/1001', '-c:v', 'libx264',
              '-preset', 'veryfast', '-g', '150', '-bf', '3', '-c:a', 'copy', '-movflags', '+faststart', folder / 'cleanup-fractional.mp4'])
+    run(['ffmpeg', '-v', 'error', '-y', '-i', folder / 'ai.mp4', '-an', '-t', '6',
+         '-c:v', 'rawvideo', '-pix_fmt', 'uyvy422', '-color_range', 'tv', '-colorspace', 'bt709',
+         '-color_trc', 'bt709', '-color_primaries', 'bt709', folder / 'heartbeat.mov'])
+    for name in ['heartbeat-native.mp4', 'heartbeat-normalized.mp4']:
+        (folder / name).unlink(missing_ok=True)
     observed = []
     lock = threading.Lock()
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -107,6 +112,15 @@ def main():
             pts = [float(f['best_effort_timestamp_time']) for f in frames]
             if any(abs((b-a) - (1001/30000 if "fractional" in file.name else 1/30)) > .002 for a,b in zip(pts, pts[1:])): raise RuntimeError(f'PTS discontinuity {file.name}')
             print(f'PASS frame count, cadence and tracks: {file.name} ({count} frames)')
+        heartbeat_outputs = [] if 'SKIP native MainActor regression:' in result.stdout else [('native', 180), ('normalized', 180)]
+        for label, expected in heartbeat_outputs:
+            file = folder / f'heartbeat-{label}.mp4'
+            video = json.loads(run(['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_streams',
+                                   '-count_frames', '-of', 'json', file]).stdout)['streams'][0]
+            if (int(video['nb_read_frames']) != expected or (video['width'], video['height']) != (1920, 1080)
+                or any(video.get(k) != 'bt709' for k in ('color_space', 'color_transfer', 'color_primaries'))):
+                raise RuntimeError(f'Unexpected heartbeat output: {label}')
+            print(f'PASS heartbeat output: {label} ({expected} frames, 1080p BT.709)')
         for name in ['cleanup.mp4', 'ai.mp4', 'remux.mkv', 'audio.mkv', 'convert.mkv']:
             transfers = [(r['start'], r['end']) for r in observed if r['name'] == name and r['end'] > r['start']]
             if len(transfers) != len(set(transfers)) or len(transfers) > math.ceil((folder / name).stat().st_size / 524288):

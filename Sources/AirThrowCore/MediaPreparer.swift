@@ -885,7 +885,7 @@ public struct MediaPreparer: Sendable {
             }
             let output = workspace.directory.appendingPathComponent("media.mp4")
             let temporalCleanup = source.enhancement.cleansUp && noiseReduction == .appleTemporal
-            if temporalCleanup, let reason = await TemporalNoiseFilterSupport.unavailableReason {
+            if temporalCleanup, let reason = TemporalNoiseFilterSupport.unavailableReason {
                 throw AppFailure(.unsupportedOperation, reason)
             }
             if (source.upscaler.isAI && source.enhancement != .original) || (source.enhancement.cleansUp && noiseReduction != .ffmpeg) {

@@ -169,7 +169,7 @@ extension VideoUpscaler {
 
 /// Processes one bounded local clip. A new temporal session starts at each
 /// independently regenerable chunk. No frames, model weights or media UI persist.
-@MainActor
+@NativeVideoExecutor
 enum SuperResolutionEncoder {
     static func export(input: URL, output: URL, layout: SuperResolutionLayout,
                        seconds: Double, noiseReduction: CleanupNoiseReduction = .ffmpeg,

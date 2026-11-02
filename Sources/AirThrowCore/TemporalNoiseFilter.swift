@@ -2,7 +2,6 @@ import CoreImage
 import Foundation
 import VideoToolbox
 
-@MainActor
 public enum TemporalNoiseFilterSupport {
     public static var unavailableReason: String? {
         guard #available(macOS 26, *) else { return "Apple temporal noise filter requires macOS 26 or later." }
@@ -13,7 +12,7 @@ public enum TemporalNoiseFilterSupport {
 
 /// Owns only the references required by one independently prepared clip.
 @available(macOS 26, *)
-@MainActor
+@NativeVideoExecutor
 final class TemporalNoiseFilter {
     let processor = VTFrameProcessor()
     let configuration: VTTemporalNoiseFilterConfiguration
@@ -61,7 +60,7 @@ final class TemporalNoiseFilter {
 
 /// Temporal cleanup runs before scaling. Lanczos also permits unchanged dimensions.
 @available(macOS 26, *)
-@MainActor
+@NativeVideoExecutor
 final class PreparedVideoProcessor {
     let layout: SuperResolutionLayout
     let processor = VTFrameProcessor()

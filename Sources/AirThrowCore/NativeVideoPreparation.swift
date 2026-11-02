@@ -4,6 +4,12 @@ import Foundation
 import Metal
 import VideoToolbox
 
+/// Serial ownership for native preparation resources, independent of the UI actor.
+@globalActor
+actor NativeVideoExecutor {
+    static let shared = NativeVideoExecutor()
+}
+
 /// Numeric diagnostics only. GPU execution time covers Core Image kernels, not
 /// VideoToolbox's decoder, encoder or ML implementation.
 public struct NativeVideoDiagnostics: Sendable, Codable {
@@ -114,6 +120,7 @@ private final class HardwareVideoFrames: @unchecked Sendable {
     private let length: Double
     private let reorder: Int
     private let minimumPTS: Double
+    @NativeVideoExecutor
     init(asset: AVAsset, track: AVAssetTrack, length: Double, reorder: Int, minimumPTS: Double) throws {
         self.length = length; self.minimumPTS = minimumPTS; self.reorder = min(16, max(2, reorder + 2))
         reader = try AVAssetReader(asset: asset)
@@ -133,6 +140,7 @@ private final class HardwareVideoFrames: @unchecked Sendable {
             queue.sort { CMTimeCompare($0.pts, $1.pts) < 0 }
         }
     }
+    @NativeVideoExecutor
     func next() async throws -> Frame? {
         while !ended && lock.withLock({ queue.count <= reorder }) {
             try Task.checkCancellation()
@@ -182,7 +190,7 @@ private final class HardwareVideoFrames: @unchecked Sendable {
     }
 }
 
-@MainActor
+@NativeVideoExecutor
 struct MetalVideoRenderer {
     let context: CIContext
     init() throws {
@@ -192,6 +200,7 @@ struct MetalVideoRenderer {
         context = CIContext(mtlDevice: device, options: [.cacheIntermediates: false])
     }
     func render(_ image: CIImage, to buffer: CVPixelBuffer) throws -> CIRenderInfo {
+        assert(!Thread.isMainThread, "Native rendering must not block the main thread")
         let destination = CIRenderDestination(pixelBuffer: buffer)
         destination.colorSpace = CGColorSpace(name: CGColorSpace.itur_709)
         let task = try context.startTask(toRender: image, to: destination)
@@ -200,12 +209,13 @@ struct MetalVideoRenderer {
 }
 
 @available(macOS 26, *)
-@MainActor
+@NativeVideoExecutor
 enum NativeGPUVideoEncoder {
     static func export(input: URL, output: URL, layout: SuperResolutionLayout,
                        start: Double, length: Double, rate: Double, reorder: Int,
                        noiseReduction: CleanupNoiseReduction,
                        monitor: @Sendable () throws -> Void) async throws -> NativeVideoDiagnostics {
+        try Task.checkCancellation()
         let started = ContinuousClock.now
         let deadline = started + .seconds(600)
         let asset = AVURLAsset(url: input)

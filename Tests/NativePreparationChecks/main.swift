@@ -1,4 +1,10 @@
+#if SWIFT_PACKAGE
+#if DEBUG
+@testable import AirThrowCore
+#else
 import AirThrowCore
+#endif
+#endif
 import AVFoundation
 import Foundation
 
@@ -6,6 +12,24 @@ import Foundation
     nonisolated static func check(_ value: Bool, _ message: String) throws {
         if !value { throw AppFailure(.playbackFailed, message) }
     }
+    #if DEBUG
+    @MainActor final class Heartbeat {
+        var count = 0
+        nonisolated func probe() throws {
+            let response = DispatchSemaphore(value: 0)
+            Task { @MainActor in
+                MainActor.preconditionIsolated()
+                self.count += 1
+                response.signal()
+            }
+            // A deadlock guard, not a rendering-speed requirement. This callback
+            // is synchronous inside the encoder, so MainActor must be independent.
+            guard response.wait(timeout: .now() + 10) == .success else {
+                throw AppFailure(.playbackFailed, "MainActor blocked by native frame processing")
+            }
+        }
+    }
+    #endif
     static func main() async {
         do { try await run() } catch { print("FAIL native preparation: \(error)"); exit(1) }
     }
@@ -61,6 +85,29 @@ import Foundation
         }
         print("PASS validator change rejection and no-validator streaming fallback")
         guard #available(macOS 26, *) else { return }
+        #if DEBUG
+        let nativeHeartbeat = Heartbeat()
+        let nativeOutput = folder.appendingPathComponent("heartbeat-native.mp4")
+        let nativeLayout = SuperResolutionLayout(backend: .lanczos, scale: 1, inputWidth: 1920,
+            inputHeight: 1080, outputWidth: 1920, outputHeight: 1080)
+        let native = try await NativeGPUVideoEncoder.export(input: folder.appendingPathComponent("cleanup.mp4"),
+            output: nativeOutput, layout: nativeLayout, start: 0, length: 6, rate: 30, reorder: 3,
+            noiseReduction: .gpu, monitor: { try nativeHeartbeat.probe() })
+        try check(native.frames == 180 && native.hardwareDecodedFrames == 180 && native.metalPasses > 0,
+                  "Responsiveness regression bypassed compressed-input GPU processing")
+        try check(nativeHeartbeat.count > 0, "MainActor heartbeat never ran during native processing")
+        print("PASS compressed GPU MainActor heartbeat: \(nativeHeartbeat.count) probes, \(native.frames) frames")
+        let rawHeartbeat = Heartbeat()
+        let rawLayout = SuperResolutionLayout(backend: .lanczos, scale: 2, inputWidth: 960,
+            inputHeight: 540, outputWidth: 1920, outputHeight: 1080)
+        try await SuperResolutionEncoder.export(input: folder.appendingPathComponent("heartbeat.mov"),
+            output: folder.appendingPathComponent("heartbeat-normalized.mp4"), layout: rawLayout,
+            seconds: 60, noiseReduction: .gpu, monitor: { try rawHeartbeat.probe() })
+        try check(rawHeartbeat.count > 0, "MainActor heartbeat never ran during normalized processing")
+        print("PASS normalized GPU MainActor heartbeat: \(rawHeartbeat.count) probes")
+        #else
+        print("SKIP native MainActor regression: requires a Debug check binary")
+        #endif
         for (name, enhancement, backend, remote, cached) in [
             ("cleanup", VideoEnhancement.cleanup1080, VideoUpscaler.lowLatency, false, false),
             ("cleanup", .cleanup1080, .standard, false, true),
