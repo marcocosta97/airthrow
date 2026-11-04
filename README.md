@@ -17,8 +17,8 @@ AirPlay receivers. A compact native Mac app controls playback without mirroring
 your screen.
 
 <p align="center">
-  <img src="docs/images/controller.png" width="760" alt="AirThrow queue with illustrative YouTube, Twitch, IPTV film, live TV and local file titles">
-  <br><sub>Illustrative titles from YouTube, Twitch, IPTV and local files.</sub>
+  <img src="docs/images/controller.png" width="760" alt="AirThrow queue with illustrative YouTube, Twitch, IPTV, local file and network share titles">
+  <br><sub>Illustrative titles from YouTube, Twitch, IPTV, local files and a network share.</sub>
 </p>
 
 - **Links and files** — direct video URLs, website streams (e.g. Youtube, Twitch), local videos and playlists.
@@ -100,6 +100,11 @@ In **Sources**, choose **Add Source → Network Share…** to add WebDAV or SMB.
 Select a saved share, click **Connect Share**, then open a video from its folders.
 For SMB sign-in, connect in Finder first. Shares connect only when requested,
 unless you enable automatic connection for that share.
+
+<p align="center">
+  <img src="docs/images/network-share.png" width="760" alt="AirThrow browsing folders and videos on an illustrative Media Server network share">
+  <br><sub>Example network share with illustrative folders and videos.</sub>
+</p>
 
 ## IPTV and Xtream
 
