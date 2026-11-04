@@ -101,11 +101,6 @@ Select a saved share, click **Connect Share**, then open a video from its folder
 For SMB sign-in, connect in Finder first. Shares connect only when requested,
 unless you enable automatic connection for that share.
 
-<p align="center">
-  <img src="docs/images/network-share.png" width="760" alt="AirThrow browsing folders and videos on an illustrative Media Server network share">
-  <br><sub>Example network share with illustrative folders and videos.</sub>
-</p>
-
 ## IPTV and Xtream
 
 Click **+** to load an M3U/M3U8 playlist, then choose a channel from its sidebar entry.
