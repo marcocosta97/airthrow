@@ -34,8 +34,8 @@ your screen.
 brew install --cask marcocosta97/airthrow/airthrow
 ```
 
-This also installs `yt-dlp`, `deno`, and `ffmpeg`. If macOS blocks the app on
-first launch, choose **System Settings → Privacy & Security → Open Anyway**.
+This also installs `yt-dlp`, `deno`, and `ffmpeg`.
+Releases are signed with Developer ID and notarized by Apple.
 
 ## Requirements
 
@@ -52,7 +52,8 @@ bash scripts/build.sh
 open build/AirThrow.app
 ```
 
-This produces a locally signed app, a ZIP archive, and the `build/athrow` CLI.
+By default, this produces an app with ad hoc signing, a ZIP archive, and the
+`build/athrow` CLI.
 
 ## Play a video
 
