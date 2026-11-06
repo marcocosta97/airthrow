@@ -24,12 +24,28 @@ env:
 jobs:
   build:
     name: Build and verify
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: xcode-27
+    timeout-minutes: 90
+    environment: release
+    env:
+      CODE_SIGN_IDENTITY: ${{ vars.CODE_SIGN_IDENTITY }}
+      NOTARY_KEYCHAIN_PROFILE: AirThrow-release
     steps:
+      - name: Require GitHub-hosted runner
+        env:
+          RELEASE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          if [[ "$RELEASE_RUNNER_ENVIRONMENT" != "github-hosted" ]]; then
+            echo "::error::Release signing requires a GitHub-hosted runner"
+            exit 1
+          fi
+
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Show toolchain
         run: |
@@ -82,9 +98,52 @@ jobs:
       - name: Source registry checks
         run: .build/debug/SourceRegistryChecks
 
+      - name: Release packaging checks
+        run: python3 -m unittest discover -s Tests/CheckRunners
+
+      - name: Install signing identity and notarization credentials
+        env:
+          AIRTHROW_SIGNING_KEYCHAIN: ${{ runner.temp }}/airthrow-signing.keychain-db
+          DEVELOPER_ID_CERTIFICATE_BASE64: ${{ secrets.DEVELOPER_ID_CERTIFICATE_BASE64 }}
+          DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          for name in CODE_SIGN_IDENTITY DEVELOPER_ID_CERTIFICATE_BASE64 DEVELOPER_ID_CERTIFICATE_PASSWORD APPLE_ID APPLE_TEAM_ID APPLE_APP_SPECIFIC_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing release setting: $name"
+              exit 1
+            fi
+          done
+          certificate="$RUNNER_TEMP/airthrow-certificate.p12"
+          trap 'rm -f "$certificate"' EXIT
+          security list-keychains -d user > "$RUNNER_TEMP/airthrow-keychains.txt"
+          printf '%s' "$DEVELOPER_ID_CERTIFICATE_BASE64" | base64 --decode > "$certificate"
+          keychain_password="$(openssl rand -hex 32)"
+          echo "::add-mask::$keychain_password"
+          security create-keychain -p "$keychain_password" "$AIRTHROW_SIGNING_KEYCHAIN"
+          security set-keychain-settings -lut 7200 "$AIRTHROW_SIGNING_KEYCHAIN"
+          security unlock-keychain -p "$keychain_password" "$AIRTHROW_SIGNING_KEYCHAIN"
+          security import "$certificate" -P "$DEVELOPER_ID_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security -f pkcs12 -k "$AIRTHROW_SIGNING_KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$keychain_password" "$AIRTHROW_SIGNING_KEYCHAIN" >/dev/null
+          python3 - "$AIRTHROW_SIGNING_KEYCHAIN" "$RUNNER_TEMP/airthrow-keychains.txt" <<'PY'
+          import pathlib, shlex, subprocess, sys
+          original = shlex.split(pathlib.Path(sys.argv[2]).read_text())
+          subprocess.run(["security", "list-keychains", "-d", "user", "-s", sys.argv[1], *original], check=True)
+          PY
+          xcrun notarytool store-credentials "$NOTARY_KEYCHAIN_PROFILE" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" --keychain "$AIRTHROW_SIGNING_KEYCHAIN"
+
       - name: Package release
         env:
           TAG: ${{ env.RELEASE_TAG }}
+          AIRTHROW_SIGNING_KEYCHAIN: ${{ runner.temp }}/airthrow-signing.keychain-db
         run: bash scripts/package-release.sh "$TAG"
 
       - name: Verify release artifacts
@@ -99,9 +158,44 @@ jobs:
             exit 1
           fi
           unzip -tq "$asset"
+          extracted="$(mktemp -d "$RUNNER_TEMP/airthrow-verify.XXXXXX")"
+          trap 'rm -rf "$extracted"' EXIT
+          ditto -x -k "$asset" "$extracted"
+          codesign --verify --deep --strict "$extracted/AirThrow.app"
+          xcrun stapler validate "$extracted/AirThrow.app"
+          spctl --assess --type execute --verbose=4 "$extracted/AirThrow.app"
+
+      - name: Remove signing assets
+        if: always()
+        env:
+          AIRTHROW_SIGNING_KEYCHAIN: ${{ runner.temp }}/airthrow-signing.keychain-db
+        run: |
+          set -euo pipefail
+          cleanup_exit=0
+          if [[ -f "$AIRTHROW_SIGNING_KEYCHAIN" ]]; then
+            security delete-keychain "$AIRTHROW_SIGNING_KEYCHAIN" || cleanup_exit=$?
+          fi
+          if [[ -f "$RUNNER_TEMP/airthrow-keychains.txt" ]]; then
+            python3 - "$RUNNER_TEMP/airthrow-keychains.txt" <<'PY' || cleanup_exit=$?
+          import pathlib, shlex, subprocess, sys
+          original = shlex.split(pathlib.Path(sys.argv[1]).read_text())
+          subprocess.run(["security", "list-keychains", "-d", "user", "-s", *original], check=True)
+          PY
+          fi
+          rm -f "$RUNNER_TEMP/airthrow-certificate.p12" "$RUNNER_TEMP/airthrow-keychains.txt"
+          exit "$cleanup_exit"
+
+      - name: Upload notarization reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: notarization-reports
+          path: build/notarization*.json
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Upload release artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-artifacts
           path: build/release/AirThrow-*-arm64.zip
@@ -118,7 +212,7 @@ jobs:
       GH_REPO: ${{ github.repository }}
     steps:
       - name: Download release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: release-artifacts
           path: build/release
@@ -135,10 +229,8 @@ jobs:
             cat <<'EOF'
           Apple Silicon (arm64) build for macOS 14 (Sonoma) and later.
 
-          This build is ad-hoc signed and not notarized. On first launch macOS may
-          block it: open System Settings > Privacy & Security and choose
-          "Open Anyway" for AirThrow.app. The bundled `athrow` CLI may require
-          separate approval.
+          Signed with Developer ID, notarized by Apple, and packaged with a
+          stapled notarization ticket.
 
           Homebrew users: no `brew upgrade` until the tap cask is updated after
           this release is published.
