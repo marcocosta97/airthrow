@@ -30,13 +30,6 @@ CASK_TEMPLATE = """cask "airthrow" do
 
   app "AirThrow.app"
   binary "#{appdir}/AirThrow.app/Contents/MacOS/athrow"
-
-  caveats <<~EOS
-    AirThrow is ad-hoc signed and not notarized. On first launch macOS may
-    block it: open System Settings > Privacy & Security and choose
-    "Open Anyway" for AirThrow.app. The bundled athrow command line tool may
-    require separate approval.
-  EOS
 end
 """
 
